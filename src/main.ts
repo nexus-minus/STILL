@@ -1,7 +1,8 @@
 import * as THREE from 'three/webgpu';
-import { createRenderer, type Backend } from './render/renderer.js';
+import { createRenderer, hookWebGPUErrors, type Backend } from './render/renderer.js';
 import { FramePipeline } from './render/pipeline.js';
 import { createPostChain } from './render/passes/post.js';
+import { createAdvancedRenderer, type AdvancedRenderer } from './render/rt.js';
 import { QualityManager, detectTier } from './render/quality.js';
 import { buildTestRoom } from './world/test-room.js';
 import { WorldCollision } from './world/collision.js';
@@ -66,6 +67,32 @@ async function main(): Promise<void> {
   };
   quality.onChange = () => applyQuality();
   applyQuality();
+
+  // ---- raytraced path (WebGPU only; graceful failure is the design) ----------
+  // Construction or WGSL validation errors never take the game down: we keep
+  // the standard post chain as the permanent fallback and say so on screen.
+  setStage('raytracing');
+  let advanced: AdvancedRenderer | undefined;
+  if (backend === 'webgpu') {
+    try {
+      advanced = createAdvancedRenderer(renderer, scene, camera, room.collisionMeshes, room.rtLights);
+      advanced.setLogicalSize(window.innerWidth, window.innerHeight);
+      pipeline.setAdvanced(advanced);
+      let rtErrorShown = false;
+      hookWebGPUErrors(renderer, () => {
+        if (rtErrorShown) return;
+        rtErrorShown = true;
+        pipeline.setAdvanced(undefined);
+        console.error('[rt] raytraced path disabled after a WebGPU error (see message above)');
+        hud.message('raytracing disabled after a GPU error — standard renderer (details in console)', 9000);
+      });
+      console.info('[rt] raytraced lighting armed (medium+ tiers)');
+    } catch (err) {
+      console.warn('[rt] raytraced path unavailable, using standard path', err);
+      hud.message('raytracing unavailable on this device — standard renderer', 6000);
+      advanced = undefined;
+    }
+  }
 
   // ---- gameplay systems ----------------------------------------------------
   setStage('input');
@@ -147,6 +174,7 @@ async function main(): Promise<void> {
     renderer.setSize(w, h, false);
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
+    advanced?.setLogicalSize(w, h);
   };
   window.addEventListener('resize', resize);
   resize();
@@ -329,7 +357,8 @@ async function main(): Promise<void> {
   hud.message(`${backend} · ${quality.tier} — click to enter`, 4000);
   console.info(
     `[liminal] up — backend=${backend} tier=${quality.tier} ` +
-      `navigator.gpu=${'gpu' in navigator} glow=${pipeline.postActive} gl="${glRendererInfo}"\n` +
+      `navigator.gpu=${'gpu' in navigator} glow=${pipeline.postActive} gl="${glRendererInfo}" ` +
+      `rt=${pipeline.hasAdvanced ? 'armed' : 'off'}\n` +
       `[liminal] diagnostics: ${diagnostics.join(' | ')}`,
   );
 

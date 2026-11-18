@@ -54,13 +54,35 @@ path (see `test-room.ts`).
 
 ## Pass status
 
-| pass                | file                            | status           |
-| ------------------- | ------------------------------- | ---------------- |
-| forward + bloom     | `render/passes/post.ts`         | ✅ phase 0       |
-| g-buffer            | `render/passes/gbuffer.ts`      | stub — phase 1   |
-| RT lighting         | `render/passes/rt-lighting.ts`  | stub — phase 1   |
-| volumetrics         | `render/passes/volumetrics.ts`  | stub — phase 1   |
-| chunk streaming     | `world/chunk-streaming.ts`      | stub — phase 2   |
+| pass                       | file                       | status                              |
+| -------------------------- | -------------------------- | ----------------------------------- |
+| forward + bloom            | `render/passes/post.ts`    | ✅ phase 0 (permanent fallback)     |
+| **advanced raytraced path**| `render/rt.ts`             | ✅ phase 1a implemented — G-buffer MRT + compute lighting (traced shadows via NEE + 1 bounce) + composite/bloom; **WebGPU only**, graceful degrade everywhere else |
+| volumetrics                | `render/passes/volumetrics.ts` | stub — phase 1b                 |
+| chunk streaming            | `world/chunk-streaming.ts` | stub — phase 2                      |
+| settings menu              | —                          | next: phase 1c                      |
+
+### Phase 1a architecture (`render/rt.ts`)
+
+- **compute** at `lightingScale` res: primary ray (`ndcToCameraRay` +
+  `bvh_RaycastFirstHit`) → NEE over the emissive light list with
+  `bvh_RaycastAnyHit` shadow rays → one cosine-hemisphere bounce, shaded at
+  its hit → hemisphere ambient → storage texture.
+  Mirrors the official three-mesh-bvh WebGPU path-tracing example exactly.
+- **raster MRT** `{ output, diffuse, emissive }` (3 attachments,
+  `maxColorAttachments: 4` requested) — flat albedo + HDR emissive.
+- **composite**: `diffuse × lighting + emissive` selected against the beauty
+  pass by a uniform flag (tier changes never rebuild the graph), then bloom.
+- **lights**: emissive meshes in Blender (`L_*`) → light list (position,
+  linear color, power), max 12, passed as individual uniform vec4 params.
+- **safety**: construction failure → standard path + on-screen notice;
+  WGSL validation error → `uncapturederror` hook disables the path once;
+  black frames → existing detector → forced-WebGL reload.
+
+Verification split: local tests prove the GL paths + all safety nets (green);
+WebGPU pixel output needs real hardware (this machine's Chromium destroys its
+Dawn instance in 4 ms and Firefox lacks WebGPU) — the boot line reports
+`rt=armed|off`, and any shader error appears on screen and in the console.
 
 ## Perf targets
 

@@ -2,6 +2,7 @@ import type { WebGPURenderer, Scene, PerspectiveCamera } from 'three/webgpu';
 import type { QualitySettings } from './quality.js';
 import type { FrameContext, RenderPass } from './passes/types.js';
 import type { PostChain } from './passes/post.js';
+import type { AdvancedRenderer } from './rt.js';
 
 /**
  * Frame orchestration.
@@ -17,11 +18,21 @@ export class FramePipeline {
   private readonly renderer: WebGPURenderer;
   private readonly passes: RenderPass[] = [];
   private post?: PostChain;
+  private advanced?: AdvancedRenderer;
   /** manual (B key) + automatic (black-frame detector) glow gate */
   private glowEnabled = true;
 
   constructor(renderer: WebGPURenderer) {
     this.renderer = renderer;
+  }
+
+  /** Phase 1: the WebGPU raytraced path. Undefined = standard path. */
+  setAdvanced(advanced: AdvancedRenderer | undefined): void {
+    this.advanced = advanced;
+  }
+
+  get hasAdvanced(): boolean {
+    return this.advanced !== undefined;
   }
 
   get postActive(): boolean {
@@ -56,6 +67,14 @@ export class FramePipeline {
   }): void {
     const { scene, camera, settings, dt, time } = args;
 
+    // phase 1: raytraced path (WebGPU) — dispatch compute, then its own
+    // raster+composite+bloom graph. Falls back automatically when disabled.
+    if (this.advanced && settings.raytracedLighting) {
+      this.advanced.dispatch(camera, settings, Math.min(window.devicePixelRatio, 2));
+      this.advanced.render();
+      return;
+    }
+
     // phase 1 path: full pass graph (none registered yet)
     if (this.passes.length > 0) {
       const ctx: FrameContext = { scene, camera, settings, dt, time };
@@ -87,5 +106,6 @@ export class FramePipeline {
   dispose(): void {
     for (const pass of this.passes) pass.dispose?.();
     this.post?.dispose();
+    this.advanced?.dispose();
   }
 }

@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>webgpu env probe</title>
+    <style>html,body{margin:0;background:#000}canvas{width:100vw;height:100vh;display:block}</style>
+  </head>
+  <body>
+    <canvas id="c"></canvas>
+    <script type="module">
+      // Minimal RAW WebGPU sanity probe (no three.js): draw an animated
+      // triangle, then keep re-drawing so an external harness can sample the
+      // canvas after N seconds to prove the device is still alive.
+      const out = [];
+      const log = (m) => { out.push(m); console.log('[probe] ' + m); };
+      window.__probe = { out, alive: false, stage: 'start' };
+
+      try {
+        if (!navigator.gpu) throw new Error('navigator.gpu absent');
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) throw new Error('requestAdapter -> null');
+        const info = adapter.info ?? {};
+        log(`adapter: ${info.vendor || '?'} / ${info.architecture || info.device || '?'}`);
+        const device = await adapter.requestDevice();
+        window.__probe.stage = 'device';
+        device.lost.then((info2) => {
+          window.__probe.stage = 'LOST: ' + info2.reason;
+          window.__probe.lostMs = Date.now() - window.__start;
+          log('device LOST ' + info2.reason);
+        });
+
+        const canvas = document.getElementById('c');
+        const ctx = canvas.getContext('webgpu');
+        const format = navigator.gpu.getPreferredCanvasFormat();
+        ctx.configure({ device, format, alphaMode: 'opaque' });
+
+        const code = `
+          @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+            var p = array<vec2f, 3>(vec2f(0,0.6), vec2f(-0.6,-0.6), vec2f(0.6,-0.6));
+            return vec4f(p[i], 0, 1);
+          }
+          @fragment fn fs() -> @location(0) vec4f { return vec4f(0.2, 0.9, 0.4, 1); }`;
+        const module = device.createShaderModule({ code });
+        const pipeline = device.createRenderPipeline({
+          layout: 'auto',
+          vertex: { module, entryPoint: 'vs' },
+          fragment: { module, entryPoint: 'fs', targets: [{ format }] },
+          primitive: { topology: 'triangle-list' },
+        });
+
+        canvas.width = 320; canvas.height = 200;
+        let frame = 0;
+        const draw = () => {
+          const encoder = device.createCommandEncoder();
+          const pass = encoder.beginRenderPass({
+            colorAttachments: [{ view: ctx.getCurrentTexture().createView(), clearValue: { r: 0.05, g: 0.05, b: 0.1, a: 1 }, loadOp: 'clear', storeOp: 'store' }],
+          });
+          pass.setPipeline(pipeline);
+          pass.draw(3);
+          pass.end();
+          device.queue.submit([encoder.finish()]);
+          frame++;
+          window.__probe.frame = frame;
+          window.__probe.alive = true;
+          window.__probe.stage = 'drawing#' + frame;
+          requestAnimationFrame(draw);
+        };
+        draw();
+        log('running');
+
+        // presentation-independent validation: after 5 frames, copy the last
+        // presented texture into a buffer and read one pixel back.
+        setTimeout(async () => {
+          try {
+            const tex = ctx.getCurrentTexture();
+            const w = tex.width, h = tex.height;
+            const bytesPerRow = Math.ceil((w * 4) / 256) * 256;
+            const buf = device.createBuffer({ size: bytesPerRow * h, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+            const enc2 = device.createCommandEncoder();
+            enc2.copyTextureToBuffer({ texture: tex }, { buffer: buf, bytesPerRow, rowsPerImage: h }, { width: w, height: h });
+            device.queue.submit([enc2.finish()]);
+            await buf.mapAsync(GPUMapMode.READ);
+            const data = new Uint8Array(buf.getMappedRange());
+            // triangle is green on dark blue bg — sample the center pixel
+            const cx = Math.floor(w / 2), cy = Math.floor(h / 2);
+            const off = cy * bytesPerRow + cx * 4;
+            window.__probe.readback = [data[off], data[off + 1], data[off + 2], data[off + 3]].join(',');
+            window.__probe.readbackMs = Date.now() - window.__start;
+            buf.unmap();
+            buf.destroy();
+            log('readback: ' + window.__probe.readback);
+          } catch (e) {
+            window.__probe.readback = 'ERROR ' + (e && e.message ? e.message : String(e));
+            log('readback ERROR: ' + (e && e.message ? e.message : String(e)));
+          }
+        }, 600);
+      } catch (err) {
+        log('FAILED: ' + (err && err.message ? err.message : String(err)));
+        window.__probe.stage = 'error';
+      }
+      window.__probeLog = out;
+
+      // in-page brightness timeline (CDP-free), 500ms cadence
+      window.__start = Date.now();
+      window.__timeline = [];
+      setInterval(() => {
+        try {
+          const c = document.getElementById('c');
+          const s = document.createElement('canvas');
+          s.width = 16; s.height = 10;
+          const x = s.getContext('2d');
+          x.drawImage(c, 0, 0, 16, 10);
+          const d = x.getImageData(0, 0, 16, 10).data;
+          let max = 0;
+          for (let i = 0; i < d.length; i += 4) max = Math.max(max, d[i], d[i + 1], d[i + 2]);
+          window.__timeline.push({ ms: Date.now() - window.__start, frame: window.__probe.frame, stage: window.__probe.stage, max });
+        } catch (e) {
+          window.__timeline.push({ ms: Date.now() - window.__start, err: String(e) });
+        }
+      }, 500);
+    </script>
+  </body>
+</html>

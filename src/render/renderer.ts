@@ -82,6 +82,9 @@ export async function createRenderer(canvasIn: HTMLCanvasElement): Promise<GameR
         canvas: current,
         antialias: true,
         forceWebGL: attempt.forceWebGL,
+        // G-buffer MRT (phase 1) needs 3 color attachments — request the
+        // spec-guaranteed limit explicitly.
+        requiredLimits: { maxColorAttachments: 4 },
       });
       await withTimeout(renderer.init(), INIT_TIMEOUT_MS, `${attempt.label} renderer.init`);
 
@@ -167,4 +170,26 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 function errText(err: unknown): string {
   if (err instanceof Error) return `${err.name}: ${err.message}`;
   return String(err);
+}
+
+/**
+ * Surface WebGPU validation/shader errors instead of dying silently —
+ * WGSL compile failures land here and get shown to the player, which is our
+ * substitute for local WebGPU testing until someone's hardware runs it.
+ * No-op on the WebGL2 backend.
+ */
+export function hookWebGPUErrors(renderer: WebGPURenderer, onError: (message: string) => void): void {
+  const device = (
+    renderer.backend as {
+      device?: {
+        addEventListener?: (type: string, listener: (event: { error?: { message?: string } }) => void) => void;
+      };
+    }
+  ).device;
+
+  device?.addEventListener?.('uncapturederror', (event) => {
+    const message = event.error?.message ?? 'unknown WebGPU error';
+    console.error('[liminal][webgpu]', message);
+    onError(message);
+  });
 }

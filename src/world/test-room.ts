@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import type { RtLight } from '../render/rt.js';
 
 export interface TestRoom {
   group: THREE.Group;
@@ -6,6 +7,8 @@ export interface TestRoom {
   collisionMeshes: THREE.Mesh[];
   /** feet position: room A, facing the corridor */
   spawn: THREE.Vector3;
+  /** emissive light list for the raytraced path (phase 1) */
+  rtLights: RtLight[];
   /** world positions main.ts uses to wire demo interactables */
   anchor: { interact: THREE.Vector3; feet: THREE.Vector3 };
   loreTrigger: THREE.Vector3;
@@ -27,6 +30,7 @@ const WALL_T = 0.4;
 export function buildTestRoom(): TestRoom {
   const group = new THREE.Group();
   const collision: THREE.Mesh[] = [];
+  const rtLights: RtLight[] = [];
 
   // --- palette: flat, untextured, backrooms -----------------------------
   const carpetMat = new THREE.MeshStandardMaterial({ color: 0xa89a68, roughness: 1 });
@@ -34,9 +38,23 @@ export function buildTestRoom(): TestRoom {
   const ceilMat = new THREE.MeshStandardMaterial({ color: 0xe6e2d4, roughness: 1 });
   const pillarMat = new THREE.MeshStandardMaterial({ color: 0xc4b884, roughness: 0.95 });
   const deskMat = new THREE.MeshStandardMaterial({ color: 0x6b5c43, roughness: 0.9 });
-  // emissive-by-nature: MeshBasicMaterial over white reads as "a light" to bloom
-  const panelMat = new THREE.MeshBasicMaterial({ color: 0xfff3d8 });
-  const beaconMat = new THREE.MeshBasicMaterial({ color: 0x9dffe0 });
+  // Emissive SURFACES (phase 1): MeshStandard emissive -> lands in the G-buffer
+  // emissive channel (traced path) AND reads as a glowing surface on the
+  // fallback path. HDR intensity > 1 so bloom catches it.
+  const panelMat = new THREE.MeshStandardMaterial({
+    color: 0x000000,
+    emissive: 0xfff3d8,
+    emissiveIntensity: 5,
+  });
+  const beaconMat = new THREE.MeshStandardMaterial({
+    color: 0x000000,
+    emissive: 0x9dffe0,
+    emissiveIntensity: 3,
+  });
+  const linear = (hex: number): [number, number, number] => {
+    const c = new THREE.Color(hex).convertSRGBToLinear();
+    return [c.r, c.g, c.b];
+  };
 
   const box = (
     w: number, h: number, d: number,
@@ -94,7 +112,10 @@ export function buildTestRoom(): TestRoom {
   box(0.7, WALL_H, 0.7, 0, WALL_H / 2, -5, pillarMat);
 
   // --- ceiling light panels (visual only, no collision) ------------------
-  const panel = (x: number, z: number) => box(1.4, 0.06, 1.4, x, WALL_H - 0.05, z, panelMat, false);
+  const panel = (x: number, z: number): void => {
+    box(1.4, 0.06, 1.4, x, WALL_H - 0.05, z, panelMat, false);
+    rtLights.push({ position: [x, WALL_H - 0.12, z], color: linear(0xfff3d8), power: 7 });
+  };
   panel(-4, -4); panel(4, -4); panel(-4, 4); panel(4, 4);
   panel(0, 10); panel(0, 14);
   panel(-4, 20); panel(4, 20); panel(-4, 28); panel(4, 28);
@@ -115,6 +136,11 @@ export function buildTestRoom(): TestRoom {
   const beaconLight = new THREE.PointLight(0x7dffdd, 6, 6, 2);
   beaconLight.position.copy(beacon.position);
   group.add(beaconLight);
+  rtLights.push({
+    position: [beacon.position.x, beacon.position.y, beacon.position.z],
+    color: linear(0x9dffe0),
+    power: 3,
+  });
 
   // --- lore desk in room B ------------------------------------------------
   box(1.4, 0.8, 0.7, 0, 0.4, 26, deskMat);
@@ -124,6 +150,7 @@ export function buildTestRoom(): TestRoom {
     group,
     collisionMeshes: collision,
     spawn: new THREE.Vector3(0, 0, 2),
+    rtLights,
     anchor: {
       interact: new THREE.Vector3(-6.4, 1.2, -6.4),
       feet: new THREE.Vector3(-6.4, 0, -6.4),
