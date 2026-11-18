@@ -44,18 +44,25 @@ const INIT_TIMEOUT_MS = 15000;
 export async function createRenderer(canvasIn: HTMLCanvasElement): Promise<GameRenderer> {
   const notes: string[] = [];
 
+  // Compatibility escape hatch: ?forcegl=1 in the URL, or set by the
+  // black-frame auto-recovery (sessionStorage). Skips WebGPU entirely.
+  const forceGL = isWebGLForced();
+  if (forceGL) notes.push('WebGPU skipped — compatibility mode (forced WebGL2)');
+
   // ---- probe 1: is WebGPU genuinely usable? (does not touch our canvas) ----
+  // TIMEOUT MATTERS: a broken WebGPU implementation whose requestAdapter()
+  // never resolves would otherwise hang startup forever, silently.
   let webgpuWorthTrying = false;
   const gpu = (navigator as unknown as { gpu?: { requestAdapter?: () => Promise<unknown> } }).gpu;
-  if (gpu?.requestAdapter) {
+  if (!forceGL && gpu?.requestAdapter) {
     try {
-      const adapter = await gpu.requestAdapter();
+      const adapter = await withTimeout(gpu.requestAdapter(), 3000, 'navigator.gpu.requestAdapter');
       webgpuWorthTrying = adapter !== null && adapter !== undefined;
       notes.push(`navigator.gpu: yes, adapter: ${webgpuWorthTrying ? 'yes' : 'no'}`);
     } catch (err) {
-      notes.push(`navigator.gpu probe threw: ${errText(err)}`);
+      notes.push(`navigator.gpu probe failed: ${errText(err)}`);
     }
-  } else {
+  } else if (!forceGL) {
     notes.push('navigator.gpu: absent');
   }
 
@@ -103,6 +110,16 @@ export async function createRenderer(canvasIn: HTMLCanvasElement): Promise<GameR
 function actualBackend(renderer: WebGPURenderer): Backend {
   const backend = renderer.backend as { isWebGPUBackend?: true };
   return backend.isWebGPUBackend ? 'webgpu' : 'webgl2';
+}
+
+/** True when WebGPU must be skipped (URL param or auto-recovery session flag). */
+export function isWebGLForced(): boolean {
+  try {
+    if (new URLSearchParams(location.search).get('forcegl') === '1') return true;
+    return sessionStorage.getItem('liminal.forcegl') === '1';
+  } catch {
+    return false;
+  }
 }
 
 function probeWebGL2(): boolean {

@@ -13,25 +13,50 @@ import { LoreSystem } from './gameplay/lore.js';
 import { createTransport } from './core/transport.js';
 import { hud } from './ui/hud.js';
 
+// ---- startup watchdog -------------------------------------------------------
+// If startup hangs anywhere (a promise that never settles, a driver call that
+// blocks), the player gets a message naming the stuck stage instead of an
+// eternal black screen with no error. Cleared when main() finishes.
+let startupStage = 'boot';
+const setStage = (stage: string): void => {
+  startupStage = stage;
+};
+
+window.setTimeout(() => {
+  if ((window as unknown as { __liminalReady?: boolean }).__liminalReady) return;
+  const fatalEl = document.getElementById('fatal');
+  if (fatalEl && fatalEl.style.display === 'block') return; // a real error already showed
+  const err = new Error(
+    `startup is stuck at stage "${startupStage}" — no error was raised\n` +
+      `(a graphics call is probably hanging in this browser/driver)`,
+  );
+  console.error('[liminal]', err.message);
+  hud.fatal(err);
+}, 20000);
+
 async function main(): Promise<void> {
   const overlay = document.getElementById('overlay') as HTMLDivElement;
 
   // ---- renderer: WebGPU first, WebGL2 fallback, fresh canvas per attempt ---
+  setStage('renderer');
   const initialCanvas = document.getElementById('game') as HTMLCanvasElement;
   const { renderer, backend, canvas, diagnostics } = await createRenderer(initialCanvas);
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.0;
 
   // ---- scene --------------------------------------------------------------
+  setStage('room');
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0x040404);
   const camera = new THREE.PerspectiveCamera(76, 1, 0.05, 300);
 
   const room = buildTestRoom();
   scene.add(room.group);
+  setStage('collision');
   const collision = WorldCollision.fromMeshes(room.collisionMeshes);
 
   // ---- quality + render pipeline -----------------------------------------
+  setStage('pipeline');
   const quality = new QualityManager(detectTier(backend as Backend));
   const pipeline = new FramePipeline(renderer);
   pipeline.setPost(createPostChain(renderer, scene, camera));
@@ -43,13 +68,16 @@ async function main(): Promise<void> {
   applyQuality();
 
   // ---- gameplay systems ----------------------------------------------------
+  setStage('input');
   const controller = new PlayerController(camera, canvas, collision, room.spawn);
   const interactables = new InteractableSystem();
   const anchors = new AnchorRegistry();
   const map = new MapDevice();
   const lore = new LoreSystem();
   const transport = createTransport();
+  setStage('transport');
   await transport.connect();
+  setStage('hud');
 
   interactables.register({
     id: 'anchor-01',
@@ -149,18 +177,24 @@ async function main(): Promise<void> {
     driverEl.textContent = 'WebGPU device';
   }
 
+  // ---- black-frame sampling (both backends) --------------------------------
+  // GL: direct readPixels of the drawing buffer.
+  // WebGPU: same-frame drawImage into a tiny 2D canvas — WebGPU has no
+  // synchronous readback, and this is the backend whose silent black deaths
+  // (flaky driver stacks) historically went completely unnoticed.
+  // Threshold: max channel < 8/255 counts as black — our near-black background
+  // survives tonemapping at ~2-3, so a scene that "renders" but looks pitch
+  // black still trips the net, while a working frame (geometry at 100+) never does.
   let frameNo = 0;
   let blackChecks = 0;
+  let recoveryScheduled = false;
   const samplePixel = new Uint8Array(4);
-  /**
-   * true = every sampled pixel is essentially black (max channel < 8/255).
-   * The threshold matters: our near-black background survives tonemapping at
-   * ~2-3/255, and a scene that RENDERS but looks pitch black (broken shaders,
-   * driver misbehaving) must count as black — otherwise the safety net would
-   * never fire exactly when it's needed. A working frame always has geometry
-   * at 100+.
-   */
-  const frameIsBlack = (): boolean => {
+  const sample2d = document.createElement('canvas');
+  sample2d.width = 16;
+  sample2d.height = 10;
+  const sample2dCtx = sample2d.getContext('2d', { willReadFrequently: true });
+
+  const frameIsBlackGL = (): boolean => {
     if (!glCtx) return false;
     const w = glCtx.drawingBufferWidth;
     const h = glCtx.drawingBufferHeight;
@@ -177,6 +211,23 @@ async function main(): Promise<void> {
     }
     return true;
   };
+
+  const frameIsBlackWebGPU = (): boolean => {
+    if (!sample2dCtx) return false;
+    try {
+      sample2dCtx.drawImage(canvas, 0, 0, sample2d.width, sample2d.height);
+      const data = sample2dCtx.getImageData(0, 0, sample2d.width, sample2d.height).data;
+      for (let i = 0; i < data.length; i += 4) {
+        if (Math.max(data[i], data[i + 1], data[i + 2]) >= 8) return false;
+      }
+      return true;
+    } catch {
+      return false; // can't read → never claim black (no false recovery loops)
+    }
+  };
+
+  const frameIsBlack = (): boolean => (backend === 'webgl2' ? frameIsBlackGL() : frameIsBlackWebGPU());
+  const canSampleFrames = backend === 'webgl2' ? glCtx !== null : sample2dCtx !== null;
 
   // ---- main loop ---------------------------------------------------------------
   let last = performance.now();
@@ -200,30 +251,48 @@ async function main(): Promise<void> {
       time: time / 1000,
     });
 
-    // ---- black-frame safety net (GL backend only) --------------------------
-    // Sample the drawing buffer every 10 frames, right after drawing.
+    // ---- black-frame safety net --------------------------------------------
+    // Stage 1 (~3s of black): disable the glow chain (its output can't be
+    //   trusted when the frame is dark anyway).
+    // Stage 2 (still black with glow off):
+    //   webgpu backend  → auto-reload into forced-WebGL2 compatibility mode,
+    //                     once per session (sessionStorage) — no reload loops;
+    //   webgl2 backend  → permanent on-screen error + console dump.
     frameNo++;
-    if (glCtx && frameNo > 30 && frameNo % 10 === 0) {
+    if (!recoveryScheduled && canSampleFrames && frameNo > 30 && frameNo % 10 === 0) {
       if (frameIsBlack()) {
         blackChecks++;
-        if (blackChecks === 20 && pipeline.postActive) {
-          pipeline.setGlowEnabled(false);
+        if (blackChecks >= 20) {
           blackChecks = 0;
-          console.error(
-            '[liminal] ~3s of black frames WITH glow post-chain — glow disabled automatically.\n' +
-              'If the scene appears now, your GL driver dislikes the TSL post chain.\n' +
-              'GL renderer: ' + glRendererInfo,
-          );
-          hud.message('glow disabled (black frames) — is the room visible now? (B toggles)', 8000);
-        } else if (blackChecks === 40) {
-          blackChecks = 0;
-          console.error(
-            '[liminal] STILL black WITHOUT glow — GPU driver or browser rendering problem.\n' +
-              'Please paste this console block in the chat. GL renderer: ' +
-              glRendererInfo +
-              '\nAlso check chrome://gpu for "WebGL" being "Hardware accelerated".',
-          );
-          hud.message('still black — GPU/driver problem, paste the console output (F12)', 10000);
+          if (pipeline.postActive) {
+            pipeline.setGlowEnabled(false);
+            console.error(
+              '[liminal] ~3s of black frames WITH glow post-chain — glow disabled automatically.\n' +
+                'If the scene appears now, the glow chain is the problem on this driver.\n' +
+                'GL renderer: ' + glRendererInfo,
+            );
+            hud.message('glow disabled (black frames) — is the room visible now? (B toggles)', 8000);
+          } else if (backend === 'webgpu') {
+            recoveryScheduled = true;
+            try {
+              sessionStorage.setItem('liminal.forcegl', '1');
+            } catch {
+              /* private browsing — reload with ?forcegl=1 won't persist either */
+            }
+            console.error(
+              '[liminal] WebGPU renders black frames on this device — reloading into compatibility mode (WebGL2).',
+            );
+            hud.message("WebGPU isn't working on this device — switching to compatibility renderer…", 3000);
+            window.setTimeout(() => location.reload(), 2000);
+          } else {
+            console.error(
+              '[liminal] STILL black WITHOUT glow — GPU driver or browser rendering problem.\n' +
+                'Please paste this console block in the chat. GL renderer: ' +
+                glRendererInfo +
+                '\nAlso check about:support (Firefox) or chrome://gpu (Chromium) for the WebGL renderer line.',
+            );
+            hud.message('still black — GPU/driver problem, paste the console output (F12)', 10000);
+          }
         }
       } else {
         blackChecks = 0;
@@ -266,6 +335,7 @@ async function main(): Promise<void> {
     collision,
     THREE,
   };
+  (window as unknown as Record<string, unknown>).__liminalReady = true;
 }
 
 main().catch((err) => {
