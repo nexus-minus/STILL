@@ -14,6 +14,7 @@ import { LoreSystem } from './gameplay/lore.js';
 import { createTransport } from './core/transport.js';
 import { hud } from './ui/hud.js';
 import { loadSettings, initSettings } from './ui/settings.js';
+import { requestPointerLockSafe } from './ui/pointer-lock.js';
 import { Bindings, loadBinds } from './gameplay/bindings.js';
 
 // ---- startup watchdog -------------------------------------------------------
@@ -84,8 +85,17 @@ async function main(): Promise<void> {
   let advanced: AdvancedRenderer | undefined;
   if (backend === 'webgpu') {
     try {
+      // fresh world matrices BEFORE the GPU BVH bakes transforms — stale
+      // identity matrices would park all geometry at local origins
+      scene.updateMatrixWorld(true);
+      camera.updateMatrixWorld(true);
       advanced = createAdvancedRenderer(renderer, scene, camera, room.collisionMeshes, room.rtLights);
       advanced.setLogicalSize(window.innerWidth, window.innerHeight);
+      const rtDebug = Number(new URLSearchParams(location.search).get('rtdebug') ?? 0);
+      if (rtDebug > 0) {
+        advanced.setDebugMode(rtDebug);
+        console.info(`[rt] debug mode ${rtDebug} (1=uv gradient, 2=red=miss/green=hit)`);
+      }
       pipeline.setAdvanced(advanced);
       let rtErrorShown = false;
       hookWebGPUErrors(renderer, () => {
@@ -168,7 +178,15 @@ async function main(): Promise<void> {
     bindings,
     controller,
     hasRaytracing: backend === 'webgpu',
-    onResume: () => void canvas.requestPointerLock(),
+    onResume: () => {
+      // Chrome forbids immediate relock after an Esc-exit (SecurityError) —
+      // show the click-to-enter overlay as the guaranteed path, and retry
+      // silently once the cooldown passes (success hides it again).
+      overlay.classList.remove('hidden');
+      window.setTimeout(() => {
+        if (document.pointerLockElement !== canvas) requestPointerLockSafe(canvas);
+      }, 1400);
+    },
   });
 
   document.addEventListener('keydown', (e) => {
@@ -208,7 +226,7 @@ async function main(): Promise<void> {
     }
   });
 
-  overlay.addEventListener('click', () => void canvas.requestPointerLock());
+  overlay.addEventListener('click', () => requestPointerLockSafe(canvas));
   canvas.addEventListener('contextmenu', (e) => e.preventDefault()); // bindable right mouse
   let everLocked = false;
   document.addEventListener('pointerlockchange', () => {
@@ -327,12 +345,29 @@ async function main(): Promise<void> {
   let fpsFrames = 0;
   let fpsTimer = 0;
   let mapTimer = 0;
+  let selfcheckDone = !pipeline.hasAdvanced; // only armed when RT exists
 
   renderer.setAnimationLoop((time: number) => {
     const dt = Math.min((time - last) / 1000, 0.05);
     last = time;
 
     controller.update(dt);
+
+    // one-shot RT selfcheck: the CPU replica of the GPU's center-pixel ray.
+    // "HIT" = camera math + BVH are sane on the CPU side; a GPU-side black
+    // frame then isolates the problem to the compute/uniform/texture path.
+    if (!selfcheckDone) {
+      selfcheckDone = true;
+      camera.updateMatrixWorld();
+      const centerTarget = new THREE.Vector3(0, 0, 0.5).unproject(camera);
+      const centerDir = centerTarget.sub(camera.position).normalize();
+      const probeHit = collision.raycast(camera.position.clone(), centerDir, 300);
+      console.info(
+        `[rt] selfcheck: center ray ${probeHit ? `HIT at ${probeHit.distance.toFixed(2)}m` : 'MISS'} ` +
+          `— camera [${camera.position.toArray().map((v) => v.toFixed(2)).join(', ')}]`,
+      );
+    }
+
     map.markVisited(controller.feet.x, controller.feet.z);
     lore.check(controller.feet);
 

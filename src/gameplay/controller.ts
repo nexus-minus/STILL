@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import type { WorldCollision } from '../world/collision.js';
 import type { Action, Bindings } from './bindings.js';
+import { requestPointerLockSafe } from '../ui/pointer-lock.js';
 
 const UP = new THREE.Vector3(0, 1, 0);
 const DEG = Math.PI / 180;
@@ -93,7 +94,12 @@ export class PlayerController {
 
     // mouse buttons as bindable inputs ('Mouse1' = right button etc.)
     canvas.addEventListener('mousedown', (e) => {
-      if (this.locked) this.keys.add(`Mouse${e.button}`);
+      if (!this.locked) return;
+      const code = `Mouse${e.button}`;
+      this.keys.add(code);
+      // parity with keyboard: bound interact/jump must fire from mouse too
+      if (this.binds.matches('interact', code)) this.onInteract?.();
+      if (this.binds.matches('jump', code)) this.jumpQueued = true;
     });
     window.addEventListener('mouseup', (e) => this.keys.delete(`Mouse${e.button}`));
 
@@ -116,7 +122,7 @@ export class PlayerController {
       // interact fires ONLY via the bound action (default E) — a plain click
       // must not trigger it, otherwise bound mouse buttons and old keys both
       // seem to "interact" at once.
-      if (!this.locked) void canvas.requestPointerLock();
+      if (!this.locked) requestPointerLockSafe(canvas);
     });
   }
 

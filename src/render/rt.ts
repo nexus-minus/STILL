@@ -40,6 +40,8 @@ export interface AdvancedRenderer {
   render(): void;
   /** logical canvas size in CSS pixels */
   setLogicalSize(width: number, height: number): void;
+  /** 0 = normal, 1 = uv-gradient (pipeline alive?), 2 = red=miss / green=hit */
+  setDebugMode(mode: number): void;
   dispose(): void;
 }
 
@@ -102,6 +104,7 @@ export function createAdvancedRenderer(
   const frameIndex = uniform(0);
   const lightCount = uniform(Math.min(lights.length, MAX_LIGHTS));
   const bounceCount = uniform(0);
+  const debugMode = uniform(0);
   const workgroupSize = uniform(new THREE.Vector3(WORKGROUP, WORKGROUP, 1));
 
   const lightPos = Array.from({ length: MAX_LIGHTS }, (_, i) => {
@@ -157,6 +160,7 @@ export function createAdvancedRenderer(
       frameIndex: f32,
       lightCount: f32,
       bounceCount: f32,
+      debugMode: f32,
       workgroupSize: vec3u,
       ${lightParams},
       workgroupId: vec3u,
@@ -168,11 +172,28 @@ export function createAdvancedRenderer(
       if (indexUV.x >= dimensions.x || indexUV.y >= dimensions.y) { return; }
 
       let uv = (vec2f(indexUV) + vec2f(0.5)) / vec2f(dimensions);
+
+      // debug modes (?rtdebug=1|2) — written before any ray math so each
+      // stage of the pipeline can be isolated with one screenshot
+      if (debugMode > 0.5 && debugMode < 1.5) {
+        textureStore(lightingTex, indexUV, vec4f(uv, 0.3, 1.0));
+        return;
+      }
+
       let ndc = uv * 2.0 - 1.0;
       var ray = ndcToCameraRay(ndc, invViewProj);
 
       var hit: IntersectionResult;
       bvh_RaycastFirstHit(ray, &hit);
+
+      if (debugMode > 1.5) {
+        textureStore(
+          lightingTex,
+          indexUV,
+          select(vec4f(1.0, 0.0, 0.0, 1.0), vec4f(0.0, 1.0, 0.0, 1.0), hit.didHit),
+        );
+        return;
+      }
 
       if (!hit.didHit) {
         textureStore(lightingTex, indexUV, vec4f(0.0, 0.0, 0.0, 1.0));
@@ -231,6 +252,7 @@ export function createAdvancedRenderer(
     frameIndex,
     lightCount,
     bounceCount,
+    debugMode,
     workgroupSize,
     workgroupId,
     localId,
@@ -304,6 +326,9 @@ export function createAdvancedRenderer(
     setLogicalSize(width: number, height: number): void {
       logicalW = width;
       logicalH = height;
+    },
+    setDebugMode(mode: number): void {
+      debugMode.value = mode;
     },
     dispose(): void {
       postPipeline.dispose();
