@@ -178,10 +178,18 @@ export class PlayerController {
 
     velocity.y = Math.max(velocity.y - opts.gravity * dt, -55);
 
-    // ---- integrate + resolve ---------------------------------------------
-    this.position.addScaledVector(velocity, dt);
-    const res = this.collision.resolveCapsule(this.position, opts.height, opts.radius);
-    this.grounded = res.grounded;
+    // ---- integrate + resolve (substepped: hitches make big single jumps that
+    // could tunnel the capsule straight through floors) ----------------------
+    const maxDisp = Math.max(Math.abs(velocity.x), Math.abs(velocity.y), Math.abs(velocity.z)) * dt;
+    const substeps = Math.max(1, Math.min(6, Math.ceil(maxDisp / (opts.radius * 0.5))));
+    const stepDt = dt / substeps;
+    let stepGrounded = false;
+    for (let step = 0; step < substeps; step++) {
+      this.position.addScaledVector(velocity, stepDt);
+      const res = this.collision.resolveCapsule(this.position, opts.height, opts.radius);
+      stepGrounded = res.grounded;
+    }
+    this.grounded = stepGrounded;
     if (this.grounded && velocity.y < 0) velocity.y = 0;
 
     // ---- fell out of the world? ------------------------------------------

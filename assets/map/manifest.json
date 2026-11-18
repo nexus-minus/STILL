@@ -2,86 +2,39 @@
   "collections": {
     "objects": {
       "file": "objects.glb",
-      "count": 3,
+      "count": 5,
       "bounds": [
         [
-          -5.0,
-          -5.0,
-          0.0
+          -13.447529792785645,
+          -13.447529792785645,
+          -9.223642349243164
         ],
         [
-          5.0,
-          5.0,
-          3.000001907348633
+          34.066131591796875,
+          74.80451202392578,
+          6.977813720703125
         ]
       ]
     },
     "checkpoints": {
       "file": null,
-      "count": 1,
+      "count": 0,
       "bounds": null
     },
     "animated": {
-      "file": "animated.glb",
-      "count": 1,
-      "bounds": [
-        [
-          2.700000047683716,
-          -0.30000001192092896,
-          0.699999988079071
-        ],
-        [
-          3.299999952316284,
-          0.30000001192092896,
-          1.2999999523162842
-        ]
-      ]
+      "file": null,
+      "count": 0,
+      "bounds": null
     },
     "playermodels": {
-      "file": "playermodels.glb",
-      "count": 1,
-      "bounds": [
-        [
-          19.700000762939453,
-          19.700000762939453,
-          0.0
-        ],
-        [
-          20.299999237060547,
-          20.299999237060547,
-          1.7000000476837158
-        ]
-      ]
+      "file": null,
+      "count": 0,
+      "bounds": null
     }
   },
-  "checkpoints": [
-    {
-      "name": "CP_room_a",
-      "position": [
-        -3.0,
-        -3.0,
-        1.0
-      ],
-      "label": "Beacon \u00b7 Room A",
-      "kind": "respawn",
-      "radius": 1.2
-    }
-  ],
-  "sound": [
-    {
-      "name": "SFX_hum",
-      "position": [
-        0.0,
-        1.5,
-        2.5
-      ],
-      "file": "hum_loop.ogg",
-      "loop": true,
-      "radius": 14.0,
-      "volume": 1.0
-    }
-  ],
+  "checkpoints": [],
+  "sound": [],
   "skipped": [
-    "misc_ideas"
+    "reference"
   ]
 }

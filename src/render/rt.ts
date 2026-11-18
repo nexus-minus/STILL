@@ -22,6 +22,13 @@ import type { QualitySettings } from './quality.js';
 const MAX_LIGHTS = 12;
 const WORKGROUP = 8;
 
+function lightDist2(light: RtLight, cam: THREE.PerspectiveCamera): number {
+  const dx = light.position[0] - cam.position.x;
+  const dy = light.position[1] - cam.position.y;
+  const dz = light.position[2] - cam.position.z;
+  return dx * dx + dy * dy + dz * dz;
+}
+
 export interface RtLight {
   /** world position (center of the emissive surface) */
   position: [number, number, number];
@@ -117,6 +124,13 @@ export function createAdvancedRenderer(
     const l = lights[i];
     return uniform(new THREE.Vector4(l ? l.color[0] : 0, l ? l.color[1] : 0, l ? l.color[2] : 0, 0));
   });
+
+  // full emissive-light pool (a real map easily exceeds the 12 uniform slots) —
+  // the nearest 12 to the camera are uploaded each frame; fixed slots keep the
+  // WGSL bindings stable.
+  const lightPool = lights;
+  const nearestIdx = lights.map((_, i) => i);
+  const staticPool = lights.length <= MAX_LIGHTS;
 
   // ---- WGSL ------------------------------------------------------------------------
   const lightParams = Array.from({ length: MAX_LIGHTS }, (_, i) => `l${i}: vec4f, c${i}: vec4f`).join(',\n      ');
@@ -306,6 +320,20 @@ export function createAdvancedRenderer(
         return;
       }
       resizeTex(settings.lightingScale * pixelRatio);
+
+      // nearest-12 light upload when the pool outgrows the uniform slots
+      if (!staticPool) {
+        nearestIdx.sort(
+          (a, b) => lightDist2(lightPool[a], cam) - lightDist2(lightPool[b], cam),
+        );
+        for (let i = 0; i < MAX_LIGHTS; i++) {
+          const light = lightPool[nearestIdx[i]];
+          lightPos[i].value.set(light.position[0], light.position[1], light.position[2], light.power);
+          lightCol[i].value.set(light.color[0], light.color[1], light.color[2], 0);
+        }
+      }
+      lightCount.value = Math.min(lightPool.length, MAX_LIGHTS);
+
       frame++;
       invViewProj.value.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse).invert();
       frameIndex.value = frame % 1024;

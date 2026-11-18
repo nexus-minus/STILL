@@ -4,7 +4,7 @@ import { FramePipeline } from './render/pipeline.js';
 import { createPostChain } from './render/passes/post.js';
 import { createAdvancedRenderer, type AdvancedRenderer } from './render/rt.js';
 import { QualityManager, detectTier } from './render/quality.js';
-import { buildTestRoom } from './world/test-room.js';
+import { loadWorld } from './world/map-loader.js';
 import { WorldCollision } from './world/collision.js';
 import { PlayerController } from './gameplay/controller.js';
 import { InteractableSystem } from './gameplay/interactable.js';
@@ -56,10 +56,50 @@ async function main(): Promise<void> {
   scene.background = new THREE.Color(0x040404);
   const camera = new THREE.PerspectiveCamera(76, 1, 0.05, 300);
 
-  const room = buildTestRoom();
-  scene.add(room.group);
+  // ---- world: Blender export (manifest+objects.glb) or test-room fallback --
+  setStage('map');
+  const world = await loadWorld();
+  scene.add(world.group);
   setStage('collision');
-  const collision = WorldCollision.fromMeshes(room.collisionMeshes);
+  const collision = WorldCollision.fromMeshes(world.collisionMeshes);
+
+  // ---- spawn probe: raycast DOWN from above candidate points until we find
+  // the floor. Geometry reality beats heuristics (bounds.min.y can sit below
+  // the actual walkable surface).
+  let spawnFeet = world.spawn;
+  if (world.source === 'map') {
+    const min = world.bounds.min;
+    const max = world.bounds.max;
+    const down = new THREE.Vector3(0, -1, 0);
+    const size = world.bounds.getSize(new THREE.Vector3());
+    const candidates: Array<[number, number]> = [
+      [0.5, 0.5],
+      [0.3, 0.3],
+      [0.7, 0.7],
+      [0.3, 0.7],
+      [0.7, 0.3],
+      [0.15, 0.5],
+      [0.85, 0.5],
+    ];
+    let found = false;
+    for (const [fx, fz] of candidates) {
+      const from = new THREE.Vector3(
+        min.x + (max.x - min.x) * fx,
+        max.y + 2,
+        min.z + (max.z - min.z) * fz,
+      );
+      const hit = collision.raycast(from, down, size.y + 20);
+      if (hit) {
+        spawnFeet = hit.point.clone().addScaledVector(down, -0.05);
+        found = true;
+        console.info(
+          `[world] spawn probe hit floor at [${spawnFeet.toArray().map((v) => v.toFixed(1)).join(', ')}]`,
+        );
+        break;
+      }
+    }
+    if (!found) console.warn('[world] spawn probe found NO floor — add a kind="spawn" checkpoint');
+  }
 
   // ---- quality + render pipeline -----------------------------------------
   setStage('pipeline');
@@ -81,6 +121,7 @@ async function main(): Promise<void> {
   // ---- raytraced path (WebGPU only; graceful failure is the design) ----------
   // Construction or WGSL validation errors never take the game down: we keep
   // the standard post chain as the permanent fallback and say so on screen.
+  const rtDebug = Number(new URLSearchParams(location.search).get('rtdebug') ?? 0);
   setStage('raytracing');
   let advanced: AdvancedRenderer | undefined;
   if (backend === 'webgpu') {
@@ -89,12 +130,14 @@ async function main(): Promise<void> {
       // identity matrices would park all geometry at local origins
       scene.updateMatrixWorld(true);
       camera.updateMatrixWorld(true);
-      advanced = createAdvancedRenderer(renderer, scene, camera, room.collisionMeshes, room.rtLights);
+      advanced = createAdvancedRenderer(renderer, scene, camera, world.collisionMeshes, world.rtLights);
       advanced.setLogicalSize(window.innerWidth, window.innerHeight);
-      const rtDebug = Number(new URLSearchParams(location.search).get('rtdebug') ?? 0);
       if (rtDebug > 0) {
         advanced.setDebugMode(rtDebug);
-        console.info(`[rt] debug mode ${rtDebug} (1=uv gradient, 2=red=miss/green=hit)`);
+        console.info(
+          `[rt] debug mode ${rtDebug} (1=uv gradient, 2=red=miss/green=hit) — ` +
+            'black-frame detector paused so the run survives',
+        );
       }
       pipeline.setAdvanced(advanced);
       let rtErrorShown = false;
@@ -116,7 +159,7 @@ async function main(): Promise<void> {
   // ---- gameplay systems ----------------------------------------------------
   setStage('input');
   const bindings = new Bindings(loadBinds());
-  const controller = new PlayerController(camera, canvas, collision, room.spawn, bindings);
+  const controller = new PlayerController(camera, canvas, collision, spawnFeet, bindings);
   controller.sensitivityMultiplier = persisted.sensitivity ?? 1;
   controller.invertY = persisted.invertY ?? false;
   const interactables = new InteractableSystem();
@@ -128,28 +171,49 @@ async function main(): Promise<void> {
   await transport.connect();
   setStage('hud');
 
-  interactables.register({
-    id: 'anchor-01',
-    label: 'beacon (room A)',
-    position: room.anchor.interact,
-    radius: 0.9,
-    onInteract: () => {
-      const count = anchors.list().length;
-      anchors.activate({
-        id: 'anchor-01',
-        label: 'Beacon · Room A',
-        position: { x: room.anchor.feet.x, y: room.anchor.feet.y, z: room.anchor.feet.z },
+  // ---- interactables: demo wiring (test room) or Blender checkpoints --------
+  if (world.source === 'test' && world.demo) {
+    const demo = world.demo;
+    interactables.register({
+      id: 'anchor-01',
+      label: 'beacon (room A)',
+      position: demo.anchorInteract,
+      radius: 0.9,
+      onInteract: () => {
+        const count = anchors.list().length;
+        anchors.activate({
+          id: 'anchor-01',
+          label: 'Beacon · Room A',
+          position: { x: demo.anchorFeet.x, y: demo.anchorFeet.y, z: demo.anchorFeet.z },
+        });
+        hud.message(`beacon registered — respawn point set (${count + 1} total)`);
+      },
+    });
+    lore.addTrigger({
+      id: 'RULE-001',
+      position: demo.loreTrigger,
+      radius: 1.7,
+      text: 'RULE 001 — if something calls your name, do not answer.',
+    });
+  } else {
+    for (const cp of world.checkpoints) {
+      if (cp.kind === 'spawn') continue; // spawn marker, not clickable
+      interactables.register({
+        id: cp.name,
+        label: cp.label,
+        position: cp.position,
+        radius: cp.radius,
+        onInteract: () => {
+          anchors.activate({
+            id: cp.name,
+            label: cp.label,
+            position: { x: cp.position.x, y: cp.position.y, z: cp.position.z },
+          });
+          hud.message(`checkpoint — ${cp.label} (client-side)`, 2500);
+        },
       });
-      hud.message(`beacon registered — respawn point set (${count + 1} total)`);
-    },
-  });
-
-  lore.addTrigger({
-    id: 'RULE-001',
-    position: room.loreTrigger,
-    radius: 1.7,
-    text: 'RULE 001 — if something calls your name, do not answer.',
-  });
+    }
+  }
   lore.onFound = (trigger) => {
     hud.message(`${trigger.id} · ${trigger.text}`, 8000);
     void trigger;
@@ -387,7 +451,7 @@ async function main(): Promise<void> {
     //                     once per session (sessionStorage) — no reload loops;
     //   webgl2 backend  → permanent on-screen error + console dump.
     frameNo++;
-    if (!recoveryScheduled && canSampleFrames && frameNo > 30 && frameNo % 10 === 0) {
+    if (rtDebug === 0 && !recoveryScheduled && canSampleFrames && frameNo > 30 && frameNo % 10 === 0) {
       if (frameIsBlack()) {
         blackChecks++;
         if (blackChecks >= 20) {

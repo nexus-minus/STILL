@@ -51,8 +51,12 @@ Empties or meshes, with custom properties:
 | property | meaning | default |
 | -------- | ------- | ------- |
 | `label`  | text shown to the player | object name |
-| `kind`   | `respawn` (fast-travel point) or `interact` | `respawn` |
+| `kind`   | `respawn` (fast-travel point), `interact`, or **`spawn` (the fixed start position)** | `respawn` |
 | `radius` | interaction sphere radius (m) | 1.2 |
+
+**Always author a `kind = "spawn"` checkpoint** at your intended start point —
+without it the game raycasts down from above the bounds centre and picks
+*some* floor (on multi-level maps that may be a roof or a ledge).
 
 **Checkpoint objects carry two materials:**
 
