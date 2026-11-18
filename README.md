@@ -16,7 +16,8 @@ npm run build      # typecheck + production build (deploy this to GitHub Pages)
 ```
 
 **Controls:** click to lock pointer · WASD move · shift run · space jump ·
-click/E interact · R respawn at last beacon · T cycle quality tier · M map.
+click/E interact · R respawn at last beacon · T cycle quality tier · M map ·
+B toggle glow (bloom).
 
 ## Layout
 

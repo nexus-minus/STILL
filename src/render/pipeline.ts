@@ -17,9 +17,24 @@ export class FramePipeline {
   private readonly renderer: WebGPURenderer;
   private readonly passes: RenderPass[] = [];
   private post?: PostChain;
+  /** manual (B key) + automatic (black-frame detector) glow gate */
+  private glowEnabled = true;
 
   constructor(renderer: WebGPURenderer) {
     this.renderer = renderer;
+  }
+
+  get postActive(): boolean {
+    return this.glowEnabled && (this.post?.ok ?? false);
+  }
+
+  setGlowEnabled(enabled: boolean): void {
+    this.glowEnabled = enabled;
+  }
+
+  toggleGlow(): boolean {
+    this.glowEnabled = !this.glowEnabled;
+    return this.glowEnabled;
   }
 
   /** phase 1: addPass(new GBufferPass(...)) etc. */
@@ -62,7 +77,7 @@ export class FramePipeline {
     }
 
     // phase 0 path: forward render, optionally through the bloom chain
-    if (settings.bloom && this.post?.ok) {
+    if (settings.bloom && this.postActive && this.post?.ok) {
       this.post.render();
       return;
     }

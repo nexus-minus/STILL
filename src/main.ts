@@ -85,8 +85,7 @@ async function main(): Promise<void> {
   };
 
   // ---- HUD / hotkeys --------------------------------------------------------
-  const statsLine = (fps: number): string =>
-    `${backend} · ${quality.tier} · ${fps} fps\n${map.exploredCells} cells explored`;
+  const statsLine = (fps: number): string => `${backend} · ${quality.tier} · ${fps} fps`;
 
   document.addEventListener('keydown', (e) => {
     if (e.code === 'KeyT') {
@@ -94,6 +93,11 @@ async function main(): Promise<void> {
       hud.message(`quality — ${quality.tier}`, 1500);
     }
     if (e.code === 'KeyM') hud.toggleMap();
+    if (e.code === 'KeyB') {
+      const on = pipeline.toggleGlow();
+      hud.message(`glow ${on ? 'on' : 'off'}`, 1500);
+      console.info(`[liminal] glow toggled ${on ? 'on' : 'off'} by user`);
+    }
     if (e.code === 'KeyR') {
       const latest = anchors.list().sort((a, b) => b.discoveredAt - a.discoveredAt)[0];
       if (latest) {
@@ -119,6 +123,50 @@ async function main(): Promise<void> {
   window.addEventListener('resize', resize);
   resize();
 
+  // ---- graphics diagnostics + safety net ------------------------------------
+  // On the GL backend: identify the actual driver, catch context loss, and
+  // auto-disable the glow chain if it produces black frames (some Linux GL
+  // stacks misbehave with the TSL post pipeline — better to degrade than to
+  // hand the player a black screen).
+  let glRendererInfo = 'n/a';
+  let glCtx: WebGL2RenderingContext | null = null;
+  if (backend === 'webgl2') {
+    glCtx = canvas.getContext('webgl2');
+    const dbg = glCtx?.getExtension('WEBGL_debug_renderer_info');
+    glRendererInfo = dbg
+      ? String(glCtx?.getParameter(dbg.UNMASKED_RENDERER_WEBGL))
+      : String(glCtx?.getParameter(glCtx.RENDERER));
+    console.info('[liminal] GL renderer:', glRendererInfo);
+
+    canvas.addEventListener('webglcontextlost', (e) => {
+      e.preventDefault();
+      console.error('[liminal] WebGL context LOST — display driver problem. GL:', glRendererInfo);
+      hud.message('graphics context lost — reload the page (details in console)', 10000);
+    });
+  }
+
+  let frameNo = 0;
+  let blackChecks = 0;
+  const samplePixel = new Uint8Array(4);
+  /** true = every sampled pixel is pure black (nothing reached the screen) */
+  const frameIsBlack = (): boolean => {
+    if (!glCtx) return false;
+    const w = glCtx.drawingBufferWidth;
+    const h = glCtx.drawingBufferHeight;
+    const spots = [
+      [0.5, 0.5],
+      [0.25, 0.25],
+      [0.75, 0.25],
+      [0.25, 0.75],
+      [0.75, 0.75],
+    ] as const;
+    for (const [fx, fy] of spots) {
+      glCtx.readPixels(Math.floor(w * fx), Math.floor(h * fy), 1, 1, glCtx.RGBA, glCtx.UNSIGNED_BYTE, samplePixel);
+      if (samplePixel[0] || samplePixel[1] || samplePixel[2]) return false;
+    }
+    return true;
+  };
+
   // ---- main loop ---------------------------------------------------------------
   let last = performance.now();
   let fpsFrames = 0;
@@ -141,6 +189,36 @@ async function main(): Promise<void> {
       time: time / 1000,
     });
 
+    // ---- black-frame safety net (GL backend only) --------------------------
+    // Sample the drawing buffer every 10 frames, right after drawing.
+    frameNo++;
+    if (glCtx && frameNo > 30 && frameNo % 10 === 0) {
+      if (frameIsBlack()) {
+        blackChecks++;
+        if (blackChecks === 20 && pipeline.postActive) {
+          pipeline.setGlowEnabled(false);
+          blackChecks = 0;
+          console.error(
+            '[liminal] ~3s of black frames WITH glow post-chain — glow disabled automatically.\n' +
+              'If the scene appears now, your GL driver dislikes the TSL post chain.\n' +
+              'GL renderer: ' + glRendererInfo,
+          );
+          hud.message('glow disabled (black frames) — is the room visible now? (B toggles)', 8000);
+        } else if (blackChecks === 40) {
+          blackChecks = 0;
+          console.error(
+            '[liminal] STILL black WITHOUT glow — GPU driver or browser rendering problem.\n' +
+              'Please paste this console block in the chat. GL renderer: ' +
+              glRendererInfo +
+              '\nAlso check chrome://gpu for "WebGL" being "Hardware accelerated".',
+          );
+          hud.message('still black — GPU/driver problem, paste the console output (F12)', 10000);
+        }
+      } else {
+        blackChecks = 0;
+      }
+    }
+
     // stats twice a second
     fpsFrames++;
     fpsTimer += dt;
@@ -160,7 +238,10 @@ async function main(): Promise<void> {
   });
 
   hud.message(`${backend} · ${quality.tier} — click to enter`, 4000);
-  console.info(`[liminal] up — backend=${backend} tier=${quality.tier}`);
+  console.info(
+    `[liminal] up — backend=${backend} tier=${quality.tier} ` +
+      `navigator.gpu=${'gpu' in navigator} glow=${pipeline.postActive} gl="${glRendererInfo}"`,
+  );
 
   // debug handle for scripts/smoke.mjs (and the console, feel free)
   (window as unknown as Record<string, unknown>).__liminal = {
