@@ -112,6 +112,35 @@ try {
   const sens = await page.evaluate(() => window.__liminal.controller.sensitivityMultiplier);
   check(`sensitivity applied (got ${sens})`, sens === 0.5);
 
+  // Esc during capture = unbind (bind to nothing)
+  await page.evaluate(() => {
+    document.querySelectorAll('#set-binds .bind-row')[0].querySelector('button').click();
+  });
+  await sleep(150);
+  await page.keyboard.press('Escape');
+  await sleep(150);
+  const unbound = await page.evaluate(() => ({
+    bind: window.__liminal.bindings.get('forward'),
+    label: document.querySelectorAll('#set-binds .bind-row')[0].querySelector('button').textContent,
+  }));
+  check(`Esc unbinds forward (got "${unbound.bind}")`, unbound.bind === '');
+  check(`label shows none (got "${unbound.label}")`, String(unbound.label).includes('none'));
+
+  // mouse buttons are bindable
+  await page.evaluate(() => {
+    document.querySelectorAll('#set-binds .bind-row')[1].querySelector('button').click();
+  });
+  await sleep(150);
+  await page.mouse.down({ button: 'right' });
+  await page.mouse.up({ button: 'right' });
+  await sleep(200);
+  const mouseBind = await page.evaluate(() => ({
+    bind: window.__liminal.bindings.get('back'),
+    label: document.querySelectorAll('#set-binds .bind-row')[1].querySelector('button').textContent,
+  }));
+  check(`right mouse binds (got ${mouseBind.bind})`, mouseBind.bind === 'Mouse2');
+  check(`label shows Right Mouse (got ${mouseBind.label})`, mouseBind.label === 'Right Mouse');
+
   // close
   const closed = await page.evaluate(() => {
     window.__liminal.settings.close();

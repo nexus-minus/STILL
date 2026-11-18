@@ -44,7 +44,9 @@ async function main(): Promise<void> {
   setStage('renderer');
   const initialCanvas = document.getElementById('game') as HTMLCanvasElement;
   const { renderer, backend, canvas, diagnostics } = await createRenderer(initialCanvas);
-  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  // Match Blender's default view transform so the game looks like the viewport
+  // (Blender 4/5 defaults to AgX).
+  renderer.toneMapping = THREE.AgXToneMapping;
   renderer.toneMappingExposure = 1.0;
 
   // ---- scene --------------------------------------------------------------
@@ -182,6 +184,7 @@ async function main(): Promise<void> {
   });
 
   overlay.addEventListener('click', () => void canvas.requestPointerLock());
+  canvas.addEventListener('contextmenu', (e) => e.preventDefault()); // bindable right mouse
   let everLocked = false;
   document.addEventListener('pointerlockchange', () => {
     const locked = document.pointerLockElement === canvas;

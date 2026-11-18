@@ -1,12 +1,10 @@
-# Map chunks go here
+# Map assets — served as the site root
 
-Served as the site root by Vite (`publicDir: 'assets'`):
+Produce these with `tools/export_map.sh your-map.blend`
+(conventions: `docs/blender-conventions.md`), or hand the `.blend` over —
+Blender 5.2 runs on this machine.
 
-    assets/map/Chunk_room_a.glb  ->  /map/Chunk_room_a.glb
-    assets/map/manifest.json     ->  /map/manifest.json
+    objects.glb / animated.glb / playermodels.glb / manifest.json
 
-Produce them with `tools/export_map.sh your-map.blend`
-(conventions: `docs/blender-conventions.md`).
-
-Until phase 2 the game runs on the procedural test room instead —
-this folder can stay empty.
+The procedural test room is used until the real map lands in phase 2 —
+this folder's current contents come from the export-pipeline fixture test.

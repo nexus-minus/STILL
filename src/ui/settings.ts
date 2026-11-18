@@ -155,11 +155,20 @@ export function initSettings(opts: {
   }
 
   let capturing: Action | null = null;
-  const stopCapture = (): void => {
+  let justCapturedMouse = false;
+  const finishCapture = (): void => {
     if (!capturing) return;
-    bindButtons.get(capturing)!.classList.remove('capturing');
-    bindButtons.get(capturing)!.textContent = keyLabel(bindings.get(capturing!));
+    const button = bindButtons.get(capturing)!;
+    button.classList.remove('capturing');
+    button.textContent = keyLabel(bindings.get(capturing));
     capturing = null;
+  };
+  const applyBind = (action: Action, code: string): void => {
+    finishCapture();
+    bindings.set(action, code);
+    // a swap may have changed other rows — refresh everything
+    for (const [a, btn] of bindButtons) btn.textContent = keyLabel(bindings.get(a));
+    hudNote(`bound: ${ACTION_LABELS[action]} → ${keyLabel(code)}`);
   };
 
   bindsRoot.addEventListener('click', (e) => {
@@ -167,39 +176,61 @@ export function initSettings(opts: {
     if (!button) return;
     const action = BIND_ACTIONS.find((a) => bindButtons.get(a) === button);
     if (!action) return;
-    stopCapture();
+    if (justCapturedMouse) return; // the mousedown we just bound also produces a click
+    if (capturing === action) {
+      finishCapture(); // second click on the same row = cancel
+      return;
+    }
+    finishCapture();
     capturing = action;
     button.classList.add('capturing');
-    button.textContent = 'press a key…';
+    button.textContent = 'press a key or mouse button…';
   });
 
-  // capture-phase listener: beats the controller's listener, blocks browser
-  // defaults (space scrolling etc) while remapping
+  // capture-phase listeners: beat the controller's handlers and swallow browser
+  // defaults while remapping. Esc unbinds the action (no key).
   window.addEventListener(
     'keydown',
     (e) => {
       if (!capturing) return;
       e.preventDefault();
       e.stopPropagation();
+      const action = capturing;
       if (e.code === 'Escape') {
-        stopCapture();
+        applyBind(action, ''); // bound to nothing
+        hudNote(`unbound: ${ACTION_LABELS[action]}`);
         return;
       }
-      const action = capturing;
-      stopCapture();
-      bindings.set(action, e.code);
-      // a swap may have changed another row — refresh everything
-      for (const [a, btn] of bindButtons) btn.textContent = keyLabel(bindings.get(a));
-      hudNote(`bound: ${ACTION_LABELS[action]} → ${keyLabel(e.code)}`);
+      applyBind(action, e.code);
     },
     true,
   );
-  window.addEventListener('keyup', (e) => {
-    if (capturing) {
+  window.addEventListener(
+    'keyup',
+    (e) => {
+      if (capturing) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    },
+    true,
+  );
+  window.addEventListener(
+    'mousedown',
+    (e) => {
+      if (!capturing) return;
       e.preventDefault();
       e.stopPropagation();
-    }
-  }, true);
+      const action = capturing;
+      applyBind(action, `Mouse${e.button}`);
+      justCapturedMouse = true;
+      setTimeout(() => {
+        justCapturedMouse = false;
+      }, 0);
+    },
+    true,
+  );
+  root.addEventListener('contextmenu', (e) => e.preventDefault());
 
   // ---- graphics controls -------------------------------------------------------
   const preset = $<HTMLSelectElement>('set-preset');
@@ -272,13 +303,13 @@ export function initSettings(opts: {
       return !root.classList.contains('hidden');
     },
     open(): void {
-      stopCapture();
+      finishCapture();
       syncUI();
       persist(); // captures anything changed in-game (e.g. T tier cycling)
       root.classList.remove('hidden');
     },
     close(): void {
-      stopCapture();
+      finishCapture();
       root.classList.add('hidden');
     },
   };

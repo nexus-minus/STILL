@@ -48,8 +48,13 @@ export const ACTION_LABELS: Record<Action, string> = {
 
 const STORAGE_KEY = 'liminal.binds.v1';
 
-/** Human label for a KeyboardEvent.code: 'KeyW' -> 'W', 'ShiftLeft' -> 'Left Shift' */
+/** Human label: 'KeyW' -> 'W', 'ShiftLeft' -> 'Left Shift', 'Mouse2' -> 'Right Mouse' */
 export function keyLabel(code: string): string {
+  if (!code) return '— none';
+  if (code.startsWith('Mouse')) {
+    const button = Number(code.slice(5)); // DOM button: 0=left 1=middle 2=right
+    return ['Left Mouse', 'Middle Mouse', 'Right Mouse', 'Mouse 4', 'Mouse 5'][button] ?? code;
+  }
   if (code.startsWith('Key')) return code.slice(3);
   if (code.startsWith('Digit')) return code.slice(5);
   if (code.startsWith('Numpad')) return 'Num ' + code.slice(6);
@@ -76,12 +81,14 @@ export class Bindings {
     return this.binds[action] === code;
   }
 
-  /** returns the action that got stolen, so the UI can swap keys around */
+  /** empty string = unbound (e.g. pressing Esc during capture) */
   set(action: Action, code: string): void {
-    const stolen = (Object.keys(this.binds) as Action[]).find(
-      (other) => other !== action && this.binds[other] === code,
-    );
-    if (stolen) this.binds[stolen] = this.binds[action]; // swap, never double-bind
+    if (code) {
+      const stolen = (Object.keys(this.binds) as Action[]).find(
+        (other) => other !== action && this.binds[other] === code,
+      );
+      if (stolen) this.binds[stolen] = this.binds[action]; // swap, never double-bind
+    }
     this.binds[action] = code;
     this.save();
   }

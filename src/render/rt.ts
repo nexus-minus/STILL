@@ -159,7 +159,8 @@ export function createAdvancedRenderer(
       ${lightParams},
       workgroupId: vec3u,
       localId: vec3u,
-    ) -> void {
+    ) {
+      // NOTE: no void return type — modern WGSL omits it entirely.
       let dimensions = textureDimensions(lightingTex);
       let indexUV = workgroupSize.xy * workgroupId.xy + localId.xy;
       if (indexUV.x >= dimensions.x || indexUV.y >= dimensions.y) { return; }

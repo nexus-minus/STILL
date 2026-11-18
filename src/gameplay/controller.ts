@@ -91,6 +91,12 @@ export class PlayerController {
     document.addEventListener('keyup', (e) => this.keys.delete(e.code));
     window.addEventListener('blur', () => this.keys.clear());
 
+    // mouse buttons as bindable inputs ('Mouse1' = right button etc.)
+    canvas.addEventListener('mousedown', (e) => {
+      if (this.locked) this.keys.add(`Mouse${e.button}`);
+    });
+    window.addEventListener('mouseup', (e) => this.keys.delete(`Mouse${e.button}`));
+
     document.addEventListener('mousemove', (e) => {
       if (!this.locked) return;
       // clamp: some browsers emit one huge movement spike on lock-enter

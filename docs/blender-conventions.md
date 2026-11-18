@@ -1,70 +1,89 @@
-# Blender → game conventions
+# Blender → liminal: how to author your world
 
-The export script (`tools/export_map.sh`) and the loader (phase 2) both rely
-on these rules. Follow them and the map just works.
-
-## General
-
-- **Scale:** 1 unit = 1 meter. Player capsule is 1.7 m tall, 0.35 m radius.
-- **Ceilings:** ~3.2 m (already used by the test room).
-- **Materials:** flat default colors only — base color, **no textures**, roughness
-  0.9–1.0. Exactly the simple design in the brief.
-- **Triangles:** aim ≤ 150k per chunk, ≤ ~5 MB after Draco. Box-heavy geometry
-  compresses extremely well.
-
-## Collections = chunks
-
-- Every top-level collection named **`Chunk_<name>`** exports to its own
-  `assets/map/Chunk_<name>.glb`.
-- Keep each chunk a contiguous play area (~30–60 m). The loader streams by
-  distance, so neighbors should connect across shared edges.
-- **Leave objects in world coordinates** (don't move them to a per-chunk
-  origin). Chunks then assemble with identity transforms — simplest possible
-  stitching, and per-chunk BVHs stay in world space.
-- Everything inside a chunk belongs to that collection (or its children).
-
-## Lights: emission on meshes, not Blender lights
-
-The renderer treats **emissive geometry as the actual light source** (rays hit
-it and pick up its emission). Therefore:
-
-- Light sources = **meshes with Emission enabled** (e.g. ceiling panels).
-  Set Emission color + strength (start around 8–30; tune by eye).
-- Name anything that glows **`L_<something>`** so tooling can spot it fast.
-- Blender *light objects* (point/area) do **not** export as geometry —
-  don't use them for anything the raytracing needs to see.
-- The game ships with a WebGL2/potato fallback that approximates this
-  (a few analytic lights), so also keep light placement regular
-  (grid-ish) — it makes the fallback look right too.
-
-## Custom properties (object level)
-
-| Property   | Type   | Meaning                                                        |
-| ---------- | ------ | -------------------------------------------------------------- |
-| `respawn`  | string | Interactive respawn anchor/beacon. Value = label shown to player. |
-| `lore`     | string | Proximity trigger for a story/rules fragment. Value = lore id (e.g. `RULE-004`). |
-| `interact` | string | Generic interactable (door, switch). Value = kind.             |
-| `noCollide`| any    | Present = visual only, excluded from collision.                |
-
-## Naming conventions
-
-| Prefix / pattern | Meaning                                   |
-| ---------------- | ----------------------------------------- |
-| `Chunk_<name>`   | collection → one .glb export              |
-| `L_<name>`       | emissive light surface                    |
-| `V_<name>`       | visual-only, no collision                 |
-
-## Export (CLI)
+Your `.blend` is the source of truth. Export with one command (Blender 5.2 is
+installed on this machine — or just hand over the `.blend` file and I run it):
 
 ```sh
 tools/export_map.sh path/to/map.blend
-# writes assets/map/*.glb + assets/map/manifest.json
+# -> assets/map/objects.glb, animated.glb, playermodels.glb,
+#    manifest.json (bounds + checkpoints[] + sound[] + skipped[])
 ```
 
-Equivalent manual settings: glTF **Binary (.glb)**, +Y up, apply modifiers,
-selected collections only, **Draco compression on** (level 6).
+## Collections (exact names)
 
-## Manifest
+| collection     | goes to                          | contents |
+| -------------- | -------------------------------- | -------- |
+| `objects`      | `objects.glb`                    | all static world geometry |
+| `checkpoints`  | `checkpoints.glb` + manifest     | clickable objects — **empties are fine** (position comes from JSON) |
+| `animated`     | `animated.glb` (+animation)      | objects that have actions — clips are exported with the file |
+| `sound`        | `manifest.json → sound[]`        | Speaker objects (no mesh needed) → positional audio sources |
+| `playermodels` | `playermodels.glb`               | selectable avatars — one object (mesh/armature) per model |
 
-The script writes `manifest.json` (chunk names + world AABBs). The phase-2
-streamer loads it first to decide what to fetch around the player.
+Any other top-level collection is **skipped and listed** in
+`manifest.json → skipped`, so stray organizer collections are safe.
+
+## The rules that matter
+
+1. **Scale: 1 unit = 1 meter.** Player capsule is 1.7 m tall. ~3.2 m ceilings
+   feels right (already used everywhere in the game).
+2. **Flat materials only** — Principled BSDF, base color, no textures,
+   roughness ≈ 0.9–1.0. Exactly your simple-material approach.
+3. **Emission is light — this is the big one.** Light sources are *meshes with
+   Emission enabled* (Principled → Emission Color + Strength). Name them
+   `L_<something>`. The game's raytracer treats them exactly like Cycles
+   treats emission: rays hit the surface and pick up its light, with real
+   shadows. **Do not use Blender lamp objects** — they don't export as game
+   lights. Start around emission strength 8–20 for ceiling panels.
+4. **AgX everywhere.** The game now renders with AgX tonemapping — the same
+   view transform Blender 4/5 uses by default — so your viewport look
+   (Material Preview or Rendered with emission) transfers closely. With rule 3
+   the lighting math is the same idea Cycles uses, so the vibe carries over;
+   expect softer/dirtier real-time GI rather than path-traced perfection.
+5. **Modifiers are applied at export** (`export_apply`) — model freely, the
+   game receives the final geometry.
+
+## Collection specifics
+
+**checkpoints** — empties (or meshes) with custom properties:
+
+| property | meaning | default |
+| -------- | ------- | ------- |
+| `label`  | text shown to the player | object name |
+| `kind`   | `respawn` (fast-travel point) or `interact` | `respawn` |
+| `radius` | interaction sphere radius (m) | 1.2 |
+
+**animated** — just give objects actions while they're in this collection;
+they export with animation and the game plays the clips (loader work lands
+with phase 2/3).
+
+**sound** — Speaker objects with custom properties:
+
+| property | meaning | default |
+| -------- | ------- | ------- |
+| `file`   | audio filename, e.g. `hum_loop.ogg` | speaker's sound datablock |
+| `loop`   | loop forever | `true` |
+| `radius` | audible distance (m) | 14 |
+| `volume` | gain | speaker volume |
+
+Audio files go in `assets/audio/` and the game plays them as **3D positional
+sound** (Web Audio panners follow the listener). The audio system itself is
+scheduled next (with volumetrics).
+
+**playermodels** — put each avatar in the collection; a selector UI comes
+with the multiplayer work.
+
+## Size budget
+
+Aim for `objects.glb` under ~15 MB (Draco-compressed) / ~800k triangles.
+Beyond that we switch to spatial chunk streaming (phase 2) — tell me the
+numbers and I'll wire it before it becomes a problem.
+
+## Export output
+
+```
+assets/map/objects.glb          static geometry (Draco, +Y up, world coords)
+assets/map/animated.glb         animated objects + clips
+assets/map/playermodels.glb     avatars
+assets/map/manifest.json        per-collection counts + world bounds,
+                                checkpoints[], sound[], skipped[]
+```
