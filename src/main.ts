@@ -168,6 +168,15 @@ async function main(): Promise<void> {
     console.info('[liminal] GL renderer:', glRendererInfo);
     if (driverEl) driverEl.textContent = glRendererInfo;
 
+    // Software rasterizers (SwiftShader/llvmpipe) draw every pixel on the CPU —
+    // the glow chain is full-screen passes, i.e. the most expensive thing we
+    // could ask a CPU rasterizer for. Default it off there; B re-enables it.
+    if (/swiftshader|llvmpipe|softwarerasterizer|software/i.test(glRendererInfo)) {
+      pipeline.setGlowEnabled(false);
+      console.info('[liminal] software rasterizer detected — glow off for performance (B re-enables)');
+      hud.message('software rendering — glow off for performance (B turns it on)', 6000);
+    }
+
     canvas.addEventListener('webglcontextlost', (e) => {
       e.preventDefault();
       console.error('[liminal] WebGL context LOST — display driver problem. GL:', glRendererInfo);
