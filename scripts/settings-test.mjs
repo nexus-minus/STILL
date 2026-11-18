@@ -30,6 +30,15 @@ try {
     failed = true;
   });
 
+  /** human-like: real positioned click on a keybind row (moves the real mouse) */
+  const clickRow = async (index) => {
+    const box = await page.evaluate((i) => {
+      const r = document.querySelectorAll('#set-binds .bind-row')[i].querySelector('button').getBoundingClientRect();
+      return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+    }, index);
+    await page.mouse.click(box.x, box.y);
+  };
+
   await page.goto(URL, { waitUntil: 'domcontentloaded', timeout: 20000 });
   for (let i = 0; i < 60 && !logs.some((l) => l.includes('[liminal] up')); i++) await sleep(200);
 
@@ -57,10 +66,8 @@ try {
   await page.screenshot({ path: 'screenshots/settings.png' });
 
   // rebind flow: click "Move forward" button, press J
-  await page.evaluate(() => {
-    const rows = document.querySelectorAll('#set-binds .bind-row');
-    rows[0].querySelector('button').click();
-  });
+  await sleep(450); // clear the trailing-click guard from any earlier input
+  await clickRow(0);
   await sleep(150);
   await page.keyboard.press('KeyJ');
   await sleep(200);
@@ -113,9 +120,8 @@ try {
   check(`sensitivity applied (got ${sens})`, sens === 0.5);
 
   // Esc during capture = unbind (bind to nothing)
-  await page.evaluate(() => {
-    document.querySelectorAll('#set-binds .bind-row')[0].querySelector('button').click();
-  });
+  await sleep(450);
+  await clickRow(0);
   await sleep(150);
   await page.keyboard.press('Escape');
   await sleep(150);
@@ -127,9 +133,8 @@ try {
   check(`label shows none (got "${unbound.label}")`, String(unbound.label).includes('none'));
 
   // mouse buttons are bindable
-  await page.evaluate(() => {
-    document.querySelectorAll('#set-binds .bind-row')[1].querySelector('button').click();
-  });
+  await sleep(450);
+  await clickRow(1); // real click also parks the mouse on the button
   await sleep(150);
   await page.mouse.down({ button: 'right' });
   await page.mouse.up({ button: 'right' });

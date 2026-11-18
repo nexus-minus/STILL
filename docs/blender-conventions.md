@@ -44,7 +44,9 @@ Any other top-level collection is **skipped and listed** in
 
 ## Collection specifics
 
-**checkpoints** — empties (or meshes) with custom properties:
+### checkpoints (client-side clickables)
+
+Empties or meshes, with custom properties:
 
 | property | meaning | default |
 | -------- | ------- | ------- |
@@ -52,25 +54,59 @@ Any other top-level collection is **skipped and listed** in
 | `kind`   | `respawn` (fast-travel point) or `interact` | `respawn` |
 | `radius` | interaction sphere radius (m) | 1.2 |
 
-**animated** — just give objects actions while they're in this collection;
-they export with animation and the game plays the clips (loader work lands
-with phase 2/3).
+**Checkpoint objects carry two materials:**
 
-**sound** — Speaker objects with custom properties:
+1. **`check_off`** — the material the object wears until activated
+2. **`check_on`** — swapped in the moment the player clicks it
 
-| property | meaning | default |
-| -------- | ------- | ------- |
-| `file`   | audio filename, e.g. `hum_loop.ogg` | speaker's sound datablock |
-| `loop`   | loop forever | `true` |
-| `radius` | audible distance (m) | 14 |
-| `volume` | gain | speaker volume |
+**Checkpoint animation:** if the object has an action named **`check_active`**,
+it plays **once** when clicked and **never reverts** (no looping back).
 
-Audio files go in `assets/audio/` and the game plays them as **3D positional
-sound** (Web Audio panners follow the listener). The audio system itself is
-scheduled next (with volumetrics).
+**⚠ Client-side rule:** checkpoints are *personal state*. When another player
+activates a checkpoint, it changes **only for them** — your copy keeps
+`check_off` unless you clicked it yourself. (No network sync for these, ever.)
 
-**playermodels** — put each avatar in the collection; a selector UI comes
-with the multiplayer work.
+### animated — animation naming rules
+
+| name pattern | behavior |
+| ------------ | -------- |
+| starts with `looping_` | plays automatically, loops forever (ambient machinery, flicker, …) |
+| `check_active` | special: checkpoint click reaction (see above) |
+| anything else | **proposal** (confirm/edit): plays **once when interacted with**; if you want another behavior category, invent a prefix (`interact_`, `proximity_`, …) and add it here |
+
+All animation **rules live in this file — it is the contract** the loader
+implements. When you add a prefix, write it here first.
+
+### sound — 3D positional audio
+
+**Yes — use Blender's Speaker object** for placement; it's exactly what the
+pipeline expects (custom properties `file`, `loop`, `radius`, `volume`; see
+table above). Speakers have no mesh, so they export as JSON positions only.
+
+### playermodels — rigs and visibility
+
+- One object (mesh + **rig/armature**) per model in the collection.
+- Animation names follow the same naming rules; the rig's actions export with
+  the model and drive it in-game.
+- **Visibility rules (game-side):**
+  - the model is visible **to other players** and **in mirrors**;
+  - there is **no first-person body** — you never see your own model while
+    playing (no arms/feet) — mirrors are the only self-view.
+  - Selector UI comes with the multiplayer work.
+
+### where the .blend lives
+
+`assets/source/map.blend` (create the `source` folder). It gets exported via
+`tools/export_map.sh assets/source/map.blend`. If it grows huge (>100 MB) we
+switch it to Git LFS or keep it out of the repo — tell me the size and we'll
+decide.
+
+### which collections?
+
+Those **five** are all you need (`objects`, `checkpoints`, `animated`,
+`sound`, `playermodels`). Sub-collections *inside* them are fine (they export
+with the parent). Other top-level collections are ignored but listed in
+`manifest.json → skipped`, so organizational leftovers won't break anything.
 
 ## Size budget
 

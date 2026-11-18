@@ -154,6 +154,15 @@ async function main(): Promise<void> {
   // ---- HUD / hotkeys --------------------------------------------------------
   const statsLine = (fps: number): string => `${backend} · ${quality.tier} · ${fps} fps`;
 
+  const sessionForced = (() => {
+    try {
+      return sessionStorage.getItem('liminal.forcegl') === '1';
+    } catch {
+      return false;
+    }
+  })();
+  const urlForced = new URLSearchParams(location.search).get('forcegl') === '1';
+
   const settings = initSettings({
     quality,
     bindings,
@@ -173,6 +182,22 @@ async function main(): Promise<void> {
       const on = pipeline.toggleGlow();
       hud.message(`glow ${on ? 'on' : 'off'}`, 1500);
       console.info(`[liminal] glow toggled ${on ? 'on' : 'off'} by user`);
+    }
+    // escape hatch: the auto-recovery parks a session flag that keeps WebGPU
+    // off until the tab closes — G retries immediately (for after bug fixes)
+    if (e.code === 'KeyG' && (sessionForced || urlForced)) {
+      try {
+        sessionStorage.removeItem('liminal.forcegl');
+      } catch {
+        /* private mode */
+      }
+      if (urlForced) {
+        const url = new URL(location.href);
+        url.searchParams.delete('forcegl');
+        history.replaceState(null, '', url);
+      }
+      hud.message('retrying WebGPU…', 1500);
+      window.setTimeout(() => location.reload(), 500);
     }
     if (bindings.matches('respawn', e.code)) {
       const latest = anchors.list().sort((a, b) => b.discoveredAt - a.discoveredAt)[0];
@@ -385,11 +410,17 @@ async function main(): Promise<void> {
     }
   });
 
-  hud.message(`${backend} · ${quality.tier} — click to enter`, 4000);
+  hud.message(
+    sessionForced
+      ? `compatibility mode — WebGPU off (from an earlier error) — press G to retry`
+      : `${backend} · ${quality.tier} — click to enter`,
+    sessionForced ? 12000 : 4000,
+  );
   console.info(
     `[liminal] up — backend=${backend} tier=${quality.tier} ` +
       `navigator.gpu=${'gpu' in navigator} glow=${pipeline.postActive} gl="${glRendererInfo}" ` +
-      `rt=${pipeline.hasAdvanced ? 'armed' : 'off'}\n` +
+      `rt=${pipeline.hasAdvanced ? 'armed' : 'off'} ` +
+      `forcegl=${urlForced ? 'url' : sessionForced ? 'session' : 'no'}\n` +
       `[liminal] diagnostics: ${diagnostics.join(' | ')}`,
   );
 

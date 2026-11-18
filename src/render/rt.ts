@@ -127,10 +127,12 @@ export function createAdvancedRenderer(
   ).join('\n        ');
 
   const kernelSource = /* wgsl */ `
-    fn hash12(p: vec2f) -> f32 {
-      var p3 = fract(vec3f(p.xyx) * 0.1031);
-      p3 += dot(p3, p3.yzx + 33.33);
-      return fract((p3.x + p3.y) * p3.z);
+    // NOTE: hash12 arg names avoid single-letter identifiers — three's TSL
+    // scans fn signatures and complained "Input 'p' not found in 'Fn()'".
+    fn hash12(coordinate: vec2f) -> f32 {
+      var h3 = fract(vec3f(coordinate.xyx) * 0.1031);
+      h3 += dot(h3, h3.yzx + 33.33);
+      return fract((h3.x + h3.y) * h3.z);
     }
 
     fn directLight(lp: vec4f, lc: vec4f, P: vec3f, N: vec3f, albedoScale: f32) -> vec3f {

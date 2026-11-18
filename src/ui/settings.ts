@@ -155,7 +155,10 @@ export function initSettings(opts: {
   }
 
   let capturing: Action | null = null;
-  let justCapturedMouse = false;
+  /** timestamp of the press we just consumed — its trailing click must not
+   *  re-enter capture (setTimeout raced the browser's click event).
+   *  -Infinity: never blocks early clicks (page uptime can be < 400ms). */
+  let inputConsumedAt = -Infinity;
   const finishCapture = (): void => {
     if (!capturing) return;
     const button = bindButtons.get(capturing)!;
@@ -164,6 +167,7 @@ export function initSettings(opts: {
     capturing = null;
   };
   const applyBind = (action: Action, code: string): void => {
+    inputConsumedAt = performance.now();
     finishCapture();
     bindings.set(action, code);
     // a swap may have changed other rows — refresh everything
@@ -176,7 +180,8 @@ export function initSettings(opts: {
     if (!button) return;
     const action = BIND_ACTIONS.find((a) => bindButtons.get(a) === button);
     if (!action) return;
-    if (justCapturedMouse) return; // the mousedown we just bound also produces a click
+    // the click that concludes the press we just bound — ignore it
+    if (performance.now() - inputConsumedAt < 400) return;
     if (capturing === action) {
       finishCapture(); // second click on the same row = cancel
       return;
@@ -223,10 +228,6 @@ export function initSettings(opts: {
       e.stopPropagation();
       const action = capturing;
       applyBind(action, `Mouse${e.button}`);
-      justCapturedMouse = true;
-      setTimeout(() => {
-        justCapturedMouse = false;
-      }, 0);
     },
     true,
   );
@@ -281,7 +282,10 @@ export function initSettings(opts: {
     hudNote('keybinds reset');
   });
   $('#set-resume').addEventListener('click', () => {
-    close();
+    // NB: not `close()` — that resolves to window.close() and would try to
+    // close the TAB. Close the menu panel itself:
+    finishCapture();
+    root.classList.add('hidden');
     opts.onResume();
   });
 
@@ -313,5 +317,16 @@ export function initSettings(opts: {
       root.classList.add('hidden');
     },
   };
+
+  // Esc closes the menu — but only outside keybinding capture (capture-mode
+  // Esc is handled above: it unbinds). Re-locking may be rate-limited by the
+  // browser right after Esc; the canvas click handler is the fallback.
+  window.addEventListener('keydown', (e) => {
+    if (e.code !== 'Escape' || capturing) return;
+    if (root.classList.contains('hidden')) return;
+    handle.close();
+    opts.onResume();
+  });
+
   return handle;
 }

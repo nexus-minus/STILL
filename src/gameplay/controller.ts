@@ -113,8 +113,10 @@ export class PlayerController {
     });
 
     canvas.addEventListener('click', () => {
-      if (this.locked) this.onInteract?.();
-      else void canvas.requestPointerLock();
+      // interact fires ONLY via the bound action (default E) — a plain click
+      // must not trigger it, otherwise bound mouse buttons and old keys both
+      // seem to "interact" at once.
+      if (!this.locked) void canvas.requestPointerLock();
     });
   }
 
