@@ -7,6 +7,12 @@ export interface CapsuleResolveResult {
   grounded: boolean;
   /** how many depenetration passes were needed this frame (debug/perf) */
   iterations: number;
+  /**
+   * total correction applied this call (reference — valid until the next
+   * resolveCapsule call). Direction ≈ average contact normal; the controller
+   * uses it to reject climbing steep surfaces and to stop pressing into walls.
+   */
+  push: THREE.Vector3;
 }
 
 /**
@@ -29,6 +35,7 @@ export class WorldCollision {
   private readonly segMid = new THREE.Vector3();
   private readonly toMid = new THREE.Vector3();
   private readonly ray = new THREE.Ray();
+  private readonly pushSum = new THREE.Vector3();
 
   private constructor(bvh: MeshBVH) {
     this.bvh = bvh;
@@ -65,6 +72,7 @@ export class WorldCollision {
     const half = height / 2 - radius; // segment half length
     let grounded = false;
     let used = 0;
+    this.pushSum.set(0, 0, 0);
 
     for (let iter = 0; iter < maxIterations; iter++) {
       const { segment, box, push, triPoint, capPoint, dir, segMid, toMid } = this;
@@ -107,9 +115,10 @@ export class WorldCollision {
 
       if (!hit) break;
       center.add(push);
+      this.pushSum.add(push);
       used = iter + 1;
     }
 
-    return { grounded, iterations: used };
+    return { grounded, iterations: used, push: this.pushSum };
   }
 }

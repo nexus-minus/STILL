@@ -6,7 +6,7 @@ import { createAdvancedRenderer, type AdvancedRenderer } from './render/rt.js';
 import { QualityManager, detectTier } from './render/quality.js';
 import { loadWorld } from './world/map-loader.js';
 import { WorldCollision } from './world/collision.js';
-import { PlayerController } from './gameplay/controller.js';
+import { PlayerController, CAPSULE } from './gameplay/controller.js';
 import { InteractableSystem } from './gameplay/interactable.js';
 import { AnchorRegistry } from './gameplay/anchors.js';
 import { MapDevice } from './gameplay/map-device.js';
@@ -40,6 +40,18 @@ window.setTimeout(() => {
 
 async function main(): Promise<void> {
   const overlay = document.getElementById('overlay') as HTMLDivElement;
+
+  // An explicit rtdebug request always retries the GPU path — a compat flag
+  // parked by an earlier auto-recovery would boot WebGL2 and make the debug
+  // modes silently inert ("looks the same as normal").
+  const rtDebugParam = Number(new URLSearchParams(location.search).get('rtdebug') ?? 0);
+  if (rtDebugParam > 0) {
+    try {
+      sessionStorage.removeItem('liminal.forcegl');
+    } catch {
+      /* private mode */
+    }
+  }
 
   // ---- renderer: WebGPU first, WebGL2 fallback, fresh canvas per attempt ---
   setStage('renderer');
@@ -80,7 +92,29 @@ async function main(): Promise<void> {
     const cpSpawn = world.checkpoints.find((cp) => cp.kind === 'spawn');
     const attempts: Array<() => THREE.Vector3 | null> = [];
     if (cpSpawn) {
-      attempts.push(() => probeDown(new THREE.Vector3(cpSpawn.position.x, cpSpawn.position.y + 1.5, cpSpawn.position.z)));
+      // their rule: ~1m ring around the checkpoint where ground is and no wall
+      const RING: Array<[number, number]> = [
+        [1, 0], [-1, 0], [0, 1], [0, -1],
+        [0.71, 0.71], [0.71, -0.71], [-0.71, 0.71], [-0.71, -0.71],
+        [0, 0],
+      ];
+      attempts.push(() => {
+        for (const [dx, dz] of RING) {
+          const x = cpSpawn.position.x + dx;
+          const z = cpSpawn.position.z + dz;
+          const feet = probeDown(new THREE.Vector3(x, cpSpawn.position.y + 1.5, z));
+          if (!feet) continue;
+          if (Math.abs(feet.y - cpSpawn.position.y) > 1.5) continue; // ground near the point
+          // not inside a wall: depenetration must not shove us sideways
+          const trial = feet
+            .clone()
+            .addScaledVector(new THREE.Vector3(0, 1, 0), CAPSULE.height / 2 + 0.02);
+          const res = collision.resolveCapsule(trial, CAPSULE.height, CAPSULE.radius);
+          if (Math.hypot(res.push.x, res.push.z) > 0.15) continue;
+          return feet;
+        }
+        return null;
+      });
     }
     // default: their stated start (0,0) from just above walking height
     attempts.push(() => probeDown(new THREE.Vector3(0, 3, 0)));
@@ -131,7 +165,7 @@ async function main(): Promise<void> {
   // ---- raytraced path (WebGPU only; graceful failure is the design) ----------
   // Construction or WGSL validation errors never take the game down: we keep
   // the standard post chain as the permanent fallback and say so on screen.
-  const rtDebug = Number(new URLSearchParams(location.search).get('rtdebug') ?? 0);
+  const rtDebug = rtDebugParam;
   setStage('raytracing');
   let advanced: AdvancedRenderer | undefined;
   if (backend === 'webgpu') {
@@ -236,7 +270,13 @@ async function main(): Promise<void> {
   };
 
   // ---- HUD / hotkeys --------------------------------------------------------
-  const statsLine = (fps: number): string => `${backend} · ${quality.tier} · ${fps} fps`;
+  const statsLine = (fps: number): string => {
+    const f = controller.feet;
+    return (
+      `${backend} · ${quality.tier} · ${fps} fps\n` +
+      `x ${f.x.toFixed(1)}  y ${f.y.toFixed(1)}  z ${f.z.toFixed(1)}`
+    );
+  };
 
   const sessionForced = (() => {
     try {
