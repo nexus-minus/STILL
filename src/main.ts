@@ -178,9 +178,16 @@ async function main(): Promise<void> {
       advanced.setLogicalSize(window.innerWidth, window.innerHeight);
       if (rtDebug > 0) {
         advanced.setDebugMode(rtDebug);
+        // a debug request implies "I want the traced path" — never let a
+        // potato-tier override leave rtdebug silently inert
+        quality.setOverride('raytracedLighting', true);
         console.info(
           `[rt] debug mode ${rtDebug} (1=uv gradient, 2=red=miss/green=hit) — ` +
-            'black-frame detector paused so the run survives',
+            'black-frame detector paused, raytraced lighting forced on',
+        );
+        hud.message(
+          rtDebug === 2 ? 'RT DEBUG 2 — green = ray hit, red = ray miss' : 'RT DEBUG 1 — uv gradient',
+          8000,
         );
       }
       pipeline.setAdvanced(advanced);
@@ -522,19 +529,22 @@ async function main(): Promise<void> {
     //                     once per session (sessionStorage) — no reload loops;
     //   webgl2 backend  → permanent on-screen error + console dump.
     frameNo++;
+    // webgpu-black = broken path → recover fast; webgl2-black might just be a
+    // dark map → be patient before touching the player's glow (it was annoying)
+    const stageThreshold = backend === 'webgpu' ? 20 : 45;
     if (rtDebug === 0 && !recoveryScheduled && canSampleFrames && frameNo > 30 && frameNo % 10 === 0) {
       if (frameIsBlack()) {
         blackChecks++;
-        if (blackChecks >= 20) {
+        if (blackChecks >= stageThreshold) {
           blackChecks = 0;
           if (pipeline.postActive) {
             pipeline.setGlowEnabled(false);
             console.error(
-              '[liminal] ~3s of black frames WITH glow post-chain — glow disabled automatically.\n' +
+              '[liminal] sustained black frames WITH glow post-chain — glow disabled automatically.\n' +
                 'If the scene appears now, the glow chain is the problem on this driver.\n' +
                 'GL renderer: ' + glRendererInfo,
             );
-            hud.message('glow disabled (black frames) — is the room visible now? (B toggles)', 8000);
+            hud.message('black frames — glow off (B re-enables)', 3500);
           } else if (backend === 'webgpu') {
             recoveryScheduled = true;
             try {

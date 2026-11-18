@@ -144,30 +144,10 @@ export function createAdvancedRenderer(
   ).join('\n        ');
 
   const kernelSource = /* wgsl */ `
-    // NOTE: hash12 arg names avoid single-letter identifiers — three's TSL
-    // scans fn signatures and complained "Input 'p' not found in 'Fn()'".
-    fn hash12(coordinate: vec2f) -> f32 {
-      var h3 = fract(vec3f(coordinate.xyx) * 0.1031);
-      h3 += dot(h3, h3.yzx + 33.33);
-      return fract((h3.x + h3.y) * h3.z);
-    }
-
-    fn directLight(lp: vec4f, lc: vec4f, P: vec3f, N: vec3f, albedoScale: f32) -> vec3f {
-      if (lp.w <= 0.0) { return vec3f(0.0); }
-      let toL = lp.xyz - P;
-      let d2 = dot(toL, toL);
-      let dist = sqrt(d2);
-      let L = toL / dist;
-      let ndotl = max(dot(N, L), 0.0);
-      if (ndotl <= 0.0) { return vec3f(0.0); }
-      var sray: Ray;
-      sray.origin = P;
-      sray.direction = L;
-      sray.maxDist = max(dist - 0.08, 0.001);
-      if (bvh_RaycastAnyHit(sray)) { return vec3f(0.0); }
-      return lc.rgb * (lp.w * albedoScale * ndotl / max(d2, 0.25));
-    }
-
+    // compute MUST be the first function: three parses the FIRST fn for the
+    // signature it binds and calls THAT name from its generated main. It also
+    // requires a return identifier (regex) — but Tint rejects '-> void', so we
+    // return vec4f and let the caller discard it (Tint-verified accepted).
     fn compute(
       lightingTex: texture_storage_2d<rgba8unorm, write>,
       invViewProj: mat4x4f,
@@ -179,8 +159,7 @@ export function createAdvancedRenderer(
       ${lightParams},
       workgroupId: vec3u,
       localId: vec3u,
-    ) {
-      // NOTE: no void return type — modern WGSL omits it entirely.
+    ) -> vec4f {
       let dimensions = textureDimensions(lightingTex);
       let indexUV = workgroupSize.xy * workgroupId.xy + localId.xy;
       if (indexUV.x >= dimensions.x || indexUV.y >= dimensions.y) { return; }
@@ -191,7 +170,7 @@ export function createAdvancedRenderer(
       // stage of the pipeline can be isolated with one screenshot
       if (debugMode > 0.5 && debugMode < 1.5) {
         textureStore(lightingTex, indexUV, vec4f(uv, 0.3, 1.0));
-        return;
+        return vec4f(0.0);
       }
 
       let ndc = uv * 2.0 - 1.0;
@@ -206,12 +185,12 @@ export function createAdvancedRenderer(
           indexUV,
           select(vec4f(1.0, 0.0, 0.0, 1.0), vec4f(0.0, 1.0, 0.0, 1.0), hit.didHit),
         );
-        return;
+        return vec4f(0.0);
       }
 
       if (!hit.didHit) {
         textureStore(lightingTex, indexUV, vec4f(0.0, 0.0, 0.0, 1.0));
-        return;
+        return vec4f(0.0);
       }
 
       var N = hit.normal;
@@ -251,6 +230,31 @@ export function createAdvancedRenderer(
       }
 
       textureStore(lightingTex, indexUV, vec4f(acc, 1.0));
+      return vec4f(0.0);
+    }
+
+    // helpers AFTER compute — Tint accepts module-scope forward references
+    // (verified by probe), and compute must stay first for three's parser.
+    fn hash12(coordinate: vec2f) -> f32 {
+      var h3 = fract(vec3f(coordinate.xyx) * 0.1031);
+      h3 += dot(h3, h3.yzx + 33.33);
+      return fract((h3.x + h3.y) * h3.z);
+    }
+
+    fn directLight(lp: vec4f, lc: vec4f, P: vec3f, N: vec3f, albedoScale: f32) -> vec3f {
+      if (lp.w <= 0.0) { return vec3f(0.0); }
+      let toL = lp.xyz - P;
+      let d2 = dot(toL, toL);
+      let dist = sqrt(d2);
+      let L = toL / dist;
+      let ndotl = max(dot(N, L), 0.0);
+      if (ndotl <= 0.0) { return vec3f(0.0); }
+      var sray: Ray;
+      sray.origin = P;
+      sray.direction = L;
+      sray.maxDist = max(dist - 0.08, 0.001);
+      if (bvh_RaycastAnyHit(sray)) { return vec3f(0.0); }
+      return lc.rgb * (lp.w * albedoScale * ndotl / max(d2, 0.25));
     }
   `;
 

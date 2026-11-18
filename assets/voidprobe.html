@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="UTF-8" /><title>void probe</title></head>
+  <body>
+    <script>
+      window.__vp = { out: [], done: false };
+      const log = (m) => { window.__vp.out.push(m); console.log('[vp] ' + m); };
+      (async () => {
+        try {
+          const adapter = await navigator.gpu.requestAdapter();
+          if (!adapter) { log('no adapter'); window.__vp.done = true; return; }
+          const device = await adapter.requestDevice();
+          const test = async (name, code) => {
+            try {
+              const mod = device.createShaderModule({ code });
+              const info = await mod.getCompilationInfo();
+              const errors = info.messages.filter((m) => m.type === 'error');
+              log(name + ': ' + (errors.length ? 'REJECTED -> ' + errors[0].message.slice(0, 200) : 'ACCEPTED'));
+            } catch (e) { log(name + ': EXCEPTION ' + e.message.slice(0, 200)); }
+          };
+          // E5: compute fn FIRST with a REAL return type, called as a bare
+          // statement from the generated entry (three's flow emission)
+          await test('E5 value-fn as statement in compute entry', `
+fn compute(a: f32) -> vec4f { return vec4f(a); }
+@compute @workgroup_size(1)
+fn main(@builtin(global_invocation_id) gid: vec3u) { compute(1.0); }
+`);
+          // E6: same but empty params + no attrs on compute (parse-target shape)
+          await test('E6 first-fn no-params with return', `
+fn compute() -> f32 { return 0.0; }
+@compute @workgroup_size(1)
+fn main() { _ = compute(); }
+`);
+        } catch (e) { log('EXCEPTION ' + e.message); }
+        window.__vp.done = true;
+      })();
+    </script>
+  </body>
+</html>

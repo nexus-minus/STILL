@@ -103,10 +103,11 @@ export async function loadWorld(): Promise<WorldDef> {
       // Fallback illumination: the WebGL2/potato/compat paths have no traced
       // lighting — without this the imported map is pitch black there (the
       // test room had fake point lights; imported maps need the same).
+      // Their test material is dim emission, so the floor is deliberately high.
       const pointLight = new THREE.PointLight(
         new THREE.Color(emissive.r, emissive.g, emissive.b),
-        Math.max(power * 3, 6),
-        Math.max(6, Math.sqrt(power) * 7),
+        Math.max(power * 8, 25),
+        Math.max(10, Math.sqrt(power) * 10),
         2,
       );
       pointLight.position.copy(center);
