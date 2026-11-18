@@ -14,9 +14,12 @@ import puppeteer from 'puppeteer-core';
 import { mkdirSync } from 'node:fs';
 
 const URL = process.argv[2] ?? 'http://localhost:4173';
-const CHROME = process.env.CHROME ?? '/usr/bin/chromium';
 const OUT = process.argv[3] ?? 'screenshots/smoke.png';
-// FORCE_WEBGL=1 -> launch without WebGPU so the game exercises its fallback path
+// SMOKE_BROWSER=firefox -> test Firefox instead of Chromium
+const USE_FIREFOX = process.env.SMOKE_BROWSER === 'firefox';
+const CHROME = process.env.CHROME ?? '/usr/bin/chromium';
+const FIREFOX = process.env.FIREFOX ?? '/usr/bin/firefox';
+// FORCE_WEBGL=1 -> launch Chromium without WebGPU (fallback-path test)
 const webgpuArgs = process.env.FORCE_WEBGL
   ? []
   : ['--enable-unsafe-webgpu'];
@@ -24,18 +27,26 @@ const webgpuArgs = process.env.FORCE_WEBGL
 const logs = [];
 const errors = [];
 
-const browser = await puppeteer.launch({
-  executablePath: CHROME,
-  headless: true,
-  args: [
-    '--no-sandbox',
-    '--disable-dev-shm-usage',
-    '--enable-unsafe-swiftshader', // software WebGL2
-    ...webgpuArgs, // try WebGPU even without a real GPU
-    '--hide-scrollbars',
-    '--window-size=1280,720',
-  ],
-});
+const browser = await puppeteer.launch(
+  USE_FIREFOX
+    ? {
+        browser: 'firefox',
+        executablePath: FIREFOX,
+        headless: true,
+      }
+    : {
+        executablePath: CHROME,
+        headless: true,
+        args: [
+          '--no-sandbox',
+          '--disable-dev-shm-usage',
+          '--enable-unsafe-swiftshader', // software WebGL2
+          ...webgpuArgs, // try WebGPU even without a real GPU
+          '--hide-scrollbars',
+          '--window-size=1280,720',
+        ],
+      },
+);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 

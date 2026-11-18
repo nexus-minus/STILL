@@ -14,11 +14,11 @@ import { createTransport } from './core/transport.js';
 import { hud } from './ui/hud.js';
 
 async function main(): Promise<void> {
-  const canvas = document.getElementById('game') as HTMLCanvasElement;
   const overlay = document.getElementById('overlay') as HTMLDivElement;
 
-  // ---- renderer: WebGPU, WebGL2 fallback guaranteed ----------------------
-  const { renderer, backend } = await createRenderer(canvas);
+  // ---- renderer: WebGPU first, WebGL2 fallback, fresh canvas per attempt ---
+  const initialCanvas = document.getElementById('game') as HTMLCanvasElement;
+  const { renderer, backend, canvas, diagnostics } = await createRenderer(initialCanvas);
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.0;
 
@@ -130,6 +130,7 @@ async function main(): Promise<void> {
   // hand the player a black screen).
   let glRendererInfo = 'n/a';
   let glCtx: WebGL2RenderingContext | null = null;
+  const driverEl = document.getElementById('driver');
   if (backend === 'webgl2') {
     glCtx = canvas.getContext('webgl2');
     const dbg = glCtx?.getExtension('WEBGL_debug_renderer_info');
@@ -137,18 +138,28 @@ async function main(): Promise<void> {
       ? String(glCtx?.getParameter(dbg.UNMASKED_RENDERER_WEBGL))
       : String(glCtx?.getParameter(glCtx.RENDERER));
     console.info('[liminal] GL renderer:', glRendererInfo);
+    if (driverEl) driverEl.textContent = glRendererInfo;
 
     canvas.addEventListener('webglcontextlost', (e) => {
       e.preventDefault();
       console.error('[liminal] WebGL context LOST — display driver problem. GL:', glRendererInfo);
       hud.message('graphics context lost — reload the page (details in console)', 10000);
     });
+  } else if (driverEl) {
+    driverEl.textContent = 'WebGPU device';
   }
 
   let frameNo = 0;
   let blackChecks = 0;
   const samplePixel = new Uint8Array(4);
-  /** true = every sampled pixel is pure black (nothing reached the screen) */
+  /**
+   * true = every sampled pixel is essentially black (max channel < 8/255).
+   * The threshold matters: our near-black background survives tonemapping at
+   * ~2-3/255, and a scene that RENDERS but looks pitch black (broken shaders,
+   * driver misbehaving) must count as black — otherwise the safety net would
+   * never fire exactly when it's needed. A working frame always has geometry
+   * at 100+.
+   */
   const frameIsBlack = (): boolean => {
     if (!glCtx) return false;
     const w = glCtx.drawingBufferWidth;
@@ -162,7 +173,7 @@ async function main(): Promise<void> {
     ] as const;
     for (const [fx, fy] of spots) {
       glCtx.readPixels(Math.floor(w * fx), Math.floor(h * fy), 1, 1, glCtx.RGBA, glCtx.UNSIGNED_BYTE, samplePixel);
-      if (samplePixel[0] || samplePixel[1] || samplePixel[2]) return false;
+      if (Math.max(samplePixel[0], samplePixel[1], samplePixel[2]) >= 8) return false;
     }
     return true;
   };
@@ -240,7 +251,8 @@ async function main(): Promise<void> {
   hud.message(`${backend} · ${quality.tier} — click to enter`, 4000);
   console.info(
     `[liminal] up — backend=${backend} tier=${quality.tier} ` +
-      `navigator.gpu=${'gpu' in navigator} glow=${pipeline.postActive} gl="${glRendererInfo}"`,
+      `navigator.gpu=${'gpu' in navigator} glow=${pipeline.postActive} gl="${glRendererInfo}"\n` +
+      `[liminal] diagnostics: ${diagnostics.join(' | ')}`,
   );
 
   // debug handle for scripts/smoke.mjs (and the console, feel free)

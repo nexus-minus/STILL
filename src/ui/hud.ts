@@ -42,6 +42,12 @@ export const hud = {
   fatal(err: unknown): void {
     const el = $<HTMLDivElement>('fatal');
     el.style.display = 'block';
-    el.textContent = `the game failed to start:\n\n${err instanceof Error ? err.stack ?? err.message : String(err)}`;
+    const diagnostics = (err as { diagnostics?: string[] } | null)?.diagnostics;
+    el.textContent =
+      `the game failed to start:\n\n` +
+      `${err instanceof Error ? (err.stack ?? err.message) : String(err)}` +
+      (diagnostics ? `\n\n--- what we tried ---\n${diagnostics.join('\n')}` : '') +
+      `\n\nbrowser: ${navigator.userAgent}\n` +
+      `Please copy this screen (or the browser console, F12) when asking for help.`;
   },
 };

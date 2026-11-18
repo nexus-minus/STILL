@@ -36,6 +36,11 @@
         position: absolute; left: 12px; top: 10px;
         font-size: 11px; line-height: 1.7; opacity: 0.5; white-space: pre;
       }
+      #driver {
+        position: absolute; left: 12px; top: 42px;
+        max-width: 70%; font-size: 10px; opacity: 0.3;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      }
       #message {
         position: absolute; left: 50%; bottom: 15%; transform: translateX(-50%);
         max-width: 70%; text-align: center;
@@ -68,6 +73,7 @@
     <div id="hud">
       <div id="crosshair"></div>
       <div id="stats"></div>
+      <div id="driver"></div>
       <div id="message"></div>
       <canvas id="map" width="200" height="200"></canvas>
       <div id="hint">T — quality · M — map · B — glow · click/E — interact</div>
