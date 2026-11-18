@@ -105,6 +105,10 @@ try {
   await page.screenshot({ path: noPostOut });
 
   // ---- shot C: walk forward for 1.5s, confirm movement + map marks ----
+  await page.evaluate(() => {
+    // headless browsers can't pointer-lock; ask the controller to accept input
+    window.__liminal.controller.forceActiveForTest = true;
+  });
   await page.keyboard.down('KeyW');
   await sleep(1500);
   await page.keyboard.up('KeyW');

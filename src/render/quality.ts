@@ -63,22 +63,42 @@ export const TIER_PRESETS: Record<Tier, QualitySettings> = {
 
 export const TIER_ORDER: Tier[] = ['potato', 'medium', 'high', 'ultra'];
 
+export type OverrideKey = 'renderScale' | 'raytracedLighting' | 'volumetrics';
+
 export class QualityManager {
   tier: Tier;
   onChange?: (settings: QualitySettings) => void;
+  /** per-setting manual fine-tuning layered over the tier preset */
+  private readonly overrides: Partial<Pick<QualitySettings, OverrideKey>> = {};
 
   constructor(initial: Tier = 'medium') {
     this.tier = initial;
   }
 
   get settings(): QualitySettings {
-    return TIER_PRESETS[this.tier];
+    return { ...TIER_PRESETS[this.tier], ...this.overrides };
+  }
+
+  get hasOverrides(): boolean {
+    return Object.keys(this.overrides).length > 0;
   }
 
   setTier(tier: Tier): void {
     if (tier === this.tier) return;
     this.tier = tier;
+    // picking a preset clears manual fine-tuning — that's what presets mean
+    for (const key of Object.keys(this.overrides) as OverrideKey[]) delete this.overrides[key];
     this.onChange?.(this.settings);
+  }
+
+  setOverride<K extends OverrideKey>(key: K, value: QualitySettings[K] | undefined): void {
+    if (value === undefined) delete this.overrides[key];
+    else this.overrides[key] = value;
+    this.onChange?.(this.settings);
+  }
+
+  override<K extends OverrideKey>(key: K): QualitySettings[K] | undefined {
+    return this.overrides[key];
   }
 
   next(): Tier {

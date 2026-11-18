@@ -13,6 +13,8 @@ import { MapDevice } from './gameplay/map-device.js';
 import { LoreSystem } from './gameplay/lore.js';
 import { createTransport } from './core/transport.js';
 import { hud } from './ui/hud.js';
+import { loadSettings, initSettings } from './ui/settings.js';
+import { Bindings, loadBinds } from './gameplay/bindings.js';
 
 // ---- startup watchdog -------------------------------------------------------
 // If startup hangs anywhere (a promise that never settles, a driver call that
@@ -58,7 +60,12 @@ async function main(): Promise<void> {
 
   // ---- quality + render pipeline -----------------------------------------
   setStage('pipeline');
-  const quality = new QualityManager(detectTier(backend as Backend));
+  const persisted = loadSettings();
+  const quality = new QualityManager(persisted.tier ?? detectTier(backend as Backend));
+  if (persisted.renderScale !== undefined) quality.setOverride('renderScale', persisted.renderScale);
+  if (persisted.raytracedLighting !== undefined) {
+    quality.setOverride('raytracedLighting', persisted.raytracedLighting);
+  }
   const pipeline = new FramePipeline(renderer);
   pipeline.setPost(createPostChain(renderer, scene, camera));
 
@@ -96,7 +103,10 @@ async function main(): Promise<void> {
 
   // ---- gameplay systems ----------------------------------------------------
   setStage('input');
-  const controller = new PlayerController(camera, canvas, collision, room.spawn);
+  const bindings = new Bindings(loadBinds());
+  const controller = new PlayerController(camera, canvas, collision, room.spawn, bindings);
+  controller.sensitivityMultiplier = persisted.sensitivity ?? 1;
+  controller.invertY = persisted.invertY ?? false;
   const interactables = new InteractableSystem();
   const anchors = new AnchorRegistry();
   const map = new MapDevice();
@@ -142,18 +152,27 @@ async function main(): Promise<void> {
   // ---- HUD / hotkeys --------------------------------------------------------
   const statsLine = (fps: number): string => `${backend} · ${quality.tier} · ${fps} fps`;
 
+  const settings = initSettings({
+    quality,
+    bindings,
+    controller,
+    hasRaytracing: backend === 'webgpu',
+    onResume: () => void canvas.requestPointerLock(),
+  });
+
   document.addEventListener('keydown', (e) => {
-    if (e.code === 'KeyT') {
+    if (settings.isOpen) return; // menu owns the keyboard (incl. remap capture)
+    if (bindings.matches('quality', e.code)) {
       quality.setTier(quality.next());
       hud.message(`quality — ${quality.tier}`, 1500);
     }
-    if (e.code === 'KeyM') hud.toggleMap();
-    if (e.code === 'KeyB') {
+    if (bindings.matches('map', e.code)) hud.toggleMap();
+    if (bindings.matches('glow', e.code)) {
       const on = pipeline.toggleGlow();
       hud.message(`glow ${on ? 'on' : 'off'}`, 1500);
       console.info(`[liminal] glow toggled ${on ? 'on' : 'off'} by user`);
     }
-    if (e.code === 'KeyR') {
+    if (bindings.matches('respawn', e.code)) {
       const latest = anchors.list().sort((a, b) => b.discoveredAt - a.discoveredAt)[0];
       if (latest) {
         controller.respawnAt(new THREE.Vector3(latest.position.x, latest.position.y, latest.position.z));
@@ -163,8 +182,17 @@ async function main(): Promise<void> {
   });
 
   overlay.addEventListener('click', () => void canvas.requestPointerLock());
+  let everLocked = false;
   document.addEventListener('pointerlockchange', () => {
-    overlay.classList.toggle('hidden', document.pointerLockElement === canvas);
+    const locked = document.pointerLockElement === canvas;
+    if (locked) {
+      everLocked = true;
+      overlay.classList.add('hidden');
+      settings.close();
+    } else if (everLocked) {
+      // Esc (or any unlock) after first entry -> settings menu
+      settings.open();
+    }
   });
 
   // ---- resize ----------------------------------------------------------------
@@ -371,6 +399,8 @@ async function main(): Promise<void> {
     scene,
     camera,
     collision,
+    settings,
+    bindings,
     THREE,
   };
   (window as unknown as Record<string, unknown>).__liminalReady = true;

@@ -65,6 +65,71 @@
         padding: 40px; background: #100; color: #f0a; white-space: pre-wrap;
         font-size: 13px; line-height: 1.6;
       }
+
+      /* ---- settings menu ---- */
+      #settings {
+        position: absolute; inset: 0; z-index: 15;
+        display: flex; align-items: center; justify-content: center;
+        background: rgba(0, 0, 0, 0.82);
+      }
+      #settings.hidden { display: none; }
+      #settings .panel {
+        width: min(760px, 92vw); max-height: 88vh; overflow-y: auto;
+        background: #141310; border: 1px solid rgba(242, 233, 201, 0.22);
+        padding: 22px 26px; position: relative;
+      }
+      #settings h2 {
+        font-weight: 400; font-size: 16px; letter-spacing: 0.45em;
+        text-transform: uppercase; color: #f2e9c9; margin-bottom: 18px;
+      }
+      #settings h3 {
+        font-weight: 400; font-size: 12px; letter-spacing: 0.25em;
+        text-transform: uppercase; opacity: 0.55; margin: 4px 0 10px;
+      }
+      #settings .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; }
+      @media (max-width: 640px) { #settings .cols { grid-template-columns: 1fr; } }
+      #settings .row {
+        display: flex; align-items: center; justify-content: space-between;
+        gap: 12px; margin-bottom: 10px; font-size: 13px;
+      }
+      #settings .row span { opacity: 0.85; }
+      #settings .row em { font-style: normal; opacity: 0.6; margin-left: 6px; }
+      #settings .row.disabled { opacity: 0.4; }
+      #settings .row.check { justify-content: flex-start; }
+      #settings input[type='range'] { width: 46%; accent-color: #f2e9c9; }
+      #settings select {
+        background: #0c0b09; color: #d8d4c4; border: 1px solid rgba(242, 233, 201, 0.3);
+        padding: 4px 8px; font: inherit;
+      }
+      #settings .binds { margin: 8px 0; }
+      #settings .bind-row {
+        display: flex; align-items: center; justify-content: space-between;
+        font-size: 13px; padding: 3px 0;
+      }
+      #settings .bind-row button {
+        min-width: 92px; text-align: center;
+        background: #0c0b09; color: #d8d4c4;
+        border: 1px solid rgba(242, 233, 201, 0.3);
+        padding: 3px 8px; font: inherit; cursor: pointer;
+      }
+      #settings .bind-row button.capturing {
+        border-color: #f2e9c9; color: #f2e9c9;
+        animation: pulse 1s infinite alternate;
+      }
+      @keyframes pulse { from { opacity: 1; } to { opacity: 0.45; } }
+      #settings .actions { display: flex; justify-content: flex-end; margin-top: 18px; gap: 10px; }
+      #settings button {
+        background: #0c0b09; color: #d8d4c4; font: inherit; cursor: pointer;
+        border: 1px solid rgba(242, 233, 201, 0.3); padding: 7px 18px;
+      }
+      #settings button:hover { border-color: #f2e9c9; color: #f2e9c9; }
+      #settings button.ghost { padding: 4px 10px; font-size: 12px; opacity: 0.7; }
+      #set-resume { border-color: #f2e9c9; }
+      #settings .note {
+        position: absolute; left: 26px; bottom: 24px;
+        font-size: 12px; color: #9dffe0; max-width: 55%;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      }
     </style>
   </head>
   <body>
@@ -76,7 +141,7 @@
       <div id="driver"></div>
       <div id="message"></div>
       <canvas id="map" width="200" height="200"></canvas>
-      <div id="hint">T — quality · M — map · B — glow · click/E — interact</div>
+      <div id="hint">Esc — settings · T — quality · M — map · B — glow · click/E — interact</div>
     </div>
 
     <div id="overlay">

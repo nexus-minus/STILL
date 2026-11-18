@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import type { WorldCollision } from '../world/collision.js';
+import type { Action, Bindings } from './bindings.js';
 
 const UP = new THREE.Vector3(0, 1, 0);
 const DEG = Math.PI / 180;
@@ -41,10 +42,20 @@ export class PlayerController {
   pitch = 0;
   grounded = false;
 
-  /** fired on click / E while pointer-locked */
+  /** live-tunable from the settings menu */
+  sensitivityMultiplier = 1;
+  invertY = false;
+  /**
+   * Test-harness hook: headless browsers can't pointer-lock, but the smoke
+   * tests walk with real key events. Never set in production paths.
+   */
+  forceActiveForTest = false;
+
+  /** fired on interact key / click while pointer-locked */
   onInteract?: () => void;
 
   private readonly opts: Options;
+  private readonly binds: Bindings;
   private readonly keys = new Set<string>();
   private readonly velocity = new THREE.Vector3();
   private readonly moveDir = new THREE.Vector3();
@@ -59,9 +70,11 @@ export class PlayerController {
     private readonly canvas: HTMLCanvasElement,
     private readonly collision: WorldCollision,
     feetSpawn: THREE.Vector3,
+    bindings: Bindings,
     opts: Partial<Options> = {},
   ) {
     this.opts = { ...DEFAULTS, ...opts };
+    this.binds = bindings;
     this.spawnFeet = feetSpawn.clone();
     this.position.copy(feetSpawn).addScaledVector(UP, this.opts.height / 2);
     this.respawnAt(feetSpawn);
@@ -69,20 +82,25 @@ export class PlayerController {
     // ---- input -----------------------------------------------------------
     document.addEventListener('keydown', (e) => {
       this.keys.add(e.code);
-      if (e.code === 'Space') {
+      if (this.binds.matches('jump', e.code)) {
         this.jumpQueued = true;
         e.preventDefault();
       }
-      if (e.code === 'KeyE' && this.locked) this.onInteract?.();
+      if (this.binds.matches('interact', e.code) && this.locked) this.onInteract?.();
     });
     document.addEventListener('keyup', (e) => this.keys.delete(e.code));
     window.addEventListener('blur', () => this.keys.clear());
 
     document.addEventListener('mousemove', (e) => {
       if (!this.locked) return;
-      this.yaw -= e.movementX * this.opts.sensitivity;
+      // clamp: some browsers emit one huge movement spike on lock-enter
+      const dx = THREE.MathUtils.clamp(e.movementX, -300, 300);
+      const dy = THREE.MathUtils.clamp(e.movementY, -300, 300);
+      const sens = this.opts.sensitivity * this.sensitivityMultiplier;
+      this.yaw -= dx * sens;
+      const turn = dy * sens;
       this.pitch = THREE.MathUtils.clamp(
-        this.pitch - e.movementY * this.opts.sensitivity,
+        this.pitch - (this.invertY ? -turn : turn),
         -89 * DEG,
         89 * DEG,
       );
@@ -105,14 +123,23 @@ export class PlayerController {
     this.syncFeet();
   }
 
+  private down(action: Action): boolean {
+    return this.keys.has(this.binds.get(action));
+  }
+
   update(dt: number): void {
-    const { opts, keys, velocity } = this;
+    const { opts, velocity } = this;
+
+    // Unlocked (settings open, menus): no movement input, physics stays alive.
+    const active = this.locked || this.forceActiveForTest;
 
     // ---- desired horizontal movement (yaw-relative) -----------------------
-    const fz = (keys.has('KeyW') || keys.has('ArrowUp') ? 1 : 0)
-      - (keys.has('KeyS') || keys.has('ArrowDown') ? 1 : 0);
-    const rx = (keys.has('KeyD') || keys.has('ArrowRight') ? 1 : 0)
-      - (keys.has('KeyA') || keys.has('ArrowLeft') ? 1 : 0);
+    const fz = active
+      ? (this.down('forward') ? 1 : 0) - (this.down('back') ? 1 : 0)
+      : 0;
+    const rx = active
+      ? (this.down('right') ? 1 : 0) - (this.down('left') ? 1 : 0)
+      : 0;
 
     this.forward.set(-Math.sin(this.yaw), 0, -Math.cos(this.yaw));
     this.right.set(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
@@ -122,14 +149,14 @@ export class PlayerController {
       .addScaledVector(this.right, rx);
     if (this.moveDir.lengthSq() > 1) this.moveDir.normalize();
 
-    const speed = keys.has('ShiftLeft') || keys.has('ShiftRight') ? opts.runSpeed : opts.walkSpeed;
+    const speed = active && this.down('run') ? opts.runSpeed : opts.walkSpeed;
     const accel = this.grounded ? 14 : 4;
     const t = 1 - Math.exp(-accel * dt);
     velocity.x += (this.moveDir.x * speed - velocity.x) * t;
     velocity.z += (this.moveDir.z * speed - velocity.z) * t;
 
     // ---- jump / gravity ---------------------------------------------------
-    if (this.jumpQueued && this.grounded) {
+    if (active && this.jumpQueued && this.grounded) {
       velocity.y = opts.jumpSpeed;
       this.grounded = false;
     }
