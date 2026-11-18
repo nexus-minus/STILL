@@ -92,11 +92,25 @@ export async function loadWorld(): Promise<WorldDef> {
       const meshBox = new THREE.Box3().setFromObject(mesh);
       const size = meshBox.getSize(new THREE.Vector3());
       const faceArea = Math.max(size.x * size.y, size.y * size.z, size.x * size.z, 0.15);
+      const power = strength * faceArea;
+      const center = meshBox.getCenter(new THREE.Vector3());
       rtLights.push({
-        position: meshBox.getCenter(new THREE.Vector3()).toArray() as [number, number, number],
+        position: center.toArray() as [number, number, number],
         color: [emissive.r, emissive.g, emissive.b],
-        power: strength * faceArea,
+        power,
       });
+
+      // Fallback illumination: the WebGL2/potato/compat paths have no traced
+      // lighting — without this the imported map is pitch black there (the
+      // test room had fake point lights; imported maps need the same).
+      const pointLight = new THREE.PointLight(
+        new THREE.Color(emissive.r, emissive.g, emissive.b),
+        Math.max(power * 3, 6),
+        Math.max(6, Math.sqrt(power) * 7),
+        2,
+      );
+      pointLight.position.copy(center);
+      group.add(pointLight);
       break; // one light per mesh for now
     }
   });

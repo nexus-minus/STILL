@@ -63,47 +63,57 @@ async function main(): Promise<void> {
   setStage('collision');
   const collision = WorldCollision.fromMeshes(world.collisionMeshes);
 
-  // ---- spawn probe: raycast DOWN from above candidate points until we find
-  // the floor. Geometry reality beats heuristics (bounds.min.y can sit below
-  // the actual walkable surface).
+  // ---- spawn probe (their rules): ground UNDER the feet at the authored
+  // point — never from bounds top (that grabs roofs), never bounds-center
+  // (scattered lights skew it). Checkpoint rule: probe down from the
+  // checkpoint; wall-clipping resolves itself via capsule depenetration.
   let spawnFeet = world.spawn;
   if (world.source === 'map') {
+    const down = new THREE.Vector3(0, -1, 0);
     const min = world.bounds.min;
     const max = world.bounds.max;
-    const down = new THREE.Vector3(0, -1, 0);
-    const size = world.bounds.getSize(new THREE.Vector3());
-    const candidates: Array<[number, number]> = [
-      [0.5, 0.5],
-      [0.3, 0.3],
-      [0.7, 0.7],
-      [0.3, 0.7],
-      [0.7, 0.3],
-      [0.15, 0.5],
-      [0.85, 0.5],
-    ];
-    let found = false;
-    for (const [fx, fz] of candidates) {
-      const from = new THREE.Vector3(
-        min.x + (max.x - min.x) * fx,
-        max.y + 2,
-        min.z + (max.z - min.z) * fz,
-      );
-      const hit = collision.raycast(from, down, size.y + 20);
-      if (hit) {
-        spawnFeet = hit.point.clone().addScaledVector(down, -0.05);
-        found = true;
-        console.info(
-          `[world] spawn probe hit floor at [${spawnFeet.toArray().map((v) => v.toFixed(1)).join(', ')}]`,
-        );
-        break;
-      }
+    const probeDown = (from: THREE.Vector3): THREE.Vector3 | null => {
+      const hit = collision.raycast(from, down, 200);
+      return hit ? hit.point.clone().addScaledVector(down, -0.05) : null;
+    };
+
+    const cpSpawn = world.checkpoints.find((cp) => cp.kind === 'spawn');
+    const attempts: Array<() => THREE.Vector3 | null> = [];
+    if (cpSpawn) {
+      attempts.push(() => probeDown(new THREE.Vector3(cpSpawn.position.x, cpSpawn.position.y + 1.5, cpSpawn.position.z)));
     }
-    if (!found) console.warn('[world] spawn probe found NO floor — add a kind="spawn" checkpoint');
+    // default: their stated start (0,0) from just above walking height
+    attempts.push(() => probeDown(new THREE.Vector3(0, 3, 0)));
+    // grid scans, starting UNDER roofs, then from above as last resort
+    const grid = (fromY: number): (() => THREE.Vector3 | null)[] => {
+      const pts: Array<[number, number]> = [
+        [0.5, 0.5], [0.3, 0.3], [0.7, 0.7], [0.3, 0.7], [0.7, 0.3],
+        [0.15, 0.5], [0.85, 0.5], [0.5, 0.15], [0.5, 0.85],
+      ];
+      return pts.map(([fx, fz]) => () =>
+        probeDown(new THREE.Vector3(min.x + (max.x - min.x) * fx, fromY, min.z + (max.z - min.z) * fz)));
+    };
+    attempts.push(...grid(Math.max(max.y - 0.5, 3)));
+    attempts.push(...grid(max.y + 2));
+
+    let feet: THREE.Vector3 | null = null;
+    for (const attempt of attempts) {
+      feet = attempt();
+      if (feet) break;
+    }
+
+    if (feet) {
+      spawnFeet = feet;
+      console.info(`[world] spawn probe landed at [${feet.toArray().map((v) => v.toFixed(1)).join(', ')}]`);
+    } else {
+      console.warn('[world] spawn probe found NO ground — add a kind="spawn" checkpoint');
+    }
   }
 
   // ---- quality + render pipeline -----------------------------------------
   setStage('pipeline');
   const persisted = loadSettings();
+  renderer.toneMappingExposure = persisted.exposure ?? 1.0;
   const quality = new QualityManager(persisted.tier ?? detectTier(backend as Backend));
   if (persisted.renderScale !== undefined) quality.setOverride('renderScale', persisted.renderScale);
   if (persisted.raytracedLighting !== undefined) {
@@ -242,6 +252,10 @@ async function main(): Promise<void> {
     bindings,
     controller,
     hasRaytracing: backend === 'webgpu',
+    getExposure: () => renderer.toneMappingExposure,
+    setExposure: (value) => {
+      renderer.toneMappingExposure = value;
+    },
     onResume: () => {
       // Chrome forbids immediate relock after an Esc-exit (SecurityError) —
       // show the click-to-enter overlay as the guaranteed path, and retry
@@ -280,6 +294,22 @@ async function main(): Promise<void> {
       }
       hud.message('retrying WebGPU…', 1500);
       window.setTimeout(() => location.reload(), 500);
+    }
+    // dev view: N = wireframe, so the exact collision/render mesh is visible
+    if (e.code === 'KeyN') {
+      wireframeOn = !wireframeOn;
+      const seen = new Set<THREE.Material>();
+      world.group.traverse((obj) => {
+        const mesh = obj as THREE.Mesh;
+        if (!mesh.isMesh) return;
+        const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+        for (const material of materials) {
+          if (seen.has(material)) continue;
+          seen.add(material);
+          (material as THREE.MeshStandardMaterial).wireframe = wireframeOn;
+        }
+      });
+      hud.message(`wireframe ${wireframeOn ? 'on — this is the collision mesh' : 'off'}`, 2500);
     }
     if (bindings.matches('respawn', e.code)) {
       const latest = anchors.list().sort((a, b) => b.discoveredAt - a.discoveredAt)[0];
@@ -410,6 +440,7 @@ async function main(): Promise<void> {
   let fpsTimer = 0;
   let mapTimer = 0;
   let selfcheckDone = !pipeline.hasAdvanced; // only armed when RT exists
+  let wireframeOn = false;
 
   renderer.setAnimationLoop((time: number) => {
     const dt = Math.min((time - last) / 1000, 0.05);

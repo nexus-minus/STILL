@@ -10,6 +10,7 @@ export interface PersistedSettings {
   invertY?: boolean;
   renderScale?: number;
   raytracedLighting?: boolean;
+  exposure?: number;
 }
 
 export function loadSettings(): PersistedSettings {
@@ -61,6 +62,8 @@ export function initSettings(opts: {
   controller: PlayerController;
   hasRaytracing: boolean;
   onResume: () => void;
+  getExposure: () => number;
+  setExposure: (value: number) => void;
 }): SettingsHandle {
   const { quality, bindings, controller } = opts;
 
@@ -83,6 +86,10 @@ export function initSettings(opts: {
           <label class="row">
             <span>Render scale <em id="set-scale-val"></em></span>
             <input type="range" id="set-scale" min="0.5" max="1" step="0.05" />
+          </label>
+          <label class="row">
+            <span>Exposure <em id="set-exp-val"></em></span>
+            <input type="range" id="set-exp" min="0.5" max="4" step="0.1" />
           </label>
           <label class="row check">
             <input type="checkbox" id="set-rt" ${opts.hasRaytracing ? '' : 'disabled'} />
@@ -128,6 +135,7 @@ export function initSettings(opts: {
     invertY: controller.invertY,
     renderScale: quality.override('renderScale'),
     raytracedLighting: quality.override('raytracedLighting'),
+    exposure: opts.getExposure(),
   };
   const persist = (): void => {
     persisted.tier = quality.tier;
@@ -135,6 +143,7 @@ export function initSettings(opts: {
     persisted.invertY = controller.invertY;
     persisted.renderScale = quality.override('renderScale');
     persisted.raytracedLighting = quality.override('raytracedLighting');
+    persisted.exposure = opts.getExposure();
     saveSettings(persisted);
   };
 
@@ -237,6 +246,8 @@ export function initSettings(opts: {
   const preset = $<HTMLSelectElement>('set-preset');
   const scale = $<HTMLInputElement>('set-scale');
   const scaleVal = $<HTMLElement>('set-scale-val');
+  const exposure = $<HTMLInputElement>('set-exp');
+  const exposureVal = $<HTMLElement>('set-exp-val');
   const rt = $<HTMLInputElement>('set-rt');
   const sens = $<HTMLInputElement>('set-sens');
   const sensVal = $<HTMLElement>('set-sens-val');
@@ -247,6 +258,8 @@ export function initSettings(opts: {
     preset.value = quality.hasOverrides ? '__custom' : quality.tier;
     scale.value = String(s.renderScale);
     scaleVal.textContent = `${Math.round(s.renderScale * 100)}%`;
+    exposure.value = String(opts.getExposure());
+    exposureVal.textContent = `${opts.getExposure().toFixed(1)}×`;
     rt.checked = s.raytracedLighting;
     sens.value = String(controller.sensitivityMultiplier);
     sensVal.textContent = `${controller.sensitivityMultiplier.toFixed(2)}×`;
@@ -260,6 +273,11 @@ export function initSettings(opts: {
   });
   scale.addEventListener('input', () => {
     quality.setOverride('renderScale', Number(scale.value));
+    syncUI();
+    persist();
+  });
+  exposure.addEventListener('input', () => {
+    opts.setExposure(Number(exposure.value));
     syncUI();
     persist();
   });
