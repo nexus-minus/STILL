@@ -78,11 +78,12 @@ export function createAdvancedRenderer(
   renderer: THREE.WebGPURenderer,
   scene: THREE.Scene,
   camera: THREE.PerspectiveCamera,
-  collisionMeshes: THREE.Mesh[],
+  /** SHADOW/tracing geometry — must EXCLUDE emissive fixtures (see WorldDef) */
+  bvhMeshes: THREE.Mesh[],
   lights: RtLight[],
 ): AdvancedRenderer {
   // ---- BVH first: kernel deps reference its fns ------------------------------
-  const bvhData = new BVHComputeData(collisionMeshes, {
+  const bvhData = new BVHComputeData(bvhMeshes, {
     attributes: { position: 'vec4f', normal: 'vec4f' },
   });
   let ready = false;

@@ -15,6 +15,14 @@ export interface WorldCheckpoint {
 export interface WorldDef {
   group: THREE.Group;
   collisionMeshes: THREE.Mesh[];
+  /**
+   * Shadow/tracing geometry = collision meshes MINUS emissive fixtures.
+   * A light must never occlude itself: shadow rays stop only marginally short
+   * of the light centre (0.08m), but a0.44m cube fixture reaches0.22m in —
+   * it blocked every ray toward itself (uniform-green debug, shadowless
+   * normal mode). Thin test-room panels never triggered it.
+   */
+  shadowMeshes: THREE.Mesh[];
   rtLights: RtLight[];
   spawn: THREE.Vector3;
   checkpoints: WorldCheckpoint[];
@@ -75,6 +83,7 @@ export async function loadWorld(opts: { forceTest?: boolean } = {}): Promise<Wor
   group.updateMatrixWorld(true);
 
   const collisionMeshes: THREE.Mesh[] = [];
+  const emissiveMeshes = new Set<THREE.Mesh>();
   const rtLights: RtLight[] = [];
   const bounds = new THREE.Box3();
 
@@ -116,6 +125,7 @@ export async function loadWorld(opts: { forceTest?: boolean } = {}): Promise<Wor
       );
       pointLight.position.copy(center);
       group.add(pointLight);
+      emissiveMeshes.add(mesh);
       break; // one light per mesh for now
     }
   });
@@ -147,7 +157,24 @@ export async function loadWorld(opts: { forceTest?: boolean } = {}): Promise<Wor
       `bounds ${bounds.min.toArray().map((v) => v.toFixed(1)).join('/')}..${bounds.max.toArray().map((v) => v.toFixed(1)).join('/')}`,
   );
 
-  return { group, collisionMeshes, rtLights, spawn, checkpoints, bounds, source: 'map' };
+  const shadowMeshes = collisionMeshes.filter((m) => !emissiveMeshes.has(m));
+  if (shadowMeshes.length < collisionMeshes.length) {
+    console.info(
+      `[world] shadow BVH: ${shadowMeshes.length}/${collisionMeshes.length} meshes ` +
+        `(${collisionMeshes.length - shadowMeshes.length} emissive fixtures excluded so lights never block themselves)`,
+    );
+  }
+
+  return {
+    group,
+    collisionMeshes,
+    shadowMeshes,
+    rtLights,
+    spawn,
+    checkpoints,
+    bounds,
+    source: 'map',
+  };
 }
 
 /** Procedural fallback — the demo content used until a real map exists. */
@@ -157,6 +184,7 @@ function testWorld(): WorldDef {
   return {
     group: room.group,
     collisionMeshes: room.collisionMeshes,
+    shadowMeshes: room.collisionMeshes, // test-room lights are already no-collide
     rtLights: room.rtLights,
     spawn: room.spawn,
     checkpoints: [

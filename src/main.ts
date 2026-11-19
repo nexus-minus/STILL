@@ -176,7 +176,7 @@ async function main(): Promise<void> {
       // identity matrices would park all geometry at local origins
       scene.updateMatrixWorld(true);
       camera.updateMatrixWorld(true);
-      advanced = createAdvancedRenderer(renderer, scene, camera, world.collisionMeshes, world.rtLights);
+      advanced = createAdvancedRenderer(renderer, scene, camera, world.shadowMeshes, world.rtLights);
       advanced.setLogicalSize(window.innerWidth, window.innerHeight);
       if (rtDebug > 0) {
         advanced.setDebugMode(rtDebug);
