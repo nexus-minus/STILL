@@ -256,6 +256,12 @@ export function createAdvancedRenderer(
       bvh_RaycastFirstHit(ray, &hit);
 
       if (!hit.didHit) {
+        // debug2 promises "red = miss" (HUD + comment below) — paint it so
+        // void/seam pixels are unmistakable instead of blending to black
+        if (debugMode > 1.5 && debugMode < 2.5) {
+          textureStore(lightingTex, indexUV, vec4f(1.0, 0.0, 0.0, 1.0));
+          return vec4f(0.0);
+        }
         let prevM = textureLoad(historyTex, indexUV, 0).rgb;
         let blendedM = mix(prevM, vec3f(0.0), blendAlpha);
         textureStore(lightingTex, indexUV, vec4f(blendedM, 1.0));

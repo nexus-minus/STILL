@@ -161,9 +161,22 @@ path (see `test-room.ts`).
   black frames → existing detector → forced-WebGL reload.
 
 Verification split: local tests prove the GL paths + all safety nets (green);
-WebGPU pixel output needs real hardware (this machine's Chromium destroys its
-Dawn instance in 4 ms and Firefox lacks WebGPU) — the boot line reports
-`rt=armed|off`, and any shader error appears on screen and in the console.
+WebGPU pixel output needs real hardware — it runs fine in this machine's
+Chromium headful with `--enable-unsafe-webgpu` and a clean
+`XDG_CONFIG_HOME` (that is how the rt-softshadow screenshots were taken;
+headless Chromium still destroys the Dawn instance quickly, and Firefox
+lacks WebGPU) — the boot line reports `rt=armed|off`, and any shader error
+appears on screen and in the console.
+
+### WGSL/TSL gotchas learned the hard way
+
+- The `compute` function must be the FIRST function in the source — three
+  parses the first fn for the entry signature.
+- No `-> void` — Tint rejects it; use a value-returning call instead.
+- Never apply unary minus to a swizzle (`-ray.direction` on a swizzle can
+  produce NaN in TSL) — precompute the value.
+- `target` is a WGSL reserved keyword: `var target` fails Tint validation.
+  Name locals `lightPt` or similar.
 
 ## Perf targets
 
