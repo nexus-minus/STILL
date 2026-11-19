@@ -39,6 +39,11 @@ export class FramePipeline {
     return this.glowEnabled && (this.post?.ok ?? false);
   }
 
+  /** current glow state (settings menu checkbox mirrors this) */
+  get glowOn(): boolean {
+    return this.glowEnabled;
+  }
+
   setGlowEnabled(enabled: boolean): void {
     this.glowEnabled = enabled;
   }

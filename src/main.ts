@@ -307,6 +307,9 @@ async function main(): Promise<void> {
   })();
   const urlForced = new URLSearchParams(location.search).get('forcegl') === '1';
 
+  // persisted glow preference (the software-rasterizer auto-detect below can
+  // still force it off afterwards — that ordering is intentional)
+  if (persisted.glow !== undefined) pipeline.setGlowEnabled(persisted.glow);
   const settings = initSettings({
     quality,
     bindings,
@@ -316,6 +319,8 @@ async function main(): Promise<void> {
     setExposure: (value) => {
       renderer.toneMappingExposure = value;
     },
+    getGlow: () => pipeline.glowOn,
+    setGlow: (value) => pipeline.setGlowEnabled(value),
     onResume: () => {
       // Chrome forbids immediate relock after an Esc-exit (SecurityError) —
       // show the click-to-enter overlay as the guaranteed path, and retry

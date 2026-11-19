@@ -11,6 +11,7 @@ export interface PersistedSettings {
   renderScale?: number;
   raytracedLighting?: boolean;
   lightGain?: number;
+  glow?: boolean;
   exposure?: number;
 }
 
@@ -65,6 +66,8 @@ export function initSettings(opts: {
   onResume: () => void;
   getExposure: () => number;
   setExposure: (value: number) => void;
+  getGlow: () => boolean;
+  setGlow: (value: boolean) => void;
 }): SettingsHandle {
   const { quality, bindings, controller } = opts;
 
@@ -95,6 +98,10 @@ export function initSettings(opts: {
           <label class="row">
             <span>Light intensity <em id="set-gain-val"></em></span>
             <input type="range" id="set-gain" min="0.2" max="3" step="0.1" />
+          </label>
+          <label class="row check">
+            <input type="checkbox" id="set-glow" />
+            <span>Glow (bloom)</span>
           </label>
           <label class="row check">
             <input type="checkbox" id="set-rt" ${opts.hasRaytracing ? '' : 'disabled'} />
@@ -151,6 +158,7 @@ export function initSettings(opts: {
     persisted.raytracedLighting = quality.override('raytracedLighting');
     persisted.exposure = opts.getExposure();
     persisted.lightGain = quality.override('lightGain');
+    persisted.glow = opts.getGlow();
     saveSettings(persisted);
   };
 
@@ -257,6 +265,7 @@ export function initSettings(opts: {
   const exposureVal = $<HTMLElement>('set-exp-val');
   const gain = $<HTMLInputElement>('set-gain');
   const gainVal = $<HTMLElement>('set-gain-val');
+  const glow = $<HTMLInputElement>('set-glow');
   const rt = $<HTMLInputElement>('set-rt');
   const sens = $<HTMLInputElement>('set-sens');
   const sensVal = $<HTMLElement>('set-sens-val');
@@ -271,6 +280,7 @@ export function initSettings(opts: {
     exposureVal.textContent = `${opts.getExposure().toFixed(1)}×`;
     gain.value = String(s.lightGain);
     gainVal.textContent = `${s.lightGain.toFixed(1)}×`;
+    glow.checked = opts.getGlow();
     rt.checked = s.raytracedLighting;
     sens.value = String(controller.sensitivityMultiplier);
     sensVal.textContent = `${controller.sensitivityMultiplier.toFixed(2)}×`;
@@ -295,6 +305,10 @@ export function initSettings(opts: {
   gain.addEventListener('input', () => {
     quality.setOverride('lightGain', Number(gain.value));
     syncUI();
+    persist();
+  });
+  glow.addEventListener('change', () => {
+    opts.setGlow(glow.checked);
     persist();
   });
   rt.addEventListener('change', () => {
