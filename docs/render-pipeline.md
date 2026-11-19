@@ -28,6 +28,26 @@ optional OIDN WebGPU denoiser, but explicitly warns its WebGPU API/BVH
 dependencies are not yet stable. The game renderer stays in place while the
 path-tracer is compared against the same scene.
 
+### Denoising and page diagnostics
+
+Why this page converges when still but is too noisy to play — and how
+real-time path-traced games fix that (low spp + temporal reprojection + OIDN
+with albedo/normal guides + upscaling + ReSTIR + baked static GI) — is written
+up in [denoising.md](denoising.md), including what this repo already has vs
+still needs.
+
+`/pathtrace.html` diagnostic URL parameters (from `src/pathtrace-demo.ts`, all
+optional):
+
+| param | default | effect |
+| --- | --- | --- |
+| `?lscale=N` | 400 | multiplies every area light's intensity. The exported fixtures are physically dim (radiance ≈ 5 over ~0.19 m²), which AgX maps to pure black at exposure 1, so the page scales radiance by ×400 to make the comparison readable; the gain slider multiplies on top |
+| `?env=N` | 0.35 | `scene.environmentIntensity` — the gradient world fill (also the environment's light contribution) |
+| `?flip=1` | off | aims each area light's +Z at the room instead of -Z, to test which side the tracer's area-light normal actually emits |
+| `?worker=1` | off | builds mesh BVHs in `GenerateMeshBVHWorker` workers (the game-sized async path); default builds synchronously to isolate worker-BVH bugs from lighting bugs |
+| `?bg=green` | off | green background so missed camera rays are obvious — a green wall of background means the tracer's BVH never sees the map mesh |
+| `?sun` | off | adds a diagnostic `DirectionalLight` at startup (same as the "Diagnostic sun" checkbox) |
+
 ### Recommended production split
 
 For a walkable game, use:
@@ -89,6 +109,10 @@ BVH. `three-mesh-bvh` provides `MeshBVHUniformStruct` + `BVHShaderGLSL`
 | high     | WebGPU  | 1.0          | half-res           | 2       | half-res      |
 | ultra    | WebGPU  | 1.0          | full-res           | 2       | full-res      |
 
+Note: high/ultra *request* `rtBounces: 2`, but the shader currently caps the
+count at 1 (`bounceCount.value = settings.rtBounces >= 1 ? 1 : 0` in
+`rt.ts`) — the second bounce is not yet wired.
+
 - `T` cycles tiers in-game (temporary until the settings menu, phase 1).
 - Toggling any feature off removes the pass from the frame entirely —
   "turn volumetrics on/off" is a hard requirement, so off must cost nothing.
@@ -123,7 +147,7 @@ path (see `test-room.ts`).
 
 - **compute** at `lightingScale` res: primary ray (`ndcToCameraRay` +
   `bvh_RaycastFirstHit`) → NEE over the emissive light list with
-  `bvh_RaycastAnyHit` shadow rays → one cosine-hemisphere bounce, shaded at
+  `bvh_RaycastFirstHit` shadow rays (`sh.dist > 0.02` self-hit guard) → one cosine-hemisphere bounce, shaded at
   its hit → hemisphere ambient → storage texture.
   Mirrors the official three-mesh-bvh WebGPU path-tracing example exactly.
 - **raster MRT** `{ output, diffuse, emissive }` (3 attachments,
