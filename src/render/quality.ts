@@ -17,6 +17,9 @@ export interface QualitySettings {
   volumetricScale: number;
 
   bloom: boolean;
+
+  /** runtime multiplier on all traced light powers (match to Blender taste) */
+  lightGain: number;
 }
 
 export const TIER_PRESETS: Record<Tier, QualitySettings> = {
@@ -29,6 +32,7 @@ export const TIER_PRESETS: Record<Tier, QualitySettings> = {
     volumetrics: false,
     volumetricScale: 0.25,
     bloom: true,
+    lightGain: 1,
   },
   // The default target: quarter-res traced lighting + quarter-res volumetrics.
   medium: {
@@ -39,6 +43,7 @@ export const TIER_PRESETS: Record<Tier, QualitySettings> = {
     volumetrics: true,
     volumetricScale: 0.25,
     bloom: true,
+    lightGain: 1,
   },
   high: {
     renderScale: 1,
@@ -48,6 +53,7 @@ export const TIER_PRESETS: Record<Tier, QualitySettings> = {
     volumetrics: true,
     volumetricScale: 0.5,
     bloom: true,
+    lightGain: 1,
   },
   // Full-res traced lighting.
   ultra: {
@@ -58,12 +64,13 @@ export const TIER_PRESETS: Record<Tier, QualitySettings> = {
     volumetrics: true,
     volumetricScale: 1,
     bloom: true,
+    lightGain: 1,
   },
 };
 
 export const TIER_ORDER: Tier[] = ['potato', 'medium', 'high', 'ultra'];
 
-export type OverrideKey = 'renderScale' | 'raytracedLighting' | 'volumetrics';
+export type OverrideKey = 'renderScale' | 'raytracedLighting' | 'volumetrics' | 'lightGain';
 
 export class QualityManager {
   tier: Tier;

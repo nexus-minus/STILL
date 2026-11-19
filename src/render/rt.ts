@@ -61,6 +61,8 @@ export interface AdvancedRenderer {
   setLogicalSize(width: number, height: number): void;
   /** 0 = normal, 1 = uv-gradient (pipeline alive?), 2 = red=miss / green=hit */
   setDebugMode(mode: number): void;
+  /** runtime intensity multiplier for all lights (settings slider) */
+  setLightGain(value: number): void;
   dispose(): void;
 }
 
@@ -125,6 +127,8 @@ export function createAdvancedRenderer(
   const lightCount = uniform(Math.min(lights.length, MAX_LIGHTS));
   const bounceCount = uniform(0);
   const debugMode = uniform(0);
+  /** runtime intensity multiplier (settings slider) — applied at light upload */
+  const lightGain = uniform(1);
   // Precomputed4-tap offsets: TSL miscompiles unary minus on swizzle
   // components inside vec2(...) (it emitted literal NaN.0 into WGSL and broke
   // every fragment pipeline) — no node arithmetic, just four uniforms.
@@ -164,7 +168,6 @@ export function createAdvancedRenderer(
   // WGSL bindings stable.
   const lightPool = lights;
   const nearestIdx = lights.map((_, i) => i);
-  const staticPool = lights.length <= MAX_LIGHTS;
 
   // ---- WGSL ------------------------------------------------------------------------
   const lightParams = Array.from(
@@ -251,8 +254,20 @@ export function createAdvancedRenderer(
         return vec4f(0.0);
       }
 
-      // hemisphere ambient so nothing is pitch black
-      var acc = mix(vec3f(0.028, 0.026, 0.022), vec3f(0.06, 0.058, 0.052), N.y * 0.5 + 0.5);
+      // hemisphere ambient so nothing is pitch black — modulated by RAYTRACED
+      // AO (one short jittered ray up the normal): without this the ambient
+      // ignores geometry and every corner reads flat/wrong
+      var aor: Ray;
+      aor.origin = P;
+      let jseed = uv * 91.7 + vec2f(frameIndex * 0.37, frameIndex * 0.73);
+      let j1 = hash12(jseed) - 0.5;
+      let j2 = hash12(jseed + vec2f(7.31, 2.17)) - 0.5;
+      aor.direction = normalize(N + vec3f(j1, j2, j1 * j2) * 0.7);
+      aor.maxDist = 0.6;
+      var aoh: IntersectionResult;
+      var ao = 1.0;
+      if (bvh_RaycastFirstHit(aor, &aoh)) { ao = clamp(aoh.dist / 0.6, 0.0, 1.0); }
+      var acc = mix(vec3f(0.028, 0.026, 0.022), vec3f(0.06, 0.058, 0.052), N.y * 0.5 + 0.5) * ao;
 
       // direct lighting: next-event estimation with traced shadow rays
       ${shadowChain}
@@ -448,25 +463,38 @@ export function createAdvancedRenderer(
       tapSE.value.set(ex, -ey);
       tapNW.value.set(-ex, ey);
 
-      // nearest-12 light upload when the pool outgrows the uniform slots
-      if (!staticPool) {
+      // refill lights every frame (cheap; lets the intensity gain apply live);
+      // nearest-12 when the pool outgrows the uniform slots
+      if (lightPool.length > MAX_LIGHTS) {
         nearestIdx.sort(
           (a, b) => lightDist2(lightPool[a], cam) - lightDist2(lightPool[b], cam),
         );
-        for (let i = 0; i < MAX_LIGHTS; i++) {
-          const light = lightPool[nearestIdx[i]];
-          lightPos[i].value.set(light.position[0], light.position[1], light.position[2], light.power);
-          lightCol[i].value.set(light.color[0], light.color[1], light.color[2], light.halfSize);
-          const hasCone = !!light.direction && light.coneCos !== undefined;
-          lightDir[i].value.set(
-            hasCone ? light.direction![0] : 0,
-            hasCone ? light.direction![1] : 0,
-            hasCone ? light.direction![2] : 0,
-            hasCone ? light.coneCos! : -1,
-          );
-        }
       }
-      lightCount.value = Math.min(lightPool.length, MAX_LIGHTS);
+      const count = Math.min(lightPool.length, MAX_LIGHTS);
+      for (let i = 0; i < MAX_LIGHTS; i++) {
+        const use = i < count;
+        const light = lightPool[lightPool.length > MAX_LIGHTS ? nearestIdx[i] : i];
+        lightPos[i].value.set(
+          use ? light.position[0] : 0,
+          use ? light.position[1] : 0,
+          use ? light.position[2] : 0,
+          use ? light.power * lightGain.value : 0,
+        );
+        lightCol[i].value.set(
+          use ? light.color[0] : 0,
+          use ? light.color[1] : 0,
+          use ? light.color[2] : 0,
+          use ? light.halfSize : 0,
+        );
+        const hasCone = use && !!light.direction && light.coneCos !== undefined;
+        lightDir[i].value.set(
+          hasCone ? light.direction![0] : 0,
+          hasCone ? light.direction![1] : 0,
+          hasCone ? light.direction![2] : 0,
+          hasCone ? light.coneCos! : -1,
+        );
+      }
+      lightCount.value = count;
 
       frame++;
       invViewProj.value.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse).invert();
@@ -492,6 +520,9 @@ export function createAdvancedRenderer(
     },
     setDebugMode(mode: number): void {
       debugMode.value = mode;
+    },
+    setLightGain(value: number): void {
+      lightGain.value = value;
     },
     dispose(): void {
       postPipeline.dispose();

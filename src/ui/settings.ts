@@ -10,6 +10,7 @@ export interface PersistedSettings {
   invertY?: boolean;
   renderScale?: number;
   raytracedLighting?: boolean;
+  lightGain?: number;
   exposure?: number;
 }
 
@@ -91,6 +92,10 @@ export function initSettings(opts: {
             <span>Exposure <em id="set-exp-val"></em></span>
             <input type="range" id="set-exp" min="0.5" max="4" step="0.1" />
           </label>
+          <label class="row">
+            <span>Light intensity <em id="set-gain-val"></em></span>
+            <input type="range" id="set-gain" min="0.2" max="3" step="0.1" />
+          </label>
           <label class="row check">
             <input type="checkbox" id="set-rt" ${opts.hasRaytracing ? '' : 'disabled'} />
             <span>Raytraced shadows + GI${opts.hasRaytracing ? '' : ' — unavailable (no WebGPU)'}</span>
@@ -135,6 +140,7 @@ export function initSettings(opts: {
     invertY: controller.invertY,
     renderScale: quality.override('renderScale'),
     raytracedLighting: quality.override('raytracedLighting'),
+    lightGain: quality.override('lightGain'),
     exposure: opts.getExposure(),
   };
   const persist = (): void => {
@@ -144,6 +150,7 @@ export function initSettings(opts: {
     persisted.renderScale = quality.override('renderScale');
     persisted.raytracedLighting = quality.override('raytracedLighting');
     persisted.exposure = opts.getExposure();
+    persisted.lightGain = quality.override('lightGain');
     saveSettings(persisted);
   };
 
@@ -248,6 +255,8 @@ export function initSettings(opts: {
   const scaleVal = $<HTMLElement>('set-scale-val');
   const exposure = $<HTMLInputElement>('set-exp');
   const exposureVal = $<HTMLElement>('set-exp-val');
+  const gain = $<HTMLInputElement>('set-gain');
+  const gainVal = $<HTMLElement>('set-gain-val');
   const rt = $<HTMLInputElement>('set-rt');
   const sens = $<HTMLInputElement>('set-sens');
   const sensVal = $<HTMLElement>('set-sens-val');
@@ -260,6 +269,8 @@ export function initSettings(opts: {
     scaleVal.textContent = `${Math.round(s.renderScale * 100)}%`;
     exposure.value = String(opts.getExposure());
     exposureVal.textContent = `${opts.getExposure().toFixed(1)}×`;
+    gain.value = String(s.lightGain);
+    gainVal.textContent = `${s.lightGain.toFixed(1)}×`;
     rt.checked = s.raytracedLighting;
     sens.value = String(controller.sensitivityMultiplier);
     sensVal.textContent = `${controller.sensitivityMultiplier.toFixed(2)}×`;
@@ -278,6 +289,11 @@ export function initSettings(opts: {
   });
   exposure.addEventListener('input', () => {
     opts.setExposure(Number(exposure.value));
+    syncUI();
+    persist();
+  });
+  gain.addEventListener('input', () => {
+    quality.setOverride('lightGain', Number(gain.value));
     syncUI();
     persist();
   });

@@ -155,13 +155,19 @@ async function main(): Promise<void> {
   if (persisted.raytracedLighting !== undefined) {
     quality.setOverride('raytracedLighting', persisted.raytracedLighting);
   }
+  if (persisted.lightGain !== undefined) {
+    quality.setOverride('lightGain', persisted.lightGain);
+  }
   const pipeline = new FramePipeline(renderer);
   pipeline.setPost(createPostChain(renderer, scene, camera));
 
   const applyQuality = (): void => {
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2) * quality.settings.renderScale);
   };
-  quality.onChange = () => applyQuality();
+  quality.onChange = () => {
+    applyQuality();
+    advanced?.setLightGain(quality.settings.lightGain);
+  };
   applyQuality();
 
   // ---- raytraced path (WebGPU only; graceful failure is the design) ----------
@@ -197,6 +203,7 @@ async function main(): Promise<void> {
         );
       }
       pipeline.setAdvanced(advanced);
+      advanced.setLightGain(quality.settings.lightGain);
       let rtErrorShown = false;
       hookWebGPUErrors(renderer, () => {
         if (rtErrorShown) return;
