@@ -4,7 +4,8 @@ import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RectAreaLightNode, WebGPURenderer } from 'three/webgpu';
 import { RectAreaLightTexturesLib } from 'three/addons/lights/RectAreaLightTexturesLib.js';
-import { WebGPUPathTracer } from 'three-gpu-pathtracer/webgpu';
+import { WebGPUPathTracer, OIDNDenoiser } from 'three-gpu-pathtracer/webgpu';
+import { initUNetFromURL } from 'oidn-webgpu';
 import { GradientEquirectTexture } from 'three-gpu-pathtracer';
 import { GenerateMeshBVHWorker } from 'three-mesh-bvh/worker';
 import { getLights as getPathTracerLights } from 'three-gpu-pathtracer/src/core/utils/sceneUpdateUtils.js';
@@ -276,6 +277,31 @@ async function main(): Promise<void> {
       ? 'Self-emission probe: ON (tests camera rays + material path)'
       : 'Self-emission probe: OFF';
   });
+  // OIDN neural denoising — the technique real-time path-traced games use to
+  // look clean at 1-8 spp. The tracer runs it automatically once sampling
+  // reaches "Samples"; drop the samples slider to 8 for a near-instant image.
+  ($('denoise') as HTMLInputElement).addEventListener('change', (event) => {
+    const enabled = (event.currentTarget as HTMLInputElement).checked;
+    if (enabled) {
+      status.textContent = 'Loading OIDN denoiser weights (0.6 MB)…';
+      const denoiser = new OIDNDenoiser({
+        initUNetFromURL,
+        auxWeightsUrl: 'weights/rt_hdr_alb_nrm_small.tza',
+      });
+      denoiser.addEventListener('error', (e) => {
+        status.textContent = `Denoiser failed: ${e.error.message}`;
+        status.style.color = '#ff7777';
+      });
+      denoiser.addEventListener('progress', (e) => {
+        status.textContent = `denoising · ${(e.progress * 100).toFixed(0)}%`;
+      });
+      tracer.setDenoiser(denoiser);
+      status.textContent = 'Denoiser on — it runs when sampling settles';
+    } else {
+      tracer.setDenoiser(null);
+      status.textContent = 'Denoiser off — raw path tracing';
+    }
+  });
   let showRaster = false;
   $('reset').addEventListener('click', () => tracer.reset());
   $('raster').addEventListener('click', () => {
@@ -284,7 +310,14 @@ async function main(): Promise<void> {
   });
   tracer.addEventListener('progress', (event) => {
     const avg = event.samples?.avg;
-    status.textContent = `${event.stage}${avg === undefined ? '' : ` · ${avg.toFixed(1)} spp`}`;
+    const pct = event.progress == null ? '' : ` · ${(event.progress * 100).toFixed(0)}%`;
+    status.textContent = `${event.stage}${avg === undefined ? '' : ` · ${avg.toFixed(1)} spp`}${pct}`;
+  });
+  tracer.addEventListener('complete', () => {
+    const denoiser = (tracer as unknown as { _denoiser?: { complete?: boolean } })._denoiser;
+    status.textContent = denoiser?.complete
+      ? 'denoised · clean image from low spp'
+      : 'converged · clean image';
   });
 
   renderer.setSize(innerWidth, innerHeight);
