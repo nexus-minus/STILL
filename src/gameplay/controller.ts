@@ -11,6 +11,16 @@ const DEG = Math.PI / 180;
 export const SLOPE_LIMIT_COS = Math.cos(50 * DEG);
 /** while grounded, pull the capsule flush onto the surface within this range */
 const GROUND_SNAP = 0.3;
+/**
+ * Step-up feel: the physics snap stays instant (collision may never lag),
+ * the VIEW eases with this time constant — ~150 ms to settle to 95 %.
+ */
+const STEP_VIEW_TAU = 0.05;
+/** upward corrections below this are bob/terrain noise, not a step-up */
+const STEP_VIEW_MIN = 0.06;
+/** wall-contact sleep: hold into-wall velocity for this long instead of the
+ * per-frame penetrate → push → cancel equilibrium that judders */
+const WALL_SLEEP = 0.1;
 
 interface Options {
   height: number;
@@ -80,6 +90,11 @@ export class PlayerController {
   private stepDebugCount = 0;
   private jumpQueued = false;
   private bobPhase = 0;
+  /** view-only Y offset: eased out after a sudden upward correction (step-up) */
+  private camYOffset = 0;
+  /** remaining seconds of wall-contact sleep + the normal we're pressed into */
+  private wallSleep = 0;
+  private readonly wallNormal = new THREE.Vector3();
 
   constructor(
     private readonly camera: THREE.PerspectiveCamera,
@@ -160,6 +175,8 @@ export class PlayerController {
       this.position.copy(this.camera.position);
       this.velocity.set(0, 0, 0);
       this.jumpQueued = false;
+      this.camYOffset = 0; // re-entering from freecam snaps, it doesn't ease
+      this.wallSleep = 0;
       this.collision.resolveCapsule(this.position, this.opts.height, this.opts.radius);
       this.syncFeet();
     }
@@ -196,6 +213,8 @@ export class PlayerController {
   respawnAt(feet: THREE.Vector3): void {
     this.position.copy(feet).addScaledVector(UP, this.opts.height / 2);
     this.velocity.set(0, 0, 0);
+    this.camYOffset = 0; // teleports snap, they don't ease
+    this.wallSleep = 0; // contact normal belongs to the old spot
     this.syncFeet();
   }
 
@@ -274,6 +293,28 @@ export class PlayerController {
     // re-advance with the ORIGINAL intent (that's what climbs the ledge).
     const intendedDX = velocity.x * dt;
     const intendedDZ = velocity.z * dt;
+    // ---- wall-contact sleep: pressing into a wall re-projects velocity
+    // every frame (penetrate → push → cancel) and that equilibrium judders.
+    // Hold the into-wall component at zero while the press continues — the
+    // intent was captured ABOVE, so the step-up trial still climbs with the
+    // full push. Armed by wall-like contact below; the window refreshes only
+    // while that surface is still within reach, so full control returns
+    // ~100 ms after the press (or the wall) ends.
+    if (this.wallSleep > 0) {
+      this.wallSleep -= dt;
+      const into = velocity.x * this.wallNormal.x + velocity.z * this.wallNormal.z;
+      if (into < -1e-4) {
+        // Refresh only while the surface is still right there: walking past
+        // the end of a wall must hand control back instead of sliding along
+        // an invisible plane for as long as the key is held.
+        const near = this.collision.raycast(this.position, this.wallNormal, opts.radius + 0.05);
+        if (near) {
+          velocity.x -= this.wallNormal.x * into;
+          velocity.z -= this.wallNormal.z * into;
+          this.wallSleep = WALL_SLEEP; // still pressed → keep the window alive
+        }
+      }
+    }
     const maxDisp = Math.max(Math.abs(velocity.x), Math.abs(velocity.y), Math.abs(velocity.z)) * dt;
     const substeps = Math.max(1, Math.min(6, Math.ceil(maxDisp / (opts.radius * 0.5))));
     const stepDt = dt / substeps;
@@ -310,14 +351,23 @@ export class PlayerController {
           velocity.x -= ux * into;
           velocity.z -= uz * into;
         }
+        // wall-like contact (steeper than the walkable limit) arms the sleep;
+        // floors and ramps must keep the per-frame projection — sleeping a
+        // ramp normal would cancel up-slope walking velocity
+        if (contactNy < SLOPE_LIMIT_COS) {
+          this.wallNormal.set(ux, 0, uz);
+          this.wallSleep = WALL_SLEEP;
+        }
       }
     }
 
     // ---- stick to ground: snap flush onto walkable surfaces — no bouncing,
     // no slow glide down ramps; steep surfaces get no snap (they're walls) --
+    let groundNormal: THREE.Vector3 | null = null;
     if (this.grounded && velocity.y <= 0) {
       const hit = this.collision.raycast(this.position, DOWN, opts.height / 2 + GROUND_SNAP);
       if (hit && (!hit.face || hit.face.normal.y >= SLOPE_LIMIT_COS)) {
+        groundNormal = hit.face ? hit.face.normal : UP;
         const gap = this.position.y - opts.height / 2 - hit.point.y;
         if (gap > -0.08 && gap <= GROUND_SNAP) {
           this.position.y -= gap;
@@ -330,6 +380,7 @@ export class PlayerController {
     // ---- automatic step-up: blocked + grounded + moving -> lift, advance,
     // drop. Accepts only a genuine small gain (0.03..stepUp+0.06) so tall
     // walls and low ceilings still block. -----------------------------------
+    let steppedUp = false;
     const movedH = Math.hypot(this.position.x - this.frameStart.x, this.position.z - this.frameStart.z);
     if (this.grounded && velocity.y <= 0 && intendedH > 0.004 && movedH < intendedH * 0.5) {
       const trial = this.position.clone();
@@ -353,6 +404,18 @@ export class PlayerController {
       this.collision.resolveCapsule(trial, opts.height, opts.radius);
       trial.y -= opts.stepUp + 0.1;
       const drop = this.collision.resolveCapsule(trial, opts.height, opts.radius);
+      // Settle BEFORE judging the gain: depenetration overshoot (capsule
+      // propped on a corner, or dropped inside geometry) reads as a fake
+      // climb otherwise — the accept would teleport the player against flat
+      // walls. Settling first puts the feet ON the landed surface, so
+      // `gained` becomes the REAL step height.
+      const hit = this.collision.raycast(trial, DOWN, opts.height / 2 + opts.stepUp + 0.15);
+      if (hit && (!hit.face || hit.face.normal.y >= SLOPE_LIMIT_COS)) {
+        const gap = trial.y - opts.height / 2 - hit.point.y;
+        if (gap > -0.1 && gap <= opts.stepUp + opts.radius + 0.15) {
+          trial.y -= gap;
+        }
+      }
       const gained = trial.y - this.position.y;
       // Depenetration can overshoot (summed corrections settle up to a radius
       // high over the corner) — accept that range and settle down after.
@@ -367,17 +430,36 @@ export class PlayerController {
         );
       }
       if (inRange) {
-        // settle: put the feet ON the surface we landed on (kills the overshoot)
-        const hit = this.collision.raycast(trial, DOWN, opts.height / 2 + opts.stepUp + 0.15);
-        if (hit && (!hit.face || hit.face.normal.y >= SLOPE_LIMIT_COS)) {
-          const gap = trial.y - opts.height / 2 - hit.point.y;
-          if (gap > -0.1 && gap <= opts.stepUp + opts.radius + 0.15) {
-            trial.y -= gap;
-          }
-        }
         this.position.copy(trial);
         this.grounded = true;
         velocity.y = 0;
+        steppedUp = true;
+        // the riser is behind us now — drop the wall sleep, otherwise holding
+        // forward would stall the walk-on for the rest of the window
+        this.wallSleep = 0;
+        this.wallNormal.set(0, 0, 0);
+      }
+    }
+
+    // ---- stand still on a walkable slope: with no input, cancel the
+    // tangential drift AND the depenetration creep (gravity pushes us back
+    // along the surface normal every frame, which walks a resting player
+    // down the ramp — that's the reported slide). Flat ground keeps its
+    // normal momentum decay; input pressed → no pin (walking down a ramp
+    // must work). Skipped right after a step-up so the climb's horizontal
+    // advance is never undone.
+    if (groundNormal && groundNormal.y < 0.999 && !steppedUp && this.moveDir.lengthSq() < 1e-6) {
+      velocity.set(0, 0, 0);
+      this.position.x = this.frameStart.x;
+      this.position.z = this.frameStart.z;
+      // Re-snap at the restored x: the ground raycast above ran AFTER
+      // depenetration pushed us down-slope, so it measured the surface
+      // ~push.x away — pinning x back without this would leave the capsule
+      // (and the eye) sunk into the ramp by that drop.
+      const hit = this.collision.raycast(this.position, DOWN, opts.height / 2 + GROUND_SNAP);
+      if (hit && (!hit.face || hit.face.normal.y >= SLOPE_LIMIT_COS)) {
+        const gap = this.position.y - opts.height / 2 - hit.point.y;
+        if (gap > -0.08 && gap <= GROUND_SNAP) this.position.y -= gap;
       }
     }
 
@@ -393,9 +475,21 @@ export class PlayerController {
     }
     const bob = this.grounded ? Math.sin(this.bobPhase) * Math.min(speedNow / opts.walkSpeed, 1.2) * 0.032 : 0;
 
+    // Step-up teleports the capsule up in one frame. The physics snap must
+    // stay instant (collision may never lag), so the EYE eases instead: a
+    // sudden upward correction while grounded parks the view at the old
+    // height and lets it catch up over ~150 ms. Jumps (vy > 0 / airborne)
+    // and falls are never eased; the dt-scaled threshold keeps even a run up
+    // the steepest walkable ramp out of it (climb rate < runSpeed·dt).
+    const rise = this.position.y - this.frameStart.y;
+    this.camYOffset *= Math.exp(-dt / STEP_VIEW_TAU);
+    if (this.grounded && velocity.y <= 0 && rise > Math.max(STEP_VIEW_MIN, opts.runSpeed * dt * 0.9)) {
+      this.camYOffset -= rise; // hold the view here, then ease up to the feet
+    }
+
     this.camera.position.set(
       this.feet.x,
-      this.feet.y + opts.eyeHeight + bob,
+      this.feet.y + opts.eyeHeight + bob + this.camYOffset,
       this.feet.z,
     );
     this.camera.rotation.set(this.pitch, this.yaw, 0, 'YXZ');

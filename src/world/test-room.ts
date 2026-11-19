@@ -115,6 +115,13 @@ export function buildTestRoom(): TestRoom {
   // (scripts/steptest.mjs walks into it and asserts the capsule climbs)
   box(2.4, 0.3, 2.4, 0, 0.15, -1.5, pillarMat);
 
+  // --- walkable ramp for scripts/steptest.mjs: 30° (< the 50° limit) ------
+  // High end buried in the west wall, top surface meets the floor at
+  // x=-5.5, runs z in [2.5,5.5]. Standing on it must not slide; D walks
+  // straight down it (+x at spawn yaw).
+  const ramp = box(3.4, 0.3, 3, -6.825, 0.59, 4, pillarMat);
+  ramp.rotation.z = -Math.PI / 6; // top normal (0.5, 0.866, 0) → descends +x
+
   // --- ceiling light panels (visual only, no collision) ------------------
   const panel = (x: number, z: number): void => {
     box(1.4, 0.06, 1.4, x, WALL_H - 0.05, z, panelMat, false);
