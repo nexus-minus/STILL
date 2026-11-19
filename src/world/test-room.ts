@@ -111,6 +111,10 @@ export function buildTestRoom(): TestRoom {
   box(0.7, WALL_H, 0.7, 5, WALL_H / 2, 0, pillarMat);
   box(0.7, WALL_H, 0.7, 0, WALL_H / 2, -5, pillarMat);
 
+  // --- step-up test ledge:0.3 m platform directly ahead of spawn --------
+  // (scripts/steptest.mjs walks into it and asserts the capsule climbs)
+  box(2.4, 0.3, 2.4, 0, 0.15, -1.5, pillarMat);
+
   // --- ceiling light panels (visual only, no collision) ------------------
   const panel = (x: number, z: number): void => {
     box(1.4, 0.06, 1.4, x, WALL_H - 0.05, z, panelMat, false);

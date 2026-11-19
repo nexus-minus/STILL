@@ -70,7 +70,9 @@ async function main(): Promise<void> {
 
   // ---- world: Blender export (manifest+objects.glb) or test-room fallback --
   setStage('map');
-  const world = await loadWorld();
+  const world = await loadWorld({
+    forceTest: new URLSearchParams(location.search).has('testroom'),
+  });
   scene.add(world.group);
   setStage('collision');
   const collision = WorldCollision.fromMeshes(world.collisionMeshes);

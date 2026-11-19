@@ -48,7 +48,11 @@ interface Manifest {
  * exported yet. Emissive meshes (L_*) are extracted as raytracing lights —
  * emission strength × largest-face area is the power heuristic (tuned later).
  */
-export async function loadWorld(): Promise<WorldDef> {
+export async function loadWorld(opts: { forceTest?: boolean } = {}): Promise<WorldDef> {
+  if (opts.forceTest) {
+    console.info('[world] testroom requested — using the procedural test room');
+    return testWorld();
+  }
   const manifest = (await fetch('map/manifest.json')
     .then((r) => (r.ok ? r.json() : null))
     .catch(() => null)) as Manifest | null;

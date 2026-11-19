@@ -77,6 +77,7 @@ export class PlayerController {
   private readonly frameStart = new THREE.Vector3();
   private readonly totalPush = new THREE.Vector3();
   private readonly spawnFeet: THREE.Vector3;
+  private stepDebugCount = 0;
   private jumpQueued = false;
   private bobPhase = 0;
 
@@ -283,13 +284,46 @@ export class PlayerController {
       const trial = this.position.clone();
       trial.y += opts.stepUp;
       this.collision.resolveCapsule(trial, opts.height, opts.radius);
-      trial.x += intendedDX; // pre-projection intent — climbs onto the ledge
-      trial.z += intendedDZ;
+      // The capsule centre sits a full RADIUS behind the riser — advancing one
+      // frame of movement (~5cm) never reaches over it. Advance at least
+      // radius + margin along the intended direction (that's the climb-over).
+      const advLen = Math.hypot(intendedDX, intendedDZ);
+      let advX = intendedDX;
+      let advZ = intendedDZ;
+      if (advLen > 1e-5) {
+        const minAdvance = opts.radius + 0.08;
+        if (advLen < minAdvance) {
+          advX *= minAdvance / advLen;
+          advZ *= minAdvance / advLen;
+        }
+      }
+      trial.x += advX;
+      trial.z += advZ;
       this.collision.resolveCapsule(trial, opts.height, opts.radius);
       trial.y -= opts.stepUp + 0.1;
       const drop = this.collision.resolveCapsule(trial, opts.height, opts.radius);
       const gained = trial.y - this.position.y;
-      if (drop.grounded && gained > 0.03 && gained <= opts.stepUp + 0.06) {
+      // Depenetration can overshoot (summed corrections settle up to a radius
+      // high over the corner) — accept that range and settle down after.
+      const inRange = drop.grounded && gained > 0.03 && gained <= opts.stepUp + opts.radius + 0.1;
+      if (this.stepDebugCount < 4) {
+        this.stepDebugCount++;
+        console.info(
+          `[stepup] attempt movedH=${movedH.toFixed(3)} intended=${intendedH.toFixed(3)} ` +
+            `adv=(${advX.toFixed(2)},${advZ.toFixed(2)}) gained=${gained.toFixed(3)} ` +
+            `grounded=${drop.grounded} accepted=${inRange} ` +
+            `trial=(${trial.x.toFixed(2)},${trial.y.toFixed(2)},${trial.z.toFixed(2)})`,
+        );
+      }
+      if (inRange) {
+        // settle: put the feet ON the surface we landed on (kills the overshoot)
+        const hit = this.collision.raycast(trial, DOWN, opts.height / 2 + opts.stepUp + 0.15);
+        if (hit && (!hit.face || hit.face.normal.y >= SLOPE_LIMIT_COS)) {
+          const gap = trial.y - opts.height / 2 - hit.point.y;
+          if (gap > -0.1 && gap <= opts.stepUp + opts.radius + 0.15) {
+            trial.y -= gap;
+          }
+        }
         this.position.copy(trial);
         this.grounded = true;
         velocity.y = 0;

@@ -7,6 +7,7 @@ import {
   workgroupId,
   localId,
   screenUV,
+  vec2,
   mix,
   mrt,
   pass,
@@ -287,7 +288,12 @@ export function createAdvancedRenderer(
     const beauty = scenePass.getTextureNode('output');
     const diffuseN = scenePass.getTextureNode('diffuse');
     const emissiveN = scenePass.getTextureNode('emissive');
-    const lightingN = texture(lightingTex, screenUV);
+    // Storage writes use indexUV (row 0 = TOP in WebGPU) while screenUV is
+    // y-up — sample the lighting buffer flipped or the entire lighting image
+    // mirrors vertically ("stairs on the ceiling"). Diffuse/emissive come
+    // from render targets sampled with screenUV natively and must NOT flip.
+    const lightingUv = screenUV.mul(vec2(1.0, -1.0)).add(vec2(0.0, 1.0));
+    const lightingN = texture(lightingTex, lightingUv);
     const traced = diffuseN.mul(lightingN).add(emissiveN);
     return mix(beauty, traced, rtFlag);
   })();
