@@ -190,7 +190,9 @@ async function main(): Promise<void> {
         hud.message(
           rtDebug === 2
             ? 'RT DEBUG — bright green: lit · dark green: SHADOW · red: miss'
-            : 'RT DEBUG 1 — uv gradient',
+            : rtDebug === 3
+              ? 'RT DEBUG 3 — raw lighting buffer (no albedo, no emissive)'
+              : 'RT DEBUG 1 — uv gradient',
           9000,
         );
       }

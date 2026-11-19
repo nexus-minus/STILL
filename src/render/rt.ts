@@ -8,7 +8,9 @@ import {
   localId,
   screenUV,
   vec2,
+  vec4,
   mix,
+  step,
   mrt,
   pass,
   output,
@@ -194,11 +196,20 @@ export function createAdvancedRenderer(
 
       var N = hit.normal;
       if (dot(N, -ray.direction) < 0.0) { N = -N; }
+      // smooth shading: prefer INTERPOLATED vertex normals (Blender smooth
+      // shading) when they agree with the face — flat triangle normals are
+      // what makes lighting look stepped "per face"
+      let vN3 = bvh_sampleTrianglePoint(hit.barycoord, hit.indices.xyz).normal.xyz;
+      if (dot(vN3, vN3) > 1e-6) {
+        var sn = normalize(vN3);
+        if (dot(sn, -ray.direction) < 0.0) { sn = -sn; }
+        if (dot(sn, N) > 0.5) { N = sn; }
+      }
       let P = ray.origin + ray.direction * hit.dist + N * 0.012;
 
       // debug2: hit/miss colour SHADED by real shadow-ray visibility —
       // bright green = hit & lit · dark green = hit & IN SHADOW · red = miss
-      if (debugMode > 1.5) {
+      if (debugMode > 1.5 && debugMode < 2.5) {
         var vis = 0.0;
         ${visChain}
         let base = vec4f(0.0, 1.0, 0.0, 1.0);
@@ -257,13 +268,20 @@ export function createAdvancedRenderer(
       let d2 = dot(toL, toL);
       let dist = sqrt(d2);
       let L = toL / dist;
-      let ndotl = max(dot(N, L), 0.0);
+      // wrap-around diffuse (W=0.35): a fixture embedded IN the wall sits
+      // slightly behind the host surface — pure N*L would cut the face with a
+      // hard diagonal line and leave it black; wrap spills light onto it and
+      // softens the terminator across every face.
+      let ndotl = max((dot(N, L) + 0.35) / 1.35, 0.0);
       if (ndotl <= 0.0) { return vec3f(0.0); }
       var sray: Ray;
       sray.origin = P;
       sray.direction = L;
       sray.maxDist = max(dist - 0.08, 0.001);
-      if (bvh_RaycastAnyHit(sray)) { return vec3f(0.0); }
+      var sh: IntersectionResult;
+      // self-surface epsilon: a hit within 0.25m is the wall the point sits
+      // on being crossed (embedded lights), not a real occluder
+      if (bvh_RaycastFirstHit(sray, &sh) && sh.dist > 0.25) { return vec3f(0.0); }
       return lc.rgb * (lp.w * albedoScale * ndotl / max(d2, 0.25));
     }
 
@@ -274,21 +292,16 @@ export function createAdvancedRenderer(
       let d2 = dot(toL, toL);
       let dist = sqrt(d2);
       let L = toL / dist;
-      if (max(dot(N, L), 0.0) <= 0.0) { return 0.0; }
+      if (max((dot(N, L) + 0.35) / 1.35, 0.0) <= 0.0) { return 0.0; }
       var sray: Ray;
       sray.origin = P;
       sray.direction = L;
       sray.maxDist = max(dist - 0.08, 0.001);
-      if (bvh_RaycastAnyHit(sray)) { return 0.0; }
+      var sh: IntersectionResult;
+      if (bvh_RaycastFirstHit(sray, &sh) && sh.dist > 0.25) { return 0.0; }
       return 1.0;
     }
   `;
-
-  const computeFn = wgslFn(kernelSource, [
-    ndcToCameraRay,
-    bvhData.fns.raycastFirstHit,
-    bvhData.fns.raycastAnyHit,
-  ] as never);
 
   const params = {
     lightingTex: textureStore(lightingTex),
@@ -304,7 +317,20 @@ export function createAdvancedRenderer(
     ...Object.fromEntries(lightCol.map((u, i) => [`c${i}`, u])),
   };
 
-  const kernelNode = computeFn(params).computeKernel([WORKGROUP, WORKGROUP, 1]);
+  // Kernel build is DEFERRED until the BVH update finished: sampleTrianglePoint
+  // only exists after update() (its struct depends on resolved attributes) —
+  // building eagerly would pass undefined into the deps.
+  type KernelNode = Parameters<THREE.WebGPURenderer['compute']>[0];
+  let kernelNode: KernelNode | undefined;
+  const buildKernel = (): KernelNode => {
+    const computeFn = wgslFn(kernelSource, [
+      ndcToCameraRay,
+      bvhData.fns.raycastFirstHit,
+      bvhData.fns.raycastAnyHit,
+      bvhData.fns.sampleTrianglePoint,
+    ] as never);
+    return computeFn(params).computeKernel([WORKGROUP, WORKGROUP, 1]) as KernelNode;
+  };
 
   // ---- composite + bloom ------------------------------------------------------------
   const rtFlag = uniform(0);
@@ -320,11 +346,16 @@ export function createAdvancedRenderer(
     const lightingUv = screenUV.mul(vec2(1.0, -1.0)).add(vec2(0.0, 1.0));
     const lightingN = texture(lightingTex, lightingUv);
     const traced = diffuseN.mul(lightingN).add(emissiveN);
-    return mix(beauty, traced, rtFlag);
+    // rtFlag: 0 = beauty · 1 = traced (albedo x lighting) · 2 = RAW lighting
+    // (?rtdebug=3 — the un-multiplied buffer, for isolating flat/banding)
+    const rtColor = mix(beauty, traced, step(0.5, rtFlag));
+    const shown = mix(rtColor, vec4(lightingN.rgb, 1.0), step(1.5, rtFlag));
+    return shown.add(bloom(shown, 0.5, 0.5, 0.75));
   })();
 
   const postPipeline = new THREE.RenderPipeline(renderer);
-  postPipeline.outputNode = finalColor.add(bloom(finalColor, 0.5, 0.5, 0.75));
+  // finalColor already includes bloom over whatever branch it displays
+  postPipeline.outputNode = finalColor;
 
   // ---- state -------------------------------------------------------------------------
   let logicalW = 1;
@@ -374,13 +405,14 @@ export function createAdvancedRenderer(
       frameIndex.value = frame % 1024;
       bounceCount.value = settings.rtBounces >= 1 ? 1 : 0;
 
+      kernelNode ??= buildKernel();
       renderer.compute(kernelNode, [
         Math.ceil(texW / WORKGROUP),
         Math.ceil(texH / WORKGROUP),
         1,
       ]);
       ranThisFrame = true;
-      rtFlag.value = 1;
+      rtFlag.value = debugMode.value > 2.5 ? 2 : 1;
     },
     render(): void {
       if (!ranThisFrame) rtFlag.value = 0;
