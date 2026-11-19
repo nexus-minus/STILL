@@ -13,6 +13,13 @@ export default defineConfig({
     // WebGPU-era browsers only; keeps top-level await and modern syntax.
     target: 'esnext',
     sourcemap: true,
+    // Ship the isolated path-tracing comparison page alongside the game.
+    rolldownOptions: {
+      input: {
+        game: 'index.html',
+        pathtrace: 'pathtrace.html',
+      },
+    },
   },
 
   server: {

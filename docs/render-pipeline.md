@@ -1,5 +1,62 @@
 # Render pipeline
 
+## Lighting reality check (2026-11-19)
+
+The current `src/render/rt.ts` is a **custom real-time approximation**, not
+Cycles and not a full path tracer: it traces one primary ray, NEE point-light
+shadow rays, one noisy bounce, then temporally blends. It was mistakenly
+turning each emissive mesh into several analytic point lights. The user's
+2026-11-19 screenshot showed the expected failure mode: clipped white wash,
+point-like hotspot, and non-Cycles falloff. Half-float storage is now used
+(`rgba16float`, not `rgba8unorm`) so HDR radiance survives until AgX.
+
+### Reference implementation added for A/B
+
+Open **`/pathtrace.html`** (or `npm run dev`, then `/pathtrace.html`) to test
+the same Blender `objects.glb` with the maintained
+[`three-gpu-pathtracer`](https://github.com/gkjohnson/three-gpu-pathtracer)
+WebGPU implementation:
+
+- real `RectAreaLight` emitters instead of generated point-light samples
+- multiple-importance sampling (MIS) to reduce area-light noise
+- progressive path samples; the still image converges as the camera rests
+- sample-count and render-scale controls
+
+This is an *isolated experiment*, not the default game renderer. Upstream
+`three-gpu-pathtracer` v0.0.28 supports rectangular area lights, MIS, and an
+optional OIDN WebGPU denoiser, but explicitly warns its WebGPU API/BVH
+dependencies are not yet stable. The game renderer stays in place while the
+path-tracer is compared against the same scene.
+
+### Recommended production split
+
+For a walkable game, use:
+
+1. **Static Cycles-baked indirect lighting/lightmaps** for the fixed map
+   (sharp, noise-free, low GPU cost; lighting changes only when the map is
+   rebuilt).
+2. **Real-time shadowed lights / player shadow** for dynamic interaction.
+3. **Optional progressive path tracing** as a high-end / still-camera mode,
+   not the only lighting path—because path tracing resets accumulation while
+   the player moves.
+
+This is the reliable way to get a Cycles-like static environment, retain
+dynamic interaction, and still support weak GPUs. A Godot switch does *not*
+solve browser raytracing: the official Godot web export currently uses the
+WebGL2 Compatibility renderer; Forward+/WebGPU features and SDFGI/VoxelGI
+are unavailable on web.
+
+### Current custom renderer limitations
+
+- Emission is approximated by one analytic point sample per fixture. It can
+  never match a rectangular Cycles emitter's shape/falloff, regardless of
+  tuning. **Do not add more point samples**; compare `/pathtrace.html` or move
+  the static environment to baked lightmaps.
+- `rgba16float` fixes the earlier HDR clipping at1.0; it does not make the
+  lighting physically based by itself.
+- The temporal history currently resets on camera motion; it improves
+  stationary screenshots, but is not a motion-reprojected denoiser.
+
 Decisions locked in planning: **Three.js + custom WebGPU passes**, **hybrid
 raytracing (traced shadows + 1–2 bounce GI)**, **volumetrics toggleable**,
 **runs on weak GPUs at minimum settings**.

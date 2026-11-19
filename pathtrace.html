@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <link rel="icon" href="data:," />
+    <title>liminal — area-light path-tracing test</title>
+    <style>
+      * { box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #070707; color: #eee; font: 13px ui-monospace, monospace; }
+      #view { position: absolute; inset: 0; }
+      #view canvas { display: block; width: 100%; height: 100%; }
+      #panel { position: absolute; top: 12px; left: 12px; z-index: 2; width: 300px; padding: 14px; background: #111d; border: 1px solid #7778; }
+      h1 { font-size: 14px; font-weight: 500; letter-spacing: .12em; margin: 0 0 10px; }
+      p { line-height: 1.5; color: #bbb; margin: 6px 0 12px; }
+      label { display: flex; justify-content: space-between; align-items: center; margin: 9px 0; gap: 10px; }
+      input { width: 145px; }
+      #status { color: #9dffe0; min-height: 2.8em; white-space: pre-wrap; }
+      button { background: #232323; color: #eee; border: 1px solid #777; padding: 5px 10px; cursor: pointer; }
+      a { color: #9dffe0; }
+    </style>
+  </head>
+  <body>
+    <div id="view"></div>
+    <aside id="panel">
+      <h1>AREA-LIGHT PATH-TRACER TEST</h1>
+      <p>
+        Separate experiment using a maintained progressive path tracer with
+        rectangular area lights + MIS. Drag to orbit · wheel to zoom.
+        <a href="./">Back to game</a>
+      </p>
+      <label>Samples <input id="samples" type="range" min="4" max="256" step="4" value="64" /><span id="samples-v">64</span></label>
+      <label>Render scale <input id="scale" type="range" min="0.2" max="1" step="0.1" value="0.5" /><span id="scale-v">0.5</span></label>
+      <label>Area-light gain <input id="gain" type="range" min="0.1" max="4" step="0.1" value="1" /><span id="gain-v">1.0</span></label>
+      <button id="reset">Reset samples</button>
+      <div id="status">Starting…</div>
+      <p>Path tracing resets when the camera moves; wait for the still image to converge.</p>
+    </aside>
+    <script type="module" src="./src/pathtrace-demo.ts"></script>
+  </body>
+</html>

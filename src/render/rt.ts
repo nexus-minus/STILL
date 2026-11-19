@@ -118,11 +118,21 @@ export function createAdvancedRenderer(
     }),
   );
 
-  // ---- lighting storage texture (rgba8unorm — matches three's default) --------
+  // HDR storage: rgba8unorm clips all radiance above1.0 BEFORE AgX tone mapping,
+  // which turns emissive rooms into broad featureless white slabs. Half-float
+  // preserves the HDR range through the composite.
   const lightingTex = new THREE.StorageTexture(1, 1);
+  lightingTex.type = THREE.HalfFloatType;
+  lightingTex.format = THREE.RGBAFormat;
+  lightingTex.minFilter = THREE.LinearFilter;
+  lightingTex.magFilter = THREE.LinearFilter;
   // temporal accumulation history: static camera converges to a clean image,
   // any movement resets to live (no smear — reset instead of reproject)
   const historyTex = new THREE.StorageTexture(1, 1);
+  historyTex.type = THREE.HalfFloatType;
+  historyTex.format = THREE.RGBAFormat;
+  historyTex.minFilter = THREE.LinearFilter;
+  historyTex.magFilter = THREE.LinearFilter;
 
   // ---- uniforms -----------------------------------------------------------------
   const invViewProj = uniform(new THREE.Matrix4());
@@ -200,7 +210,7 @@ export function createAdvancedRenderer(
     // requires a return identifier (regex) — but Tint rejects '-> void', so we
     // return vec4f and let the caller discard it (Tint-verified accepted).
     fn compute(
-      lightingTex: texture_storage_2d<rgba8unorm, write>,
+      lightingTex: texture_storage_2d<rgba16float, write>,
       historyTex: texture_2d<f32>,
       blendAlpha: f32,
       invViewProj: mat4x4f,
@@ -416,7 +426,7 @@ export function createAdvancedRenderer(
   const copySource = /* wgsl */ `
     fn copyHistory(
       src: texture_2d<f32>,
-      dst: texture_storage_2d<rgba8unorm, write>,
+      dst: texture_storage_2d<rgba16float, write>,
       workgroupSize: vec3u,
       workgroupId: vec3u,
       localId: vec3u,

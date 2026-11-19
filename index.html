@@ -25,6 +25,7 @@
         text-transform: uppercase; color: #f2e9c9; text-indent: 0.6em;
       }
       #overlay p { font-size: 12.5px; line-height: 1.9; opacity: 0.65; }
+      #overlay a { color: #9dffe0; opacity: 0.85; font-size: 12px; }
       #overlay.hidden { display: none; }
 
       #hud { position: absolute; inset: 0; z-index: 5; pointer-events: none; }
@@ -152,10 +153,11 @@
         WASD move · mouse look · shift run · space jump<br />
         E to interact · T quality · M map · Esc settings
       </p>
+      <a href="./pathtrace.html">experimental area-light path-tracing comparison</a>
     </div>
 
     <div id="fatal"></div>
 
-    <script type="module" src="/src/main.ts"></script>
+    <script type="module" src="./src/main.ts"></script>
   </body>
 </html>

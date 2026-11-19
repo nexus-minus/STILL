@@ -3,9 +3,14 @@
 Browser game about exploring gigantic liminal spaces. One shared world,
 raytraced lighting, volumetrics, no paid servers.
 
-**Stack (decided):** Three.js + custom WebGPU compute passes · hybrid
-raytracing (traced shadows + 1–2 bounce GI) · WebGL2 fallback for weak GPUs ·
-P2P multiplayer with a `Transport` seam · GitHub Pages hosting.
+**Stack:** Three.js + WebGPU compute (experimental real-time hybrid lighting),
+WebGL2 fallback, P2P multiplayer seam, GitHub Pages hosting.
+
+**Lighting note:** `/pathtrace.html` is the A/B test for the maintained
+`three-gpu-pathtracer` implementation (true rectangular area lights + MIS).
+The game's current custom hybrid pass is an approximation, not Cycles. See
+`docs/render-pipeline.md` for the tested comparison and recommended
+static-bake + dynamic-light split.
 
 ## Run it
 
@@ -16,14 +21,14 @@ npm run build      # typecheck + production build (deploy this to GitHub Pages)
 ```
 
 **Controls:** click to lock pointer · WASD move · shift run · space jump ·
-click/E interact · R respawn at last beacon · T cycle quality tier · M map ·
-B toggle glow (bloom).
+E interact · R respawn · T quality · M map · B glow · F freecam · F2 screenshot
+(saves to a picked folder).
 
 ## Layout
 
 ```
 docs/blender-conventions.md   how to author the map in Blender (chunks, L_* lights, respawn/lore props)
-docs/render-pipeline.md       pass order, tiers, fallback strategy
+docs/render-pipeline.md       renderer status, path-tracer comparison, lighting plan
 tools/export_map.sh|.py       Blender CLI -> chunked Draco .glb + manifest
 assets/map/                   served as site root (/map/*.glb)
 src/
@@ -41,8 +46,10 @@ src/
 | phase | what                              | state     |
 | ----- | --------------------------------- | --------- |
 | 0     | vertical slice: walk the test room, glow + bloom | ✅ scaffolded |
-| 1     | gbuffer + traced lighting + volumetrics + settings menu | stubs ready |
-| 2     | Blender chunk streaming + worker BVHs            | conventions + export script ready |
+| 1a    | custom WebGPU hybrid lighting                    | experimental; compare with `/pathtrace.html` |
+| 1b    | volumetrics + denoiser / quality settings         | planned |
+| 2a    | Blender map export + static world load           | ✅ works (first map imported) |
+| 2b    | Cycles-baked static GI/lightmaps + dynamic shadow | recommended next lighting architecture |
 | 3     | anchors/map-device/lore as the real in-world device | data systems ready |
 | 4     | audio + atmosphere                             | not started |
 | 5     | P2P multiplayer                                | `Transport` seam in place |
