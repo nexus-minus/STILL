@@ -1,8 +1,14 @@
-import { TIER_ORDER, type QualityManager, type Tier } from '../render/quality.js';
+import { TIER_ORDER, TIER_PRESETS, type OverrideKey, type QualityManager, type Tier } from '../render/quality.js';
 import { ACTION_LABELS, keyLabel, type Action, type Bindings } from '../gameplay/bindings.js';
 import type { PlayerController } from '../gameplay/controller.js';
 
 const STORAGE_KEY = 'liminal.settings.v1';
+
+/** tier presets don't tune exposure — 1× is the neutral value main.ts boots and
+ *  restores with, so picking a preset returns the image to that known state. */
+const EXPOSURE_DEFAULT = 1;
+/** every fine-tuning key a tier defines — all cleared on "reset to preset" */
+const OVERRIDE_KEYS: OverrideKey[] = ['renderScale', 'raytracedLighting', 'volumetrics', 'lightGain'];
 
 export interface PersistedSettings {
   tier?: Tier;
@@ -132,6 +138,20 @@ export function initSettings(opts: {
     </div>`;
   document.body.appendChild(root);
 
+  // menu-local styles: index.html owns the shared stylesheet (a file this
+  // module doesn't own), so the badge/warning classes this menu adds are
+  // styled here instead of growing cross-file CSS edits.
+  const style = document.createElement('style');
+  style.textContent = `
+    #settings .row em.mod {
+      font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;
+      color: #f2e9c9; border: 1px solid rgba(242, 233, 201, 0.45);
+      border-radius: 2px; padding: 0 4px; opacity: 1;
+    }
+    #settings .note.warn { color: #ffb07a; bottom: 46px; }
+  `;
+  document.head.appendChild(style);
+
   const $ = <T extends HTMLElement>(id: string): T => {
     // tolerate both 'set-x' and '#set-x' at call sites — a stray double hash
     // is a SyntaxError, and a missing node must fail loudly, not silently
@@ -193,10 +213,23 @@ export function initSettings(opts: {
   const applyBind = (action: Action, code: string): void => {
     inputConsumedAt = performance.now();
     finishCapture();
+    // find the current holder BEFORE set(): Bindings.set swaps keys (it never
+    // double-binds), so afterwards the old holder no longer reports this code.
+    const conflict = code
+      ? BIND_ACTIONS.find((a) => a !== action && bindings.get(a) === code)
+      : undefined;
     bindings.set(action, code);
     // a swap may have changed other rows — refresh everything
     for (const [a, btn] of bindButtons) btn.textContent = keyLabel(bindings.get(a));
     hudNote(`bound: ${ACTION_LABELS[action]} → ${keyLabel(code)}`);
+    // non-blocking warning naming the action that lost the key (the swapped
+    // key shows up on that action's row right below); a clean bind/unbind
+    // clears any previous warning. Esc-unbind passes code '' → no conflict.
+    hudWarn(
+      conflict
+        ? `⚠ ${keyLabel(code)} was already bound to ${ACTION_LABELS[conflict]} — swapped`
+        : null,
+    );
   };
 
   bindsRoot.addEventListener('click', (e) => {
@@ -271,6 +304,23 @@ export function initSettings(opts: {
   const sensVal = $<HTMLElement>('set-sens-val');
   const invert = $<HTMLInputElement>('set-invert');
 
+  /** badge = "this row no longer shows the selected preset's value" — a small
+   *  marker parked at the end of the row label, shown/hidden on every sync. */
+  const markRow = (input: HTMLElement, modified: boolean): void => {
+    const row = input.closest('.row');
+    if (!row) return;
+    let badge = row.querySelector<HTMLElement>('.mod');
+    if (!badge) {
+      badge = document.createElement('em');
+      badge.className = 'mod';
+      badge.textContent = 'custom';
+      badge.hidden = true;
+      // label text lives in the row's <span> (slider rows also hold the value <em>)
+      (row.querySelector('span') ?? row).appendChild(badge);
+    }
+    badge.hidden = !modified;
+  };
+
   const syncUI = (): void => {
     const s = quality.settings;
     preset.value = quality.hasOverrides ? '__custom' : quality.tier;
@@ -285,10 +335,31 @@ export function initSettings(opts: {
     sens.value = String(controller.sensitivityMultiplier);
     sensVal.textContent = `${controller.sensitivityMultiplier.toFixed(2)}×`;
     invert.checked = controller.invertY;
+    // per-row deviation markers against the selected tier's preset values.
+    // glow stays unmarked: it's a runtime preference (B key, auto-disabled on
+    // broken drivers) gated by a preset field (bloom) that is constantly true —
+    // badging it would force it back on at preset pick, re-black-screening the
+    // machines the auto-disable protects. Sensitivity / invert Y are likewise
+    // user preferences, not preset values.
+    const tierPreset = TIER_PRESETS[quality.tier];
+    markRow(scale, s.renderScale !== tierPreset.renderScale);
+    markRow(exposure, opts.getExposure() !== EXPOSURE_DEFAULT);
+    markRow(gain, s.lightGain !== tierPreset.lightGain);
+    markRow(rt, s.raytracedLighting !== tierPreset.raytracedLighting);
   };
 
   preset.addEventListener('change', () => {
-    if (preset.value !== '__custom') quality.setTier(preset.value as Tier);
+    if (preset.value !== '__custom') {
+      const tier = preset.value as Tier;
+      quality.setTier(tier);
+      // QualityManager.setTier early-returns when the tier didn't change, so
+      // re-selecting the SAME preset would leave stale overrides behind —
+      // clear them here to make "reset to preset" always reset.
+      for (const key of OVERRIDE_KEYS) {
+        if (quality.override(key) !== undefined) quality.setOverride(key, undefined);
+      }
+      opts.setExposure(EXPOSURE_DEFAULT); // known state: neutral exposure (badge clears)
+    }
     syncUI();
     persist();
   });
@@ -313,6 +384,7 @@ export function initSettings(opts: {
   });
   rt.addEventListener('change', () => {
     quality.setOverride('raytracedLighting', rt.checked);
+    syncUI(); // the override flips the preset select to "custom" + marks the row
     persist();
   });
   sens.addEventListener('input', () => {
@@ -327,6 +399,7 @@ export function initSettings(opts: {
   $('#set-reset').addEventListener('click', () => {
     bindings.reset();
     for (const [a, btn] of bindButtons) btn.textContent = keyLabel(bindings.get(a));
+    hudWarn(null); // the old binds are gone — their conflict warning is stale
     hudNote('keybinds reset');
   });
   $('#set-resume').addEventListener('click', () => {
@@ -339,13 +412,31 @@ export function initSettings(opts: {
 
   function hudNote(text: string): void {
     // local transient line inside the panel (hud.message may be hidden behind us)
-    let note = root.querySelector<HTMLElement>('.note');
+    // — exclude .warn so it never writes into the conflict-warning element.
+    let note = root.querySelector<HTMLElement>('.note:not(.warn)');
     if (!note) {
       note = document.createElement('div');
       note.className = 'note';
       root.querySelector('.panel')!.appendChild(note);
     }
     note.textContent = text;
+  }
+
+  function hudWarn(text: string | null): void {
+    // persistent, non-blocking conflict line: kept separate from .note so the
+    // transient "bound:" status can update without swallowing the warning.
+    const existing = root.querySelector<HTMLElement>('.note.warn');
+    if (!text) {
+      if (existing) existing.hidden = true;
+      return;
+    }
+    const warn = existing ?? document.createElement('div');
+    if (!existing) {
+      warn.className = 'note warn';
+      root.querySelector('.panel')!.appendChild(warn);
+    }
+    warn.textContent = text;
+    warn.hidden = false;
   }
 
   syncUI();
