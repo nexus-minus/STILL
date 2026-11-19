@@ -162,7 +162,7 @@ export function createAdvancedRenderer(
     ) -> vec4f {
       let dimensions = textureDimensions(lightingTex);
       let indexUV = workgroupSize.xy * workgroupId.xy + localId.xy;
-      if (indexUV.x >= dimensions.x || indexUV.y >= dimensions.y) { return; }
+      if (indexUV.x >= dimensions.x || indexUV.y >= dimensions.y) { return vec4f(0.0); }
 
       let uv = (vec2f(indexUV) + vec2f(0.5)) / vec2f(dimensions);
 
