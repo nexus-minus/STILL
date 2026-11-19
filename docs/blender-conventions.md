@@ -6,7 +6,9 @@ installed on this machine — or just hand over the `.blend` file and I run it):
 ```sh
 tools/export_map.sh path/to/map.blend
 # -> assets/map/objects.glb, animated.glb, playermodels.glb,
-#    manifest.json (bounds + checkpoints[] + sound[] + skipped[])
+#    manifest.json (bounds + checkpoints[] + sound[] + skipped[]
+#                   + emissive{} + skippedEmissive[])
+tools/export_map.sh --weld path/to/map.blend   # merge seam vertices first — see "Seams" below
 ```
 
 ## Collections (exact names)
@@ -47,6 +49,74 @@ Any other top-level collection is **skipped and listed** in
    expect softer/dirtier real-time GI rather than path-traced perfection.
 5. **Modifiers are applied at export** (`export_apply`) — model freely, the
    game receives the final geometry.
+
+## The emission audit (every export prints it)
+
+The exporter finishes by scanning the **whole file** for materials with
+emission strength > 0 and reporting all three states:
+
+1. **What exported** — one line per fixture:
+
+   ```
+   export_map:   light.001  collection=objects  file=objects.glb  dims 0.77 x 4.79 x 2.00 m  strength 5  color (1.00, 1.00, 1.00)
+   ```
+
+   **Read the dimensions.** The game derives light behavior from the fixture's
+   world-space bounds — a 4.8 m strip and a 0.4 m cube are treated
+   differently, so check the numbers here rather than eyeballing the
+   viewport. `manifest.json → emissive.exported[]` carries the same data
+   (`name`, `collection`, `file`, `dimensions`, `strength`, `color`).
+
+2. **What didn't** — loud, and the usual answer to "why doesn't my light
+   light anything?":
+
+   ```
+   export_map: EXPORT WARNING: L_dead_strip has emission but was NOT exported — put it in the 'objects' collection (in skipped collection 'reference')
+   ```
+
+   The object glows in Blender but reached no `.glb`: it's in a skipped
+   collection, in no collection at all, hidden, or not a mesh. The game never
+   sees it, so it emits nothing. The same entries land in
+   `manifest.json → skippedEmissive[]` as `{name, collection, reason}` so
+   tooling can surface them.
+
+3. **A count check** — the scene's exported emissive objects must equal the
+   emissive meshes actually found inside `objects.glb`. A mismatch prints
+   another `EXPORT WARNING` (and `manifest.json → emissive` records both
+   counts as `objectsGlb` / `objectsGlbVerified`).
+
+An audit failure never blocks the export: the `.glb`s are already written by
+then, and the traceback prints with the manifest still saved.
+
+## Seams and light leaks: `--weld` (off by default)
+
+**Bright lines along mesh edges in-game usually mean unwelded seams** — two
+faces that touch visually but whose vertices are split, so light/shadow rays
+slip through the gap (see `docs/backlog.md` item 5). The exporter can close
+them at export time:
+
+```sh
+tools/export_map.sh --weld path/to/map.blend
+# export_map: --weld objects.glb: 366 -> 362 vertices (4 merged in 1 meshes, eps 0.001 m)
+```
+
+- It runs Blender's *merge by distance* (0.001 m — 1 mm, below any real
+  feature size) on every mesh right before the `.glb` is written, and prints
+  the vertex delta per file so you can see exactly what changed.
+- **Off by default.** Without the flag your geometry is never touched; the
+  exporter never saves the `.blend` either way — only the export differs.
+- Welding happens on the source meshes, **before** modifiers are evaluated.
+  If a modifier (mirror, array) recreates the seam, fix it in Blender
+  instead: Edit Mode → Merge by Distance on the final geometry.
+- **A/B it** by exporting both ways and swapping the winner into
+  `assets/map` (the only place the game reads), checking seams with
+  `?rtdebug=2` — ray misses (void/seam holes) are painted **red**:
+
+  ```sh
+  tools/export_map.sh assets/source/map.blend                                # plain
+  OUT_DIR=/tmp/map-weld tools/export_map.sh --weld assets/source/map.blend   # welded
+  cp /tmp/map-weld/objects.glb assets/map/objects.glb                        # try it
+  ```
 
 ## Collection specifics
 
@@ -131,5 +201,7 @@ assets/map/objects.glb          static geometry (Draco, +Y up, world coords)
 assets/map/animated.glb         animated objects + clips
 assets/map/playermodels.glb     avatars
 assets/map/manifest.json        per-collection counts + world bounds,
-                                checkpoints[], sound[], skipped[]
+                                checkpoints[], sound[], skipped[],
+                                emissive{} (exported fixtures + counts),
+                                skippedEmissive[] (glows that exported nothing)
 ```
