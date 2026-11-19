@@ -531,8 +531,7 @@ export function createAdvancedRenderer(
     // (?rtdebug=3 — the un-multiplied buffer, for isolating flat/banding)
     const rtColor = mix(beauty, traced, step(0.5, rtFlag));
     const shown = mix(rtColor, vec4(lightingN.rgb, 1.0), step(1.5, rtFlag));
-    return shown.add(bloom(shown, 0.5, 0.5, 0.75));
-  })();
+    return shown.add(bloom(shown, 0.5, 0.5, 0.75));  })();
 
   const postPipeline = new THREE.RenderPipeline(renderer);
   // finalColor already includes bloom over whatever branch it displays
@@ -665,7 +664,11 @@ export function createAdvancedRenderer(
         1,
       ]);
       ranThisFrame = true;
-      rtFlag.value = debugMode.value > 2.5 ? 2 : 1;
+      // Any debug mode (?rtdebug=1|2|3) displays the lighting buffer RAW.
+      // The traced path multiplies by the gbuffer diffuse — and void/seam
+      // pixels have zero diffuse (MRT clear), which multiplied the debug
+      // "red = miss" to black, hiding exactly the holes it exists to show.
+      rtFlag.value = debugMode.value > 0.5 ? 2 : 1;
     },
     render(): void {
       if (!ranThisFrame) rtFlag.value = 0;

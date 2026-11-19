@@ -170,7 +170,14 @@ for (let i = 0; i < 150; i++) {
   await sleep(200);
 }
 const unit = await page.evaluate(async () => {
-  const M = await import('/src/world/map-loader.ts');
+  // Source modules exist only on a vite dev server — against a built
+  // preview (dist) the import 404s, so skip the math checks there.
+  let M;
+  try {
+    M = await import('/src/world/map-loader.ts');
+  } catch {
+    return { skipped: 'source modules unavailable on built server' };
+  }
   const THREE = window.__liminal.THREE;
   const out = {};
   try {
@@ -218,18 +225,22 @@ const unit = await page.evaluate(async () => {
 });
 console.log('  ' + JSON.stringify(unit, null, 1).replace(/\n\s*/g, ' '));
 const near = (a, b, eps = 1e-2) => Math.abs(a - b) <= eps;
-if (unit.error) fail(`unit: threw ${unit.error}`);
-if (unit.triFloats !== 18) fail(`unit: expected 18 floats (2 tris), got ${unit.triFloats}`);
-if (!(near(unit.probeFromBehind, 1) && near(unit.probeFromFront, 1))) fail(`unit: both-face probe wrong (behind=${unit.probeFromBehind} front=${unit.probeFromFront})`);
-if (!near(unit.probeOpen, 5)) fail(`unit: open probe wrong (${unit.probeOpen})`);
-if (!near(unit.faceDist, 0.15) || !near(unit.faceNormal?.[2] ?? 0, 1)) fail(`unit: nearestFace wrong (dist=${unit.faceDist} n=${unit.faceNormal})`);
-if (unit.moved?.status !== 'moved' || !(unit.moved?.offset?.[2] >= 0.27 - 1e-6)) fail(`unit: embedded centre not walked out (${JSON.stringify(unit.moved)})`);
-if (unit.moved && unit.moved.embed > 0.16) fail(`unit: embed too large (${unit.moved.embed})`);
-if (unit.clear?.status !== 'clear' || unit.clear?.offset !== null) fail(`unit: open centre should stay (${JSON.stringify(unit.clear)})`);
-if (unit.empty?.status !== 'clear') fail(`unit: empty geometry case (${JSON.stringify(unit.empty)})`);
-if (unit.cone?.status !== 'moved') fail(`unit: authored direction ignored (${JSON.stringify(unit.cone)})`);
+if (unit.skipped) {
+  console.log(`  skip — ${unit.skipped}`);
+} else {
+  if (unit.error) fail(`unit: threw ${unit.error}`);
+  if (unit.triFloats !== 18) fail(`unit: expected 18 floats (2 tris), got ${unit.triFloats}`);
+  if (!(near(unit.probeFromBehind, 1) && near(unit.probeFromFront, 1))) fail(`unit: both-face probe wrong (behind=${unit.probeFromBehind} front=${unit.probeFromFront})`);
+  if (!near(unit.probeOpen, 5)) fail(`unit: open probe wrong (${unit.probeOpen})`);
+  if (!near(unit.faceDist, 0.15) || !near(unit.faceNormal?.[2] ?? 0, 1)) fail(`unit: nearestFace wrong (dist=${unit.faceDist} n=${unit.faceNormal})`);
+  if (unit.moved?.status !== 'moved' || !(unit.moved?.offset?.[2] >= 0.27 - 1e-6)) fail(`unit: embedded centre not walked out (${JSON.stringify(unit.moved)})`);
+  if (unit.moved && unit.moved.embed > 0.16) fail(`unit: embed too large (${unit.moved.embed})`);
+  if (unit.clear?.status !== 'clear' || unit.clear?.offset !== null) fail(`unit: open centre should stay (${JSON.stringify(unit.clear)})`);
+  if (unit.empty?.status !== 'clear') fail(`unit: empty geometry case (${JSON.stringify(unit.empty)})`);
+  if (unit.cone?.status !== 'moved') fail(`unit: authored direction ignored (${JSON.stringify(unit.cone)})`);
+}
 for (const e of pageErrors) fail(`unit pageerror: ${e.slice(0, 160)}`);
-if (!failures.length) ok('unit checks passed');
+if (!failures.length) ok(unit.skipped ? 'unit checks skipped (built server)' : 'unit checks passed');
 await page.close();
 
 await browser.close();
