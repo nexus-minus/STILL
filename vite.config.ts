@@ -18,6 +18,7 @@ export default defineConfig({
       input: {
         game: 'index.html',
         pathtrace: 'pathtrace.html',
+        pathtraceSanity: 'pathtrace-sanity.html',
       },
     },
   },

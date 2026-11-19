@@ -33,7 +33,11 @@
       <label>Samples <input id="samples" type="range" min="4" max="256" step="4" value="64" /><span id="samples-v">64</span></label>
       <label>Render scale <input id="scale" type="range" min="0.2" max="1" step="0.1" value="0.5" /><span id="scale-v">0.5</span></label>
       <label>Area-light gain <input id="gain" type="range" min="0.1" max="4" step="0.1" value="1" /><span id="gain-v">1.0</span></label>
+      <label>Diagnostic sun <input id="sun" type="checkbox" /><span>core tracer check</span></label>
+      <label>Diagnostic point <input id="point" type="checkbox" /><span>point-light check</span></label>
+      <label>Self-emission probe <input id="selfemit" type="checkbox" /><span>BVH/material check</span></label>
       <button id="reset">Reset samples</button>
+      <button id="raster">Show raster preview</button>
       <div id="status">Starting…</div>
       <p>Path tracing resets when the camera moves; wait for the still image to converge.</p>
     </aside>
