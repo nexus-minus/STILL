@@ -217,6 +217,11 @@ export class PlayerController {
     // could tunnel the capsule straight through floors) ----------------------
     this.frameStart.copy(this.position);
     const intendedH = Math.hypot(velocity.x, velocity.z) * dt;
+    // Save the intended horizontal displacement BEFORE contact response: wall
+    // projection cancels velocity-into-the-wall, and the step-up trial must
+    // re-advance with the ORIGINAL intent (that's what climbs the ledge).
+    const intendedDX = velocity.x * dt;
+    const intendedDZ = velocity.z * dt;
     const maxDisp = Math.max(Math.abs(velocity.x), Math.abs(velocity.y), Math.abs(velocity.z)) * dt;
     const substeps = Math.max(1, Math.min(6, Math.ceil(maxDisp / (opts.radius * 0.5))));
     const stepDt = dt / substeps;
@@ -274,12 +279,12 @@ export class PlayerController {
     // drop. Accepts only a genuine small gain (0.03..stepUp+0.06) so tall
     // walls and low ceilings still block. -----------------------------------
     const movedH = Math.hypot(this.position.x - this.frameStart.x, this.position.z - this.frameStart.z);
-    if (this.grounded && velocity.y <= 0 && intendedH > 0.02 && movedH < intendedH * 0.5) {
+    if (this.grounded && velocity.y <= 0 && intendedH > 0.004 && movedH < intendedH * 0.5) {
       const trial = this.position.clone();
       trial.y += opts.stepUp;
       this.collision.resolveCapsule(trial, opts.height, opts.radius);
-      trial.x += velocity.x * dt;
-      trial.z += velocity.z * dt;
+      trial.x += intendedDX; // pre-projection intent — climbs onto the ledge
+      trial.z += intendedDZ;
       this.collision.resolveCapsule(trial, opts.height, opts.radius);
       trial.y -= opts.stepUp + 0.1;
       const drop = this.collision.resolveCapsule(trial, opts.height, opts.radius);
