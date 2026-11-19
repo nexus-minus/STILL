@@ -140,7 +140,9 @@ export function createAdvancedRenderer(
   const lightCount = uniform(Math.min(lights.length, MAX_LIGHTS));
   const bounceCount = uniform(0);
   const debugMode = uniform(0);
-  /** temporal blend: 1 = live frame (moving/debug), <1 = accumulate */
+  /** soft-shadow taps — ?rtsoft=0 restores the legacy single-tap hard ray (A/B shots) */
+  const softShadow = uniform(new URLSearchParams(location.search).get('rtsoft') === '0' ? 0 : 1);
+  /** temporal blend: 1 = live frame (moving), <1 = accumulate */
   const blendAlpha = uniform(1);
   /** runtime intensity multiplier (settings slider) — applied at light upload */
   const lightGain = uniform(1);
@@ -191,17 +193,22 @@ export function createAdvancedRenderer(
   ).join(',\n      ');
   const shadowChain = Array.from(
     { length: MAX_LIGHTS },
-    (_, i) => `if (lightCount > ${i + 0.5}) { acc += directLight(l${i}, c${i}, d${i}, P, N, 1.0); }`,
+    // jseed: shared per-pixel/frame jitter — the soft-shadow taps decorrelate
+    // per frame so the temporal accumulation averages them into a clean penumbra
+    (_, i) => `if (lightCount > ${i + 0.5}) { acc += directLight(l${i}, c${i}, d${i}, P, N, 1.0, jseed, softShadow); }`,
   ).join('\n      ');
   const bounceChain = Array.from(
     { length: MAX_LIGHTS },
-    (_, i) => `if (lightCount > ${i + 0.5}) { bacc += directLight(l${i}, c${i}, d${i}, BP, BN, 0.72); }`,
+    (_, i) => `if (lightCount > ${i + 0.5}) { bacc += directLight(l${i}, c${i}, d${i}, BP, BN, 0.72, seed, softShadow); }`,
   ).join('\n        ');
 
-  // debug2 visibility chain: which of the active lights actually see this pixel
+  // debug2 visibility chain: which of the active lights actually see this pixel.
+  // max() (not sum) is INTENTIONAL here — this is a binary "lit by ANY light"
+  // indicator squeezed into one 0..1 green channel; the real direct-light NEE
+  // above (shadowChain) sums per-light contributions.
   const visChain = Array.from(
     { length: MAX_LIGHTS },
-    (_, i) => `if (lightCount > ${i + 0.5}) { vis = max(vis, shadowFactor(l${i}, c${i}, d${i}, P, N)); }`,
+    (_, i) => `if (lightCount > ${i + 0.5}) { vis = max(vis, shadowFactor(l${i}, c${i}, d${i}, P, N, jseed, softShadow)); }`,
   ).join('\n      ');
 
   const kernelSource = /* wgsl */ `
@@ -218,6 +225,7 @@ export function createAdvancedRenderer(
       lightCount: f32,
       bounceCount: f32,
       debugMode: f32,
+      softShadow: f32,
       workgroupSize: vec3u,
       ${lightParams},
       workgroupId: vec3u,
@@ -228,6 +236,11 @@ export function createAdvancedRenderer(
       if (indexUV.x >= dimensions.x || indexUV.y >= dimensions.y) { return vec4f(0.0); }
 
       let uv = (vec2f(indexUV) + vec2f(0.5)) / vec2f(dimensions);
+
+      // per-pixel + per-frame jitter seed — AO, soft-shadow taps and the
+      // debug visibility chain all consume it, so it must be declared before
+      // the first of them (the debug2 branch runs before the AO block)
+      let jseed = uv * 91.7 + vec2f(frameIndex * 0.37, frameIndex * 0.73);
 
       // debug modes (?rtdebug=1|2) — written before any ray math so each
       // stage of the pipeline can be isolated with one screenshot
@@ -278,7 +291,6 @@ export function createAdvancedRenderer(
       // ignores geometry and every corner reads flat/wrong
       var aor: Ray;
       aor.origin = P;
-      let jseed = uv * 91.7 + vec2f(frameIndex * 0.37, frameIndex * 0.73);
       let j1 = hash12(jseed) - 0.5;
       let j2 = hash12(jseed + vec2f(7.31, 2.17)) - 0.5;
       aor.direction = normalize(N + vec3f(j1, j2, j1 * j2) * 0.7);
@@ -337,7 +349,61 @@ export function createAdvancedRenderer(
       return fract((h3.x + h3.y) * h3.z);
     }
 
-    fn directLight(lp: vec4f, lc: vec4f, ld: vec4f, P: vec3f, N: vec3f, albedoScale: f32) -> vec3f {
+    // SOFT SHADOW: average 3 visibility taps per light — tap0 aims at the
+    // fixture centre (stable umbra core), taps 1-2 jitter over the fixture's
+    // disc (radius = lc.w, the packed half-size — lightCol.w). A binary ray
+    // gave hard cut-offs; the penumbra comes from the taps disagreeing near
+    // edges. The seed varies per pixel AND per frame, so the temporal
+    // accumulation (static camera) converges the noise away. radius ~0 or
+    // soft off (?rtsoft=0) collapses to the old single centre tap.
+    fn shadowVis(lp: vec4f, lc: vec4f, P: vec3f, N: vec3f, seed: vec2f, soft: f32) -> f32 {
+      let toL = lp.xyz - P;
+      let d2 = dot(toL, toL);
+      let dist = sqrt(d2);
+      let L = toL / dist;
+      if (max(dot(N, L), 0.0) <= 0.0) { return 0.0; }
+      let radius = select(0.0, lc.w, soft > 0.5);
+      if (radius < 0.015) {
+        var sray: Ray;
+        sray.origin = P;
+        sray.direction = L;
+        sray.maxDist = max(dist - 0.08, 0.001);
+        var sh: IntersectionResult;
+        if (bvh_RaycastFirstHit(sray, &sh) && sh.dist > 0.02) { return 0.0; }
+        return 1.0;
+      }
+      // orthonormal disc basis perpendicular to the light direction
+      let refUp = select(vec3f(0.0, 1.0, 0.0), vec3f(1.0, 0.0, 0.0), abs(L.y) > 0.9);
+      let tan1 = normalize(cross(refUp, L));
+      let tan2 = cross(L, tan1);
+      var vis = 0.0;
+      for (var t = 0; t < 3; t += 1) {
+        // NB: never name this 'target' — WGSL reserves it (Tint parse error)
+        var lightPt = lp.xyz;
+        if (t > 0) {
+          // uniform over the disc: sqrt() undoes the polar-area compression
+          let ang = 6.2831853 * hash12(seed + vec2f(f32(t) * 13.73, f32(t) * 7.19));
+          let rad = sqrt(hash12(seed + vec2f(f32(t) * 3.71, f32(t) * 17.3))) * radius;
+          lightPt += (tan1 * cos(ang) + tan2 * sin(ang)) * rad;
+        }
+        let toT = lightPt - P;
+        let td = sqrt(dot(toT, toT));
+        var sray: Ray;
+        sray.origin = P;
+        sray.direction = toT / max(td, 1e-4);
+        // same 0.08 stop-short as the hard ray: the wall a fixture is embedded
+        // in sits >= radius + 0.05 BEHIND the centre (map-loader nudges it out),
+        // so even the farthest jittered tap stops short of the host surface
+        sray.maxDist = max(td - 0.08, 0.001);
+        var sh: IntersectionResult;
+        // sh.dist > 0.02: ignore only the receiver's own surface — the big
+        // 0.25 epsilon used earlier skipped real occluders and leaked light
+        if (!(bvh_RaycastFirstHit(sray, &sh) && sh.dist > 0.02)) { vis += 1.0; }
+      }
+      return vis * 0.33333334;
+    }
+
+    fn directLight(lp: vec4f, lc: vec4f, ld: vec4f, P: vec3f, N: vec3f, albedoScale: f32, seed: vec2f, soft: f32) -> vec3f {
       if (lp.w <= 0.0) { return vec3f(0.0); }
       // one-way cone: lights only the region the fixture POINTS at (Blender
       // prop cone_deg) — a clipped-through fixture stops lighting its outside
@@ -354,35 +420,20 @@ export function createAdvancedRenderer(
       // into the open room at load, which is physically consistent)
       let ndotl = max(dot(N, L), 0.0);
       if (ndotl <= 0.0) { return vec3f(0.0); }
-      var sray: Ray;
-      sray.origin = P;
-      sray.direction = L;
-      sray.maxDist = max(dist - 0.08, 0.001);
-      var sh: IntersectionResult;
-      // small numerical epsilon only (0.05) — the big0.25 caused edge leaks
-      if (bvh_RaycastFirstHit(sray, &sh) && sh.dist > 0.02) { return vec3f(0.0); }
-      return lc.rgb * (lp.w * albedoScale * ndotl / max(d2, 0.25));
+      let vis = shadowVis(lp, lc, P, N, seed, soft);
+      if (vis <= 0.0) { return vec3f(0.0); }
+      return lc.rgb * (lp.w * albedoScale * ndotl / max(d2, 0.25)) * vis;
     }
 
     // pure visibility term for debug mode: 1 = lit by this light, 0 = shadowed
-    fn shadowFactor(lp: vec4f, lc: vec4f, ld: vec4f, P: vec3f, N: vec3f) -> f32 {
+    // (values between = penumbra now that the taps are jittered)
+    fn shadowFactor(lp: vec4f, lc: vec4f, ld: vec4f, P: vec3f, N: vec3f, seed: vec2f, soft: f32) -> f32 {
       if (lp.w <= 0.0) { return 0.0; }
       if (ld.w > -0.5) {
         let toP = normalize(P - lp.xyz);
         if (dot(toP, ld.xyz) < ld.w) { return 0.0; }
       }
-      let toL = lp.xyz - P;
-      let d2 = dot(toL, toL);
-      let dist = sqrt(d2);
-      let L = toL / dist;
-      if (max(dot(N, L), 0.0) <= 0.0) { return 0.0; }
-      var sray: Ray;
-      sray.origin = P;
-      sray.direction = L;
-      sray.maxDist = max(dist - 0.08, 0.001);
-      var sh: IntersectionResult;
-      if (bvh_RaycastFirstHit(sray, &sh) && sh.dist > 0.02) { return 0.0; }
-      return 1.0;
+      return shadowVis(lp, lc, P, N, seed, soft);
     }
   `;
 
@@ -395,6 +446,7 @@ export function createAdvancedRenderer(
     lightCount,
     bounceCount,
     debugMode,
+    softShadow,
     workgroupSize,
     workgroupId,
     localId,
@@ -542,13 +594,18 @@ export function createAdvancedRenderer(
       lastCamZ = cam.position.z;
       lastPitch = cam.rotation.x;
       lastYaw = cam.rotation.y;
-      if (lastDebug > 0 && debugNow === 0) historyReset = true; // stale after debug
+      // history holds the PREVIOUS debug mode's output after a switch — reset
+      // on any change (0<->N and N<->M) so modes never smear into each other
+      if (lastDebug !== debugNow) historyReset = true;
       lastDebug = debugNow;
       if (historyReset) {
         blendAlpha.value = 1;
         historyReset = false;
       } else {
-        blendAlpha.value = debugNow > 0 || moved ? 1 : 0.08;
+        // static camera accumulates even in debug modes: the soft-shadow taps
+        // are per-frame jittered, so accumulation is what converges them into a
+        // clean penumbra in ?rtdebug=2/3 screenshots (motion stays live)
+        blendAlpha.value = moved ? 1 : 0.08;
       }
 
       // refill lights every frame (cheap; lets the intensity gain apply live);
