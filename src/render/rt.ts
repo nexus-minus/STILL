@@ -144,6 +144,12 @@ export function createAdvancedRenderer(
     (_, i) => `if (lightCount > ${i + 0.5}) { bacc += directLight(l${i}, c${i}, BP, BN, 0.72); }`,
   ).join('\n        ');
 
+  // debug2 visibility chain: which of the active lights actually see this pixel
+  const visChain = Array.from(
+    { length: MAX_LIGHTS },
+    (_, i) => `if (lightCount > ${i + 0.5}) { vis = max(vis, shadowFactor(l${i}, P, N)); }`,
+  ).join('\n      ');
+
   const kernelSource = /* wgsl */ `
     // compute MUST be the first function: three parses the FIRST fn for the
     // signature it binds and calls THAT name from its generated main. It also
@@ -180,15 +186,6 @@ export function createAdvancedRenderer(
       var hit: IntersectionResult;
       bvh_RaycastFirstHit(ray, &hit);
 
-      if (debugMode > 1.5) {
-        textureStore(
-          lightingTex,
-          indexUV,
-          select(vec4f(1.0, 0.0, 0.0, 1.0), vec4f(0.0, 1.0, 0.0, 1.0), hit.didHit),
-        );
-        return vec4f(0.0);
-      }
-
       if (!hit.didHit) {
         textureStore(lightingTex, indexUV, vec4f(0.0, 0.0, 0.0, 1.0));
         return vec4f(0.0);
@@ -197,6 +194,17 @@ export function createAdvancedRenderer(
       var N = hit.normal;
       if (dot(N, -ray.direction) < 0.0) { N = -N; }
       let P = ray.origin + ray.direction * hit.dist + N * 0.012;
+
+      // debug2: hit/miss colour SHADED by real shadow-ray visibility —
+      // bright green = hit & lit · dark green = hit & IN SHADOW · red = miss
+      if (debugMode > 1.5) {
+        var vis = 0.0;
+        ${visChain}
+        let base = vec4f(0.0, 1.0, 0.0, 1.0);
+        let shade = 0.25 + 0.75 * vis;
+        textureStore(lightingTex, indexUV, vec4f(base.rgb * shade, 1.0));
+        return vec4f(0.0);
+      }
 
       // hemisphere ambient so nothing is pitch black
       var acc = mix(vec3f(0.028, 0.026, 0.022), vec3f(0.06, 0.058, 0.052), N.y * 0.5 + 0.5);
@@ -256,6 +264,22 @@ export function createAdvancedRenderer(
       sray.maxDist = max(dist - 0.08, 0.001);
       if (bvh_RaycastAnyHit(sray)) { return vec3f(0.0); }
       return lc.rgb * (lp.w * albedoScale * ndotl / max(d2, 0.25));
+    }
+
+    // pure visibility term for debug mode: 1 = lit by this light, 0 = shadowed
+    fn shadowFactor(lp: vec4f, P: vec3f, N: vec3f) -> f32 {
+      if (lp.w <= 0.0) { return 0.0; }
+      let toL = lp.xyz - P;
+      let d2 = dot(toL, toL);
+      let dist = sqrt(d2);
+      let L = toL / dist;
+      if (max(dot(N, L), 0.0) <= 0.0) { return 0.0; }
+      var sray: Ray;
+      sray.origin = P;
+      sray.direction = L;
+      sray.maxDist = max(dist - 0.08, 0.001);
+      if (bvh_RaycastAnyHit(sray)) { return 0.0; }
+      return 1.0;
     }
   `;
 

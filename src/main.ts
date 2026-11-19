@@ -188,8 +188,10 @@ async function main(): Promise<void> {
             'black-frame detector paused, raytraced lighting forced on',
         );
         hud.message(
-          rtDebug === 2 ? 'RT DEBUG 2 — green = ray hit, red = ray miss' : 'RT DEBUG 1 — uv gradient',
-          8000,
+          rtDebug === 2
+            ? 'RT DEBUG — bright green: lit · dark green: SHADOW · red: miss'
+            : 'RT DEBUG 1 — uv gradient',
+          9000,
         );
       }
       pipeline.setAdvanced(advanced);
