@@ -31,6 +31,32 @@ Projection + step-up removed most of it; small judder remains when pressing
 diagonally into walls. Likely per-frame push/cancel equilibrium — explore
 sleeping the into-wall velocity for a few frames while contact persists.
 
+## 4. Baked lighting for potato mode (developer idea, liked)
+
+Accumulate the raytraced lighting into a static texture (or bake from Blender)
+so low-end machines get the *look* of traced light without interaction:
+no player shadows, no per-frame cost — but the atmosphere. The current
+fallback (analytic point lights + bloom) is the interim version. Design note:
+keep the light list identical so bake and runtime paths agree visually.
+
+## 5. Light quality issues (raytracing tuning, reported after wrap-fix)
+
+- **Noise** — partially mitigated (5-tap smoothing of the lighting sample);
+  proper fix = temporal accumulation with motion reprojection + a small
+  denoiser (the original plan's "history buffer").
+- **Leaks through surfaces, especially edges** — two causes: (a) the0.25 m
+  self-surface shadow epsilon (needed for embedded fixtures) also skips real
+  occluders closer than0.25 m; (b) plane-based levels have *seams* at mesh
+  edges — shadow rays slip through unwelded gaps (authoring fix: weld/thicken
+  walls, or we ship collision-proxy boxes for thin walls).
+- **Hard cut-offs** — binary shadow visibility = hard shadow edges. Soft
+  shadows: jitter the shadow ray over the light's sphere (pack fixture radius
+  into lightCol.w), average a few taps.
+- **Light position offset** — embedded fixture centers sit behind the wall, so
+  the spill hotspot shifts toward the room; fix = nudge the analytic light
+  position outward along the host surface normal at load (needs the nearest
+  face normal — Box3-neighborhood sampling at the loader).
+
 ## Status of the "fix first" item
 
 Shadow visibility is now part of `?rtdebug=2` (bright green = lit,

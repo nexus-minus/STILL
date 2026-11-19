@@ -116,6 +116,7 @@ export function createAdvancedRenderer(
   const lightCount = uniform(Math.min(lights.length, MAX_LIGHTS));
   const bounceCount = uniform(0);
   const debugMode = uniform(0);
+  const lightingTexel = uniform(new THREE.Vector2(1, 1));
   const workgroupSize = uniform(new THREE.Vector3(WORKGROUP, WORKGROUP, 1));
 
   const lightPos = Array.from({ length: MAX_LIGHTS }, (_, i) => {
@@ -344,7 +345,16 @@ export function createAdvancedRenderer(
     // mirrors vertically ("stairs on the ceiling"). Diffuse/emissive come
     // from render targets sampled with screenUV natively and must NOT flip.
     const lightingUv = screenUV.mul(vec2(1.0, -1.0)).add(vec2(0.0, 1.0));
-    const lightingN = texture(lightingTex, lightingUv);
+    // 5-tap smoothing: one bounce sample per pixel is inherently noisy — a
+    // one-texel cross average kills most of the shimmer (full temporal
+    // accumulation/denoise is in the backlog)
+    const tx = lightingTexel;
+    const s0 = texture(lightingTex, lightingUv);
+    const s1 = texture(lightingTex, lightingUv.add(tx));
+    const s2 = texture(lightingTex, lightingUv.sub(tx));
+    const s3 = texture(lightingTex, lightingUv.add(vec2(tx.x, -tx.y)));
+    const s4 = texture(lightingTex, lightingUv.add(vec2(-tx.x, tx.y)));
+    const lightingN = s0.mul(0.4).add(s1.add(s2).add(s3).add(s4).mul(0.15));
     const traced = diffuseN.mul(lightingN).add(emissiveN);
     // rtFlag: 0 = beauty · 1 = traced (albedo x lighting) · 2 = RAW lighting
     // (?rtdebug=3 — the un-multiplied buffer, for isolating flat/banding)
@@ -386,6 +396,7 @@ export function createAdvancedRenderer(
         return;
       }
       resizeTex(settings.lightingScale * pixelRatio);
+      lightingTexel.value.set(1 / texW, 1 / texH);
 
       // nearest-12 light upload when the pool outgrows the uniform slots
       if (!staticPool) {

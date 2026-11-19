@@ -327,6 +327,19 @@ async function main(): Promise<void> {
       hud.message(`quality — ${quality.tier}`, 1500);
     }
     if (bindings.matches('map', e.code)) hud.toggleMap();
+    // dev tools: F = freecam fly-through, F2 = save a screenshot
+    if (e.code === 'KeyF') {
+      const on = controller.toggleFreecam();
+      hud.message(
+        on
+          ? 'freecam — WASD + mouse, Space up, C down, Shift fast (F returns)'
+          : 'freecam off — physics back on',
+        4000,
+      );
+    }
+    if (e.code === 'F2') {
+      pendingScreenshot = true;
+    }
     if (bindings.matches('glow', e.code)) {
       const on = pipeline.toggleGlow();
       hud.message(`glow ${on ? 'on' : 'off'}`, 1500);
@@ -492,6 +505,37 @@ async function main(): Promise<void> {
   let fpsFrames = 0;
   let fpsTimer = 0;
   let mapTimer = 0;
+  let pendingScreenshot = false;
+
+  /** snapshot the canvas INSIDE the frame (post-present reads come back blank)
+   *  and trigger a PNG download */
+  const takeScreenshot = (): void => {
+    try {
+      const off = document.createElement('canvas');
+      off.width = canvas.width;
+      off.height = canvas.height;
+      const ctx = off.getContext('2d');
+      if (!ctx) throw new Error('no 2d context');
+      ctx.drawImage(canvas, 0, 0);
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      off.toBlob((blob) => {
+        if (!blob) {
+          hud.message('screenshot failed (empty image)', 3000);
+          return;
+        }
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `liminal_${stamp}.png`;
+        a.click();
+        URL.revokeObjectURL(url);
+        hud.message(`screenshot saved — liminal_${stamp}.png`, 3000);
+      }, 'image/png');
+    } catch (err) {
+      console.error('[screenshot] failed', err);
+      hud.message('screenshot failed (see console)', 3000);
+    }
+  };
   let selfcheckDone = !pipeline.hasAdvanced; // only armed when RT exists
   let wireframeOn = false;
 
@@ -526,6 +570,11 @@ async function main(): Promise<void> {
       dt,
       time: time / 1000,
     });
+
+    if (pendingScreenshot) {
+      pendingScreenshot = false;
+      takeScreenshot();
+    }
 
     // ---- black-frame safety net --------------------------------------------
     // Stage 1 (~3s of black): disable the glow chain (its output can't be

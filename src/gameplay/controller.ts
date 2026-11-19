@@ -102,7 +102,7 @@ export class PlayerController {
         this.jumpQueued = true;
         e.preventDefault();
       }
-      if (this.binds.matches('interact', e.code) && this.locked) this.onInteract?.();
+      if (this.binds.matches('interact', e.code) && this.locked && !this.freecam) this.onInteract?.();
     });
     document.addEventListener('keyup', (e) => this.keys.delete(e.code));
     window.addEventListener('blur', () => this.keys.clear());
@@ -145,6 +145,53 @@ export class PlayerController {
     return document.pointerLockElement === this.canvas;
   }
 
+  /**
+   * F: free camera — fly anywhere, no collision, no gravity. Switching back
+   * drops the capsule at the camera position and lets physics settle it.
+   */
+  freecam = false;
+
+  toggleFreecam(): boolean {
+    this.freecam = !this.freecam;
+    if (this.freecam) {
+      this.velocity.set(0, 0, 0);
+      this.jumpQueued = false;
+    } else {
+      this.position.copy(this.camera.position);
+      this.velocity.set(0, 0, 0);
+      this.jumpQueued = false;
+      this.collision.resolveCapsule(this.position, this.opts.height, this.opts.radius);
+      this.syncFeet();
+    }
+    return this.freecam;
+  }
+
+  private updateFreecam(dt: number): void {
+    const { keys } = this;
+    this.jumpQueued = false; // swallow space-jump input meant for normal mode
+    this.camera.rotation.set(this.pitch, this.yaw, 0, 'YXZ');
+
+    const fz = (keys.has('KeyW') || keys.has('ArrowUp') ? 1 : 0)
+      - (keys.has('KeyS') || keys.has('ArrowDown') ? 1 : 0);
+    const rx = (keys.has('KeyD') || keys.has('ArrowRight') ? 1 : 0)
+      - (keys.has('KeyA') || keys.has('ArrowLeft') ? 1 : 0);
+    const ry = (keys.has('Space') ? 1 : 0) - (keys.has('KeyC') ? 1 : 0);
+
+    this.forward.set(0, 0, -1).applyEuler(this.camera.rotation);
+    this.right.set(1, 0, 0).applyEuler(this.camera.rotation);
+    this.moveDir
+      .set(0, 0, 0)
+      .addScaledVector(this.forward, fz)
+      .addScaledVector(this.right, rx)
+      .addScaledVector(UP, ry);
+    if (this.moveDir.lengthSq() > 1) this.moveDir.normalize();
+
+    const speed = keys.has('ShiftLeft') || keys.has('ShiftRight') ? 14 : 6;
+    this.camera.position.addScaledVector(this.moveDir, speed * dt);
+    this.position.copy(this.camera.position); // keep capsule in sync for return
+    this.syncFeet();
+  }
+
   /** teleport (anchors use this); feet position, falls settle naturally */
   respawnAt(feet: THREE.Vector3): void {
     this.position.copy(feet).addScaledVector(UP, this.opts.height / 2);
@@ -182,6 +229,10 @@ export class PlayerController {
 
     // Unlocked (settings open, menus): no movement input, physics stays alive.
     const active = this.locked || this.forceActiveForTest;
+    if (this.freecam) {
+      if (active) this.updateFreecam(dt);
+      return;
+    }
 
     // ---- desired horizontal movement (yaw-relative) -----------------------
     const fz = active
