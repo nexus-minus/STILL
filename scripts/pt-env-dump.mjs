@@ -8,7 +8,7 @@ try {
   const page = await browser.newPage();
   await page.setViewport({ width: 1280, height: 800 });
   page.on('pageerror', e => console.log('PAGEERROR', e.message));
-  await page.goto('http://localhost:4173/pathtrace.html?env=20', { waitUntil: 'domcontentloaded', timeout: 20000 });
+  await page.goto((process.env.PT_URL || 'http://localhost:5174/pathtrace.html') + '?env=20', { waitUntil: 'domcontentloaded', timeout: 20000 });
   await new Promise(r => setTimeout(r, 8000));
   const dump = await page.evaluate(() => {
     const t = window.__pathtrace.tracer;

@@ -10,7 +10,7 @@ try {
   const logs = [];
   page.on('console', m => logs.push(`[${m.type()}] ${m.text()}`));
   page.on('pageerror', e => logs.push('PAGEERROR ' + e.message));
-  await page.goto('http://localhost:4173/pathtrace.html', { waitUntil: 'domcontentloaded', timeout: 20000 });
+  await page.goto(process.env.PT_URL || 'http://localhost:5174/pathtrace.html', { waitUntil: 'domcontentloaded', timeout: 20000 });
   await new Promise(r => setTimeout(r, 8000));
   // gameplay config: 8 samples + neural denoise
   await page.evaluate(() => {
