@@ -107,10 +107,26 @@ export async function loadWorld(opts: { forceTest?: boolean } = {}): Promise<Wor
       const faceArea = Math.max(size.x * size.y, size.y * size.z, size.x * size.z, 0.15);
       const power = strength * faceArea;
       const center = meshBox.getCenter(new THREE.Vector3());
+
+      // optional one-way cone: Blender custom prop `cone_deg` on the fixture.
+      // Direction = the object's +Z after export (Blender -Y; if the spill
+      // points the wrong way, rotate the fixture 180°).
+      const cone = Number((mesh.userData as Record<string, unknown>).cone_deg ?? 0);
+      let direction: [number, number, number] | undefined;
+      let coneCos: number | undefined;
+      if (cone > 0 && cone < 360) {
+        const fwd = new THREE.Vector3();
+        mesh.getWorldDirection(fwd);
+        direction = [fwd.x, fwd.y, fwd.z];
+        coneCos = Math.cos((cone * Math.PI) / 360);
+      }
+
       rtLights.push({
         position: center.toArray() as [number, number, number],
         color: [emissive.r, emissive.g, emissive.b],
         power,
+        direction,
+        coneCos,
       });
 
       // Fallback illumination: the WebGL2/potato/compat paths have no traced

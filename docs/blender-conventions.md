@@ -34,6 +34,12 @@ Any other top-level collection is **skipped and listed** in
    treats emission: rays hit the surface and pick up its light, with real
    shadows. **Do not use Blender lamp objects** — they don't export as game
    lights. Start around emission strength 8–20 for ceiling panels.
+
+   Optional custom property on a light fixture:
+
+   | property | meaning | default |
+   | -------- | ------- | ------- |
+   | `cone_deg` | one-way cone (e.g. `120`) — the fixture lights only a cone of that opening. **Use on lights clipped through walls so they don't light the outside world.** Aim: fixture **+Z after export** (= Blender **−Y**) into the room; wrong way = rotate the fixture 180°. | omni |
 4. **AgX everywhere.** The game now renders with AgX tonemapping — the same
    view transform Blender 4/5 uses by default — so your viewport look
    (Material Preview or Rendered with emission) transfers closely. With rule 3

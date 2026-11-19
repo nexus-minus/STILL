@@ -39,6 +39,13 @@ export interface RtLight {
   color: [number, number, number];
   /** radiometric power — feeds 1/d² falloff */
   power: number;
+  /**
+   * Optional one-way cone (Blender prop `cone_deg` on the fixture):
+   * world-space emitting direction (the object's +Z after export) and
+   * cos(half-angle). Absent = omni light.
+   */
+  direction?: [number, number, number];
+  coneCos?: number;
 }
 
 export interface AdvancedRenderer {
@@ -116,7 +123,13 @@ export function createAdvancedRenderer(
   const lightCount = uniform(Math.min(lights.length, MAX_LIGHTS));
   const bounceCount = uniform(0);
   const debugMode = uniform(0);
-  const lightingTexel = uniform(new THREE.Vector2(1, 1));
+  // Precomputed4-tap offsets: TSL miscompiles unary minus on swizzle
+  // components inside vec2(...) (it emitted literal NaN.0 into WGSL and broke
+  // every fragment pipeline) — no node arithmetic, just four uniforms.
+  const tapNE = uniform(new THREE.Vector2(1, 1));
+  const tapSW = uniform(new THREE.Vector2(-1, -1));
+  const tapSE = uniform(new THREE.Vector2(1, -1));
+  const tapNW = uniform(new THREE.Vector2(-1, 1));
   const workgroupSize = uniform(new THREE.Vector3(WORKGROUP, WORKGROUP, 1));
 
   const lightPos = Array.from({ length: MAX_LIGHTS }, (_, i) => {
@@ -129,6 +142,19 @@ export function createAdvancedRenderer(
     const l = lights[i];
     return uniform(new THREE.Vector4(l ? l.color[0] : 0, l ? l.color[1] : 0, l ? l.color[2] : 0, 0));
   });
+  // cone gate: xyz = emitting direction, w = cos(half-angle); w < -0.5 = omni
+  const lightDir = Array.from({ length: MAX_LIGHTS }, (_, i) => {
+    const l = lights[i];
+    const hasCone = !!l?.direction && l.coneCos !== undefined;
+    return uniform(
+      new THREE.Vector4(
+        hasCone ? l!.direction![0] : 0,
+        hasCone ? l!.direction![1] : 0,
+        hasCone ? l!.direction![2] : 0,
+        hasCone ? l!.coneCos! : -1,
+      ),
+    );
+  });
 
   // full emissive-light pool (a real map easily exceeds the 12 uniform slots) —
   // the nearest 12 to the camera are uploaded each frame; fixed slots keep the
@@ -138,20 +164,23 @@ export function createAdvancedRenderer(
   const staticPool = lights.length <= MAX_LIGHTS;
 
   // ---- WGSL ------------------------------------------------------------------------
-  const lightParams = Array.from({ length: MAX_LIGHTS }, (_, i) => `l${i}: vec4f, c${i}: vec4f`).join(',\n      ');
+  const lightParams = Array.from(
+    { length: MAX_LIGHTS },
+    (_, i) => `l${i}: vec4f, c${i}: vec4f, d${i}: vec4f`,
+  ).join(',\n      ');
   const shadowChain = Array.from(
     { length: MAX_LIGHTS },
-    (_, i) => `if (lightCount > ${i + 0.5}) { acc += directLight(l${i}, c${i}, P, N, 1.0); }`,
+    (_, i) => `if (lightCount > ${i + 0.5}) { acc += directLight(l${i}, c${i}, d${i}, P, N, 1.0); }`,
   ).join('\n      ');
   const bounceChain = Array.from(
     { length: MAX_LIGHTS },
-    (_, i) => `if (lightCount > ${i + 0.5}) { bacc += directLight(l${i}, c${i}, BP, BN, 0.72); }`,
+    (_, i) => `if (lightCount > ${i + 0.5}) { bacc += directLight(l${i}, c${i}, d${i}, BP, BN, 0.72); }`,
   ).join('\n        ');
 
   // debug2 visibility chain: which of the active lights actually see this pixel
   const visChain = Array.from(
     { length: MAX_LIGHTS },
-    (_, i) => `if (lightCount > ${i + 0.5}) { vis = max(vis, shadowFactor(l${i}, P, N)); }`,
+    (_, i) => `if (lightCount > ${i + 0.5}) { vis = max(vis, shadowFactor(l${i}, d${i}, P, N)); }`,
   ).join('\n      ');
 
   const kernelSource = /* wgsl */ `
@@ -263,8 +292,14 @@ export function createAdvancedRenderer(
       return fract((h3.x + h3.y) * h3.z);
     }
 
-    fn directLight(lp: vec4f, lc: vec4f, P: vec3f, N: vec3f, albedoScale: f32) -> vec3f {
+    fn directLight(lp: vec4f, lc: vec4f, ld: vec4f, P: vec3f, N: vec3f, albedoScale: f32) -> vec3f {
       if (lp.w <= 0.0) { return vec3f(0.0); }
+      // one-way cone: lights only the region the fixture POINTS at (Blender
+      // prop cone_deg) — a clipped-through fixture stops lighting its outside
+      if (ld.w > -0.5) {
+        let toP = normalize(P - lp.xyz);
+        if (dot(toP, ld.xyz) < ld.w) { return vec3f(0.0); }
+      }
       let toL = lp.xyz - P;
       let d2 = dot(toL, toL);
       let dist = sqrt(d2);
@@ -287,8 +322,12 @@ export function createAdvancedRenderer(
     }
 
     // pure visibility term for debug mode: 1 = lit by this light, 0 = shadowed
-    fn shadowFactor(lp: vec4f, P: vec3f, N: vec3f) -> f32 {
+    fn shadowFactor(lp: vec4f, ld: vec4f, P: vec3f, N: vec3f) -> f32 {
       if (lp.w <= 0.0) { return 0.0; }
+      if (ld.w > -0.5) {
+        let toP = normalize(P - lp.xyz);
+        if (dot(toP, ld.xyz) < ld.w) { return 0.0; }
+      }
       let toL = lp.xyz - P;
       let d2 = dot(toL, toL);
       let dist = sqrt(d2);
@@ -316,6 +355,7 @@ export function createAdvancedRenderer(
     localId,
     ...Object.fromEntries(lightPos.map((u, i) => [`l${i}`, u])),
     ...Object.fromEntries(lightCol.map((u, i) => [`c${i}`, u])),
+    ...Object.fromEntries(lightDir.map((u, i) => [`d${i}`, u])),
   };
 
   // Kernel build is DEFERRED until the BVH update finished: sampleTrianglePoint
@@ -348,12 +388,11 @@ export function createAdvancedRenderer(
     // 5-tap smoothing: one bounce sample per pixel is inherently noisy — a
     // one-texel cross average kills most of the shimmer (full temporal
     // accumulation/denoise is in the backlog)
-    const tx = lightingTexel;
     const s0 = texture(lightingTex, lightingUv);
-    const s1 = texture(lightingTex, lightingUv.add(tx));
-    const s2 = texture(lightingTex, lightingUv.sub(tx));
-    const s3 = texture(lightingTex, lightingUv.add(vec2(tx.x, -tx.y)));
-    const s4 = texture(lightingTex, lightingUv.add(vec2(-tx.x, tx.y)));
+    const s1 = texture(lightingTex, lightingUv.add(tapNE));
+    const s2 = texture(lightingTex, lightingUv.add(tapSW));
+    const s3 = texture(lightingTex, lightingUv.add(tapSE));
+    const s4 = texture(lightingTex, lightingUv.add(tapNW));
     const lightingN = s0.mul(0.4).add(s1.add(s2).add(s3).add(s4).mul(0.15));
     const traced = diffuseN.mul(lightingN).add(emissiveN);
     // rtFlag: 0 = beauty · 1 = traced (albedo x lighting) · 2 = RAW lighting
@@ -396,7 +435,12 @@ export function createAdvancedRenderer(
         return;
       }
       resizeTex(settings.lightingScale * pixelRatio);
-      lightingTexel.value.set(1 / texW, 1 / texH);
+      const ex = 1 / texW;
+      const ey = 1 / texH;
+      tapNE.value.set(ex, ey);
+      tapSW.value.set(-ex, -ey);
+      tapSE.value.set(ex, -ey);
+      tapNW.value.set(-ex, ey);
 
       // nearest-12 light upload when the pool outgrows the uniform slots
       if (!staticPool) {
@@ -407,6 +451,13 @@ export function createAdvancedRenderer(
           const light = lightPool[nearestIdx[i]];
           lightPos[i].value.set(light.position[0], light.position[1], light.position[2], light.power);
           lightCol[i].value.set(light.color[0], light.color[1], light.color[2], 0);
+          const hasCone = !!light.direction && light.coneCos !== undefined;
+          lightDir[i].value.set(
+            hasCone ? light.direction![0] : 0,
+            hasCone ? light.direction![1] : 0,
+            hasCone ? light.direction![2] : 0,
+            hasCone ? light.coneCos! : -1,
+          );
         }
       }
       lightCount.value = Math.min(lightPool.length, MAX_LIGHTS);

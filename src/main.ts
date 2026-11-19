@@ -508,7 +508,9 @@ async function main(): Promise<void> {
   let pendingScreenshot = false;
 
   /** snapshot the canvas INSIDE the frame (post-present reads come back blank)
-   *  and trigger a PNG download */
+   *  and save it — prefers the File System Access API so shots land straight
+   *  in a folder you pick (e.g. <game>/screenshots); falls back to Downloads */
+  let shotDir: FileSystemDirectoryHandle | undefined;
   const takeScreenshot = (): void => {
     try {
       const off = document.createElement('canvas');
@@ -518,18 +520,45 @@ async function main(): Promise<void> {
       if (!ctx) throw new Error('no 2d context');
       ctx.drawImage(canvas, 0, 0);
       const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-      off.toBlob((blob) => {
+      const name = `liminal_${stamp}.png`;
+      off.toBlob(async (blob) => {
         if (!blob) {
           hud.message('screenshot failed (empty image)', 3000);
           return;
         }
+        // preferred: write directly into a chosen folder (ask once per session)
+        try {
+          const picker = (
+            window as unknown as {
+              showDirectoryPicker?: (opts: unknown) => Promise<FileSystemDirectoryHandle>;
+            }
+          ).showDirectoryPicker;
+          if (!shotDir && picker) {
+            shotDir = await picker({ id: 'liminal-screenshots', mode: 'readwrite' });
+          }
+          if (shotDir) {
+            const fh = await shotDir.getFileHandle(name, { create: true });
+            const w = await fh.createWritable();
+            await w.write(blob);
+            await w.close();
+            hud.message(`saved to ${shotDir.name}/${name}`, 3000);
+            return;
+          }
+        } catch (err) {
+          if (err instanceof DOMException && err.name === 'AbortError') {
+            hud.message('folder picker cancelled — falling back to Downloads', 3000);
+          } else {
+            console.warn('[screenshot] folder save failed, using download', err);
+          }
+        }
+        // fallback: plain download
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = `liminal_${stamp}.png`;
+        a.download = name;
         a.click();
         URL.revokeObjectURL(url);
-        hud.message(`screenshot saved — liminal_${stamp}.png`, 3000);
+        hud.message(`saved ${name} (Downloads folder)`, 3000);
       }, 'image/png');
     } catch (err) {
       console.error('[screenshot] failed', err);
