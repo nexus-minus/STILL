@@ -234,9 +234,8 @@ export function createAdvancedRenderer(
 
       if (!hit.didHit) {
         let prevM = textureLoad(historyTex, indexUV, 0).rgb;
-        let bM = mix(prevM, vec3f(0.0), blendAlpha);
-        textureStore(lightingTex, indexUV, vec4f(bM, 1.0));
-        textureStore(historyTex, indexUV, vec4f(bM, 1.0));
+        let blendedM = mix(prevM, vec3f(0.0), blendAlpha);
+        textureStore(lightingTex, indexUV, vec4f(blendedM, 1.0));
         return vec4f(0.0);
       }
 
@@ -311,11 +310,12 @@ export function createAdvancedRenderer(
         }
       }
 
-      // temporal accumulation: mix with the history frame (see blendAlpha)
+      // temporal accumulation: blend with the PREVIOUS frame's result, which
+      // historyTex holds as a sampled texture (written by the copy kernel
+      // after this pass — one usage per pass, never read+write together)
       let prev = textureLoad(historyTex, indexUV, 0).rgb;
       let blended = mix(prev, acc, blendAlpha);
       textureStore(lightingTex, indexUV, vec4f(blended, 1.0));
-      textureStore(historyTex, indexUV, vec4f(blended, 1.0));
       return vec4f(0.0);
     }
 
@@ -412,6 +412,35 @@ export function createAdvancedRenderer(
     ] as never);
     return computeFn(params).computeKernel([WORKGROUP, WORKGROUP, 1]) as KernelNode;
   };
+
+  // Copy kernel: historyTex := lightingTex, run right after the lighting pass.
+  // Own pass with its own bindings — storage-WRITE to history here, sampled
+  // READ of history in the lighting kernel — never both in one usage scope
+  // (that combination is what Tint rejected with "no matching call to
+  // textureStore(texture_2d<f32>, ...)").
+  const copySource = /* wgsl */ `
+    fn copyHistory(
+      src: texture_2d<f32>,
+      dst: texture_storage_2d<rgba8unorm, write>,
+      workgroupSize: vec3u,
+      workgroupId: vec3u,
+      localId: vec3u,
+    ) -> vec4f {
+      let dimensions = textureDimensions(src);
+      let indexUV = workgroupSize.xy * workgroupId.xy + localId.xy;
+      if (indexUV.x >= dimensions.x || indexUV.y >= dimensions.y) { return vec4f(0.0); }
+      textureStore(dst, indexUV, textureLoad(src, indexUV, 0));
+      return vec4f(0.0);
+    }
+  `;
+  const copyFn = wgslFn(copySource, [] as never);
+  const copyNode = copyFn({
+    src: texture(lightingTex),
+    dst: textureStore(historyTex),
+    workgroupSize,
+    workgroupId,
+    localId,
+  }).computeKernel([WORKGROUP, WORKGROUP, 1]) as KernelNode;
 
   // ---- composite + bloom ------------------------------------------------------------
   const rtFlag = uniform(0);
@@ -557,6 +586,12 @@ export function createAdvancedRenderer(
 
       kernelNode ??= buildKernel();
       renderer.compute(kernelNode, [
+        Math.ceil(texW / WORKGROUP),
+        Math.ceil(texH / WORKGROUP),
+        1,
+      ]);
+      // history := current frame (separate pass = separate bindings)
+      renderer.compute(copyNode, [
         Math.ceil(texW / WORKGROUP),
         Math.ceil(texH / WORKGROUP),
         1,
