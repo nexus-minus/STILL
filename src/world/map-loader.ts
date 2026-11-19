@@ -106,7 +106,6 @@ export async function loadWorld(opts: { forceTest?: boolean } = {}): Promise<Wor
       const size = meshBox.getSize(new THREE.Vector3());
       const faceArea = Math.max(size.x * size.y, size.y * size.z, size.x * size.z, 0.15);
       const power = strength * faceArea;
-      const halfSize = Math.max(size.x, size.y, size.z) / 2;
       const center = meshBox.getCenter(new THREE.Vector3());
 
       // optional one-way cone: Blender custom prop `cone_deg` on the fixture.
@@ -122,14 +121,32 @@ export async function loadWorld(opts: { forceTest?: boolean } = {}): Promise<Wor
         coneCos = Math.cos((cone * Math.PI) / 360);
       }
 
-      rtLights.push({
-        position: center.toArray() as [number, number, number],
-        color: [emissive.r, emissive.g, emissive.b],
-        power,
-        halfSize,
-        direction,
-        coneCos,
-      });
+      // SHAPE-AWARE sampling: a single point at the bbox centre makes a long
+      // strip fixture throw a circular pool on the opposite wall (the "one
+      // light with a weird circle" bug). Sample along the fixture's longest
+      // axis instead — always derived from GEOMETRY bounds, never the object
+      // origin, so an origin outside the level cannot skew placement.
+      const dims = [size.x, size.y, size.z];
+      const longAxis = dims.indexOf(Math.max(...dims));
+      const longLen = dims[longAxis];
+      const sampleCount = Math.min(8, Math.max(1, Math.round(longLen / 0.9)));
+      const powerEach = power / sampleCount;
+      const otherMax = Math.max(...dims.filter((_, i) => i !== longAxis));
+      const halfEach = Math.max(otherMax, longLen / sampleCount) / 2;
+      for (let s = 0; s < sampleCount; s++) {
+        const t = sampleCount === 1 ? 0 : s / (sampleCount - 1) - 0.5;
+        const pos: [number, number, number] = [center.x, center.y, center.z];
+        pos[longAxis] += t * longLen;
+        rtLights.push({
+          position: pos,
+          color: [emissive.r, emissive.g, emissive.b],
+          power: powerEach,
+          halfSize: halfEach,
+          direction,
+          coneCos,
+        });
+      }
+
 
       // Fallback illumination: the WebGL2/potato/compat paths have no traced
       // lighting — without this the imported map is pitch black there (the

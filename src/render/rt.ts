@@ -250,7 +250,7 @@ export function createAdvancedRenderer(
         if (dot(sn, -ray.direction) < 0.0) { sn = -sn; }
         if (dot(sn, N) > 0.5) { N = sn; }
       }
-      let P = ray.origin + ray.direction * hit.dist + N * 0.012;
+      let P = ray.origin + ray.direction * hit.dist + N * 0.04; // clears thin overlaps
 
       // debug2: hit/miss colour SHADED by real shadow-ray visibility —
       // bright green = hit & lit · dark green = hit & IN SHADOW · red = miss
@@ -276,7 +276,7 @@ export function createAdvancedRenderer(
       var aoh: IntersectionResult;
       var ao = 1.0;
       if (bvh_RaycastFirstHit(aor, &aoh)) { ao = clamp(aoh.dist / 0.6, 0.0, 1.0); }
-      var acc = mix(vec3f(0.028, 0.026, 0.022), vec3f(0.06, 0.058, 0.052), N.y * 0.5 + 0.5) * ao;
+      var acc = mix(vec3f(0.012, 0.011, 0.010), vec3f(0.028, 0.027, 0.024), N.y * 0.5 + 0.5) * ao;
 
       // direct lighting: next-event estimation with traced shadow rays
       ${shadowChain}
@@ -300,7 +300,7 @@ export function createAdvancedRenderer(
         if (bvh_RaycastFirstHit(bray, &bhit)) {
           var BN = bhit.normal;
           if (dot(BN, -dir) < 0.0) { BN = -BN; }
-          let BP = bray.origin + dir * bhit.dist + BN * 0.012;
+          let BP = bray.origin + dir * bhit.dist + BN * 0.04;
           var bacc = vec3f(0.0);
           ${bounceChain}
           // FIREFLY CLAMP: a bounce landing next to a light spikes 1/d² into
@@ -350,7 +350,7 @@ export function createAdvancedRenderer(
       sray.maxDist = max(dist - 0.08, 0.001);
       var sh: IntersectionResult;
       // small numerical epsilon only (0.05) — the big0.25 caused edge leaks
-      if (bvh_RaycastFirstHit(sray, &sh) && sh.dist > 0.05) { return vec3f(0.0); }
+      if (bvh_RaycastFirstHit(sray, &sh) && sh.dist > 0.02) { return vec3f(0.0); }
       return lc.rgb * (lp.w * albedoScale * ndotl / max(d2, 0.25));
     }
 
@@ -371,7 +371,7 @@ export function createAdvancedRenderer(
       sray.direction = L;
       sray.maxDist = max(dist - 0.08, 0.001);
       var sh: IntersectionResult;
-      if (bvh_RaycastFirstHit(sray, &sh) && sh.dist > 0.05) { return 0.0; }
+      if (bvh_RaycastFirstHit(sray, &sh) && sh.dist > 0.02) { return 0.0; }
       return 1.0;
     }
   `;
