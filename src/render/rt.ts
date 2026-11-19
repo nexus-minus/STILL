@@ -39,6 +39,8 @@ export interface RtLight {
   color: [number, number, number];
   /** radiometric power — feeds 1/d² falloff */
   power: number;
+  /** half of the fixture's largest dimension — near-field spill radius + self-hit margin */
+  halfSize: number;
   /**
    * Optional one-way cone (Blender prop `cone_deg` on the fixture):
    * world-space emitting direction (the object's +Z after export) and
@@ -140,7 +142,8 @@ export function createAdvancedRenderer(
   });
   const lightCol = Array.from({ length: MAX_LIGHTS }, (_, i) => {
     const l = lights[i];
-    return uniform(new THREE.Vector4(l ? l.color[0] : 0, l ? l.color[1] : 0, l ? l.color[2] : 0, 0));
+    // w = fixture half-size (self-hit margin + near-field spill radius)
+    return uniform(new THREE.Vector4(l ? l.color[0] : 0, l ? l.color[1] : 0, l ? l.color[2] : 0, l ? l.halfSize : 0));
   });
   // cone gate: xyz = emitting direction, w = cos(half-angle); w < -0.5 = omni
   const lightDir = Array.from({ length: MAX_LIGHTS }, (_, i) => {
@@ -180,7 +183,7 @@ export function createAdvancedRenderer(
   // debug2 visibility chain: which of the active lights actually see this pixel
   const visChain = Array.from(
     { length: MAX_LIGHTS },
-    (_, i) => `if (lightCount > ${i + 0.5}) { vis = max(vis, shadowFactor(l${i}, d${i}, P, N)); }`,
+    (_, i) => `if (lightCount > ${i + 0.5}) { vis = max(vis, shadowFactor(l${i}, c${i}, d${i}, P, N)); }`,
   ).join('\n      ');
 
   const kernelSource = /* wgsl */ `
@@ -304,25 +307,26 @@ export function createAdvancedRenderer(
       let d2 = dot(toL, toL);
       let dist = sqrt(d2);
       let L = toL / dist;
-      // wrap-around diffuse (W=0.35): a fixture embedded IN the wall sits
-      // slightly behind the host surface — pure N*L would cut the face with a
-      // hard diagonal line and leave it black; wrap spills light onto it and
-      // softens the terminator across every face.
-      let ndotl = max((dot(N, L) + 0.35) / 1.35, 0.0);
+      // NEAR-FIELD spill wrap: full wrap only within ~fixture reach (fades by
+      // 1.5 + 2*halfSize) so an embedded fixture washes its host face, while
+      // lights in the NEXT room (beyond the fade) return to strict N*L and
+      // cannot shine through thin walls. Constant wrap leaked everywhere.
+      let spill = 0.35 * clamp(1.0 - (dist - lc.w) / (1.5 + lc.w * 2.0), 0.0, 1.0);
+      let ndotl = max((dot(N, L) + spill) / (1.0 + spill), 0.0);
       if (ndotl <= 0.0) { return vec3f(0.0); }
       var sray: Ray;
       sray.origin = P;
       sray.direction = L;
       sray.maxDist = max(dist - 0.08, 0.001);
       var sh: IntersectionResult;
-      // self-surface epsilon: a hit within 0.25m is the wall the point sits
-      // on being crossed (embedded lights), not a real occluder
-      if (bvh_RaycastFirstHit(sray, &sh) && sh.dist > 0.25) { return vec3f(0.0); }
+      // host-surface epsilon (0.10): embedded fixtures cross their own wall
+      // right at the origin — but real occluders closer than 0.10m still count
+      if (bvh_RaycastFirstHit(sray, &sh) && sh.dist > 0.10) { return vec3f(0.0); }
       return lc.rgb * (lp.w * albedoScale * ndotl / max(d2, 0.25));
     }
 
     // pure visibility term for debug mode: 1 = lit by this light, 0 = shadowed
-    fn shadowFactor(lp: vec4f, ld: vec4f, P: vec3f, N: vec3f) -> f32 {
+    fn shadowFactor(lp: vec4f, lc: vec4f, ld: vec4f, P: vec3f, N: vec3f) -> f32 {
       if (lp.w <= 0.0) { return 0.0; }
       if (ld.w > -0.5) {
         let toP = normalize(P - lp.xyz);
@@ -332,13 +336,15 @@ export function createAdvancedRenderer(
       let d2 = dot(toL, toL);
       let dist = sqrt(d2);
       let L = toL / dist;
-      if (max((dot(N, L) + 0.35) / 1.35, 0.0) <= 0.0) { return 0.0; }
+      // same near-field spill rule as directLight — debug must match reality
+      let spill = 0.35 * clamp(1.0 - (dist - lc.w) / (1.5 + lc.w * 2.0), 0.0, 1.0);
+      if (max((dot(N, L) + spill) / (1.0 + spill), 0.0) <= 0.0) { return 0.0; }
       var sray: Ray;
       sray.origin = P;
       sray.direction = L;
       sray.maxDist = max(dist - 0.08, 0.001);
       var sh: IntersectionResult;
-      if (bvh_RaycastFirstHit(sray, &sh) && sh.dist > 0.25) { return 0.0; }
+      if (bvh_RaycastFirstHit(sray, &sh) && sh.dist > 0.10) { return 0.0; }
       return 1.0;
     }
   `;
@@ -450,7 +456,7 @@ export function createAdvancedRenderer(
         for (let i = 0; i < MAX_LIGHTS; i++) {
           const light = lightPool[nearestIdx[i]];
           lightPos[i].value.set(light.position[0], light.position[1], light.position[2], light.power);
-          lightCol[i].value.set(light.color[0], light.color[1], light.color[2], 0);
+          lightCol[i].value.set(light.color[0], light.color[1], light.color[2], light.halfSize);
           const hasCone = !!light.direction && light.coneCos !== undefined;
           lightDir[i].value.set(
             hasCone ? light.direction![0] : 0,

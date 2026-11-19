@@ -106,6 +106,7 @@ export async function loadWorld(opts: { forceTest?: boolean } = {}): Promise<Wor
       const size = meshBox.getSize(new THREE.Vector3());
       const faceArea = Math.max(size.x * size.y, size.y * size.z, size.x * size.z, 0.15);
       const power = strength * faceArea;
+      const halfSize = Math.max(size.x, size.y, size.z) / 2;
       const center = meshBox.getCenter(new THREE.Vector3());
 
       // optional one-way cone: Blender custom prop `cone_deg` on the fixture.
@@ -125,6 +126,7 @@ export async function loadWorld(opts: { forceTest?: boolean } = {}): Promise<Wor
         position: center.toArray() as [number, number, number],
         color: [emissive.r, emissive.g, emissive.b],
         power,
+        halfSize,
         direction,
         coneCos,
       });

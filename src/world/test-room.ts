@@ -118,7 +118,7 @@ export function buildTestRoom(): TestRoom {
   // --- ceiling light panels (visual only, no collision) ------------------
   const panel = (x: number, z: number): void => {
     box(1.4, 0.06, 1.4, x, WALL_H - 0.05, z, panelMat, false);
-    rtLights.push({ position: [x, WALL_H - 0.12, z], color: linear(0xfff3d8), power: 7 });
+    rtLights.push({ position: [x, WALL_H - 0.12, z], color: linear(0xfff3d8), power: 7, halfSize: 0.7 });
   };
   panel(-4, -4); panel(4, -4); panel(-4, 4); panel(4, 4);
   panel(0, 10); panel(0, 14);
@@ -144,6 +144,7 @@ export function buildTestRoom(): TestRoom {
     position: [beacon.position.x, beacon.position.y, beacon.position.z],
     color: linear(0x9dffe0),
     power: 3,
+    halfSize: 1.05,
   });
 
   // --- lore desk in room B ------------------------------------------------
