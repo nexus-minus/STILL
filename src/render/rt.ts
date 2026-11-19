@@ -120,6 +120,9 @@ export function createAdvancedRenderer(
 
   // ---- lighting storage texture (rgba8unorm — matches three's default) --------
   const lightingTex = new THREE.StorageTexture(1, 1);
+  // temporal accumulation history: static camera converges to a clean image,
+  // any movement resets to live (no smear — reset instead of reproject)
+  const historyTex = new THREE.StorageTexture(1, 1);
 
   // ---- uniforms -----------------------------------------------------------------
   const invViewProj = uniform(new THREE.Matrix4());
@@ -127,6 +130,8 @@ export function createAdvancedRenderer(
   const lightCount = uniform(Math.min(lights.length, MAX_LIGHTS));
   const bounceCount = uniform(0);
   const debugMode = uniform(0);
+  /** temporal blend: 1 = live frame (moving/debug), <1 = accumulate */
+  const blendAlpha = uniform(1);
   /** runtime intensity multiplier (settings slider) — applied at light upload */
   const lightGain = uniform(1);
   // Precomputed4-tap offsets: TSL miscompiles unary minus on swizzle
@@ -196,6 +201,8 @@ export function createAdvancedRenderer(
     // return vec4f and let the caller discard it (Tint-verified accepted).
     fn compute(
       lightingTex: texture_storage_2d<rgba8unorm, write>,
+      historyTex: texture_2d<f32>,
+      blendAlpha: f32,
       invViewProj: mat4x4f,
       frameIndex: f32,
       lightCount: f32,
@@ -226,7 +233,10 @@ export function createAdvancedRenderer(
       bvh_RaycastFirstHit(ray, &hit);
 
       if (!hit.didHit) {
-        textureStore(lightingTex, indexUV, vec4f(0.0, 0.0, 0.0, 1.0));
+        let prevM = textureLoad(historyTex, indexUV, 0).rgb;
+        let bM = mix(prevM, vec3f(0.0), blendAlpha);
+        textureStore(lightingTex, indexUV, vec4f(bM, 1.0));
+        textureStore(historyTex, indexUV, vec4f(bM, 1.0));
         return vec4f(0.0);
       }
 
@@ -294,11 +304,18 @@ export function createAdvancedRenderer(
           let BP = bray.origin + dir * bhit.dist + BN * 0.012;
           var bacc = vec3f(0.0);
           ${bounceChain}
-          acc += bacc / 3.14159265;
+          // FIREFLY CLAMP: a bounce landing next to a light spikes 1/d² into
+          // single white pixels — the "particles" in screenshots. Cap the
+          // indirect term; direct pools stay bright (storage clamps at 1).
+          acc += min(bacc / 3.14159265, vec3f(0.6));
         }
       }
 
-      textureStore(lightingTex, indexUV, vec4f(acc, 1.0));
+      // temporal accumulation: mix with the history frame (see blendAlpha)
+      let prev = textureLoad(historyTex, indexUV, 0).rgb;
+      let blended = mix(prev, acc, blendAlpha);
+      textureStore(lightingTex, indexUV, vec4f(blended, 1.0));
+      textureStore(historyTex, indexUV, vec4f(blended, 1.0));
       return vec4f(0.0);
     }
 
@@ -366,6 +383,8 @@ export function createAdvancedRenderer(
 
   const params = {
     lightingTex: textureStore(lightingTex),
+    historyTex: texture(historyTex),
+    blendAlpha,
     invViewProj,
     frameIndex,
     lightCount,
@@ -434,6 +453,14 @@ export function createAdvancedRenderer(
   let texH = 1;
   let frame = 0;
   let ranThisFrame = false;
+  // temporal accumulation control
+  let lastCamX = NaN;
+  let lastCamY = 0;
+  let lastCamZ = 0;
+  let lastPitch = 0;
+  let lastYaw = 0;
+  let lastDebug = 0;
+  let historyReset = true;
 
   const resizeTex = (scale: number): void => {
     const w = Math.max(1, Math.ceil(logicalW * scale));
@@ -442,6 +469,8 @@ export function createAdvancedRenderer(
       texW = w;
       texH = h;
       lightingTex.setSize(w, h, 1);
+      historyTex.setSize(w, h, 1);
+      historyReset = true;
     }
   };
 
@@ -462,6 +491,31 @@ export function createAdvancedRenderer(
       tapSW.value.set(-ex, -ey);
       tapSE.value.set(ex, -ey);
       tapNW.value.set(-ex, ey);
+
+      // ---- temporal accumulation control ------------------------------------
+      // moving camera or debug view = live frame (no smear); standing still
+      // = accumulate (the reliable noise cure: static scenes converge clean)
+      const debugNow = debugMode.value;
+      const moved =
+        !Number.isFinite(lastCamX) ||
+        Math.abs(cam.position.x - lastCamX) +
+            Math.abs(cam.position.y - lastCamY) +
+            Math.abs(cam.position.z - lastCamZ) >
+          0.003 ||
+        Math.abs(cam.rotation.x - lastPitch) + Math.abs(cam.rotation.y - lastYaw) > 0.0015;
+      lastCamX = cam.position.x;
+      lastCamY = cam.position.y;
+      lastCamZ = cam.position.z;
+      lastPitch = cam.rotation.x;
+      lastYaw = cam.rotation.y;
+      if (lastDebug > 0 && debugNow === 0) historyReset = true; // stale after debug
+      lastDebug = debugNow;
+      if (historyReset) {
+        blendAlpha.value = 1;
+        historyReset = false;
+      } else {
+        blendAlpha.value = debugNow > 0 || moved ? 1 : 0.08;
+      }
 
       // refill lights every frame (cheap; lets the intensity gain apply live);
       // nearest-12 when the pool outgrows the uniform slots
@@ -527,6 +581,7 @@ export function createAdvancedRenderer(
     dispose(): void {
       postPipeline.dispose();
       lightingTex.dispose();
+      historyTex.dispose();
       scenePass.dispose();
     },
   };
