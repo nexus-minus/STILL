@@ -339,21 +339,18 @@ export function createAdvancedRenderer(
       let d2 = dot(toL, toL);
       let dist = sqrt(d2);
       let L = toL / dist;
-      // NEAR-FIELD spill wrap: full wrap only within ~fixture reach (fades by
-      // 1.5 + 2*halfSize) so an embedded fixture washes its host face, while
-      // lights in the NEXT room (beyond the fade) return to strict N*L and
-      // cannot shine through thin walls. Constant wrap leaked everywhere.
-      let spill = 0.35 * clamp(1.0 - (dist - lc.w) / (1.5 + lc.w * 2.0), 0.0, 1.0);
-      let ndotl = max((dot(N, L) + spill) / (1.0 + spill), 0.0);
+      // STRICT N*L (the near-field "spill" wrap that made circular lit patches
+      // is gone — embedded fixtures are handled by nudging the analytic light
+      // into the open room at load, which is physically consistent)
+      let ndotl = max(dot(N, L), 0.0);
       if (ndotl <= 0.0) { return vec3f(0.0); }
       var sray: Ray;
       sray.origin = P;
       sray.direction = L;
       sray.maxDist = max(dist - 0.08, 0.001);
       var sh: IntersectionResult;
-      // host-surface epsilon (0.10): embedded fixtures cross their own wall
-      // right at the origin — but real occluders closer than 0.10m still count
-      if (bvh_RaycastFirstHit(sray, &sh) && sh.dist > 0.10) { return vec3f(0.0); }
+      // small numerical epsilon only (0.05) — the big0.25 caused edge leaks
+      if (bvh_RaycastFirstHit(sray, &sh) && sh.dist > 0.05) { return vec3f(0.0); }
       return lc.rgb * (lp.w * albedoScale * ndotl / max(d2, 0.25));
     }
 
@@ -368,15 +365,13 @@ export function createAdvancedRenderer(
       let d2 = dot(toL, toL);
       let dist = sqrt(d2);
       let L = toL / dist;
-      // same near-field spill rule as directLight — debug must match reality
-      let spill = 0.35 * clamp(1.0 - (dist - lc.w) / (1.5 + lc.w * 2.0), 0.0, 1.0);
-      if (max((dot(N, L) + spill) / (1.0 + spill), 0.0) <= 0.0) { return 0.0; }
+      if (max(dot(N, L), 0.0) <= 0.0) { return 0.0; }
       var sray: Ray;
       sray.origin = P;
       sray.direction = L;
       sray.maxDist = max(dist - 0.08, 0.001);
       var sh: IntersectionResult;
-      if (bvh_RaycastFirstHit(sray, &sh) && sh.dist > 0.10) { return 0.0; }
+      if (bvh_RaycastFirstHit(sray, &sh) && sh.dist > 0.05) { return 0.0; }
       return 1.0;
     }
   `;

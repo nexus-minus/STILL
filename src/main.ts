@@ -146,6 +146,45 @@ async function main(): Promise<void> {
     }
   }
 
+  // ---- analytic light placement (research-backed): embedded fixtures are
+  // nudged into the open room so STRICT N*L lights their host faces
+  // physically — replaces the old wrap-hack whose spherical falloff produced
+  // the circular lit patches. Probes start outside each fixture's own extent
+  // so a light never counts itself as an occluder.
+  if (world.rtLights.length > 0 && world.source === 'map') {
+    const DIRS: Array<[number, number, number]> = [
+      [1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1],
+      [0.707, 0, 0.707], [-0.707, 0, 0.707], [0.707, 0, -0.707], [-0.707, 0, -0.707],
+      [0.707, 0.707, 0], [-0.707, 0.707, 0], [0.707, -0.707, 0], [-0.707, -0.707, 0],
+    ];
+    let nudged = 0;
+    for (const light of world.rtLights) {
+      const center = new THREE.Vector3(light.position[0], light.position[1], light.position[2]);
+      let blocked = 0;
+      let bestDir: THREE.Vector3 | null = null;
+      let bestClear = 0.6;
+      for (const [x, y, z] of DIRS) {
+        const dir = new THREE.Vector3(x, y, z).normalize();
+        const origin = center.clone().addScaledVector(dir, light.halfSize + 0.05);
+        const hit = collision.raycast(origin, dir, 6);
+        const clear = hit ? hit.distance : 6;
+        if (clear < 0.8) blocked++;
+        if (clear > bestClear) {
+          bestClear = clear;
+          bestDir = dir;
+        }
+      }
+      if (blocked >= 3 && bestDir) {
+        const nudgedPos = center.clone().addScaledVector(bestDir, light.halfSize + 0.1);
+        light.position = [nudgedPos.x, nudgedPos.y, nudgedPos.z];
+        nudged++;
+      }
+    }
+    if (nudged > 0) {
+      console.info(`[world] nudged ${nudged} embedded light(s) into the open room`);
+    }
+  }
+
   // ---- quality + render pipeline -----------------------------------------
   setStage('pipeline');
   const persisted = loadSettings();
