@@ -158,6 +158,27 @@ export class PlayerController {
   update(dt: number): void {
     const { opts, velocity } = this;
 
+    // ---- NaN guard: one corrupt value (bad persisted setting, input spike)
+    // can poison pitch/yaw/position permanently → "everything looks wrong".
+    // Reset loudly instead of rendering garbage.
+    if (
+      !Number.isFinite(this.pitch) ||
+      !Number.isFinite(this.yaw) ||
+      !Number.isFinite(this.position.x) ||
+      !Number.isFinite(this.position.y) ||
+      !Number.isFinite(this.position.z)
+    ) {
+      console.error('[controller] NaN in player state — resetting', {
+        pitch: this.pitch,
+        yaw: this.yaw,
+        position: this.position.toArray(),
+      });
+      this.pitch = 0;
+      this.yaw = 0;
+      this.respawnAt(this.spawnFeet);
+      this.velocity.set(0, 0, 0);
+    }
+
     // Unlocked (settings open, menus): no movement input, physics stays alive.
     const active = this.locked || this.forceActiveForTest;
 
