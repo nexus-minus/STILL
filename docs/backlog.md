@@ -95,8 +95,9 @@ needs a world reaction instead. No UI prompts, no toast dependency.
 
 - **User will NEVER split the map manually** — chunking must be automatic
   (engine/exporter side) and invisible to the authoring workflow.
-- Short term: **light-distance culling** in the shader (far lights cost
-  nothing per pixel — the advisory's "limit light distance" point).
+- Short term: **light-distance culling** — DONE for the fog loop
+  (`LIGHT_RANGE` 12 m/step in `passes/volumetrics.ts`, shipped with phase
+  1b); the surface lighting loop's per-pixel culling is still queued.
 - When map size demands it: automatic spatial chunking at export (triangle
   binning, no manual collections), per-chunk BVHs, distance-based unload,
   per-chunk light lists via the existing `setLights()` hook. Until then a

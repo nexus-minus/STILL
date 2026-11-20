@@ -49,6 +49,7 @@ optional):
 | `?sun` | off | adds a diagnostic `DirectionalLight` at startup (same as the "Diagnostic sun" checkbox) |
 | `?rtsoft=0` | soft on | deterministic face-center shadow ray (hard legacy look) instead of fixture-surface jittered soft shadows |
 | `?rtnd=0..4` | 4 | spatial à-trous denoise iterations (0 = raw lighting only, for A/B) |
+| `?vol=0\|off\|1\|on` | per tier | force the volumetric fog off/on (test + tuning override) |
 
 ### Recommended production split
 
@@ -94,11 +95,13 @@ raytracing (traced shadows + 1–2 bounce GI)**, **volumetrics toggleable**,
         ├ normal + depth
         └ emissive mask      ← these pixels are the game's light sources
 [2] RT lighting (compute)   quarter-res by default, temporal accumulation
-        ├ 1 shadow ray       → correct, hard shadows ("the raytracing")
+        ├ 1 shadow ray/light → soft fixture-shaped shadows (mesh lights)
         └ 1-2 bounce rays    → emissive-lit indirect light (the glow-lighting)
-[3] volumetrics (compute)   toggleable pass, quarter-res
-        └ raymarch depth → density → shadow-ray per step → light shafts
-[4] composite               upscale, bloom, ACES tonemap, grain/TAA
+[3] volumetrics (compute)   fog + light shafts at volumetricScale
+        └ raymarch depth → density → shadow-ray per step → in-scatter
+           (WebGPU RT path only; settings.volumetrics=false = zero cost)
+[4] composite               denoised lighting × albedo + emissive,
+        fog (beauty·T + S), bloom, ACES tonemap
 ```
 
 WebGPU exposes no hardware RT API, so rays run in compute shaders against a
@@ -118,7 +121,8 @@ Note: high/ultra *request* `rtBounces: 2`, but the shader currently caps the
 count at 1 (`bounceCount.value = settings.rtBounces >= 1 ? 1 : 0` in
 `rt.ts`) — the second bounce is not yet wired.
 
-- `T` cycles tiers in-game (temporary until the settings menu, phase 1).
+- `T` cycles tiers in-game (kept as a dev shortcut; the settings menu is
+  the primary control).
 - Toggling any feature off removes the pass from the frame entirely —
   "turn volumetrics on/off" is a hard requirement, so off must cost nothing.
 
@@ -144,9 +148,9 @@ path (see `test-room.ts`).
 | -------------------------- | -------------------------- | ----------------------------------- |
 | forward + bloom            | `render/passes/post.ts`    | ✅ phase 0 (permanent fallback)     |
 | **advanced raytraced path**| `render/rt.ts`             | ✅ phase 1a implemented — G-buffer MRT + compute lighting (traced shadows via NEE + 1 bounce) + composite/bloom; **WebGPU only**, graceful degrade everywhere else |
-| volumetrics                | `render/passes/volumetrics.ts` | stub — phase 1b                 |
+| volumetrics                | `render/passes/volumetrics.ts` | ✅ phase 1b — fog + light shafts (dispatched by `rt.ts`; off = zero cost) |
 | chunk streaming            | `world/chunk-streaming.ts` | stub — phase 2                      |
-| settings menu              | —                          | next: phase 1c                      |
+| settings menu              | `ui/settings.ts`            | ✅ shipped (presets, overlays, binds)     |
 
 ### Phase 1a architecture (`render/rt.ts`)
 

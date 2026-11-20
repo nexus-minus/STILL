@@ -17,6 +17,8 @@ export interface PersistedSettings {
   invertY?: boolean;
   renderScale?: number;
   raytracedLighting?: boolean;
+  /** volumetrics toggle override (QualityManager 'volumetrics') */
+  volumetrics?: boolean;
   lightGain?: number;
   glow?: boolean;
   exposure?: number;
@@ -107,9 +109,9 @@ export function initSettings(opts: {
               <input type="checkbox" id="set-rt" ${opts.hasRaytracing ? '' : 'disabled'} />
               <span>Raytraced shadows + GI${opts.hasRaytracing ? '' : ' — unavailable (no WebGPU)'}</span>
             </label>
-            <label class="row check disabled">
-              <input type="checkbox" disabled />
-              <span>Volumetrics — arrives with phase 1b</span>
+            <label class="row check">
+              <input type="checkbox" id="set-vol" ${opts.hasRaytracing ? '' : 'disabled'} />
+              <span>Volumetrics (fog + light shafts)${opts.hasRaytracing ? '' : ' — unavailable (no WebGPU)'}</span>
             </label>
           </section>
           <section>
@@ -179,6 +181,7 @@ export function initSettings(opts: {
     invertY: controller.invertY,
     renderScale: quality.override('renderScale'),
     raytracedLighting: quality.override('raytracedLighting'),
+    volumetrics: quality.override('volumetrics'),
     lightGain: quality.override('lightGain'),
     exposure: opts.getExposure(),
     crosshair: opts.getOverlays().crosshair,
@@ -191,6 +194,7 @@ export function initSettings(opts: {
     persisted.invertY = controller.invertY;
     persisted.renderScale = quality.override('renderScale');
     persisted.raytracedLighting = quality.override('raytracedLighting');
+    persisted.volumetrics = quality.override('volumetrics');
     persisted.exposure = opts.getExposure();
     persisted.lightGain = quality.override('lightGain');
     persisted.glow = opts.getGlow();
@@ -322,6 +326,7 @@ export function initSettings(opts: {
   const gainVal = $<HTMLElement>('set-gain-val');
   const glow = $<HTMLInputElement>('set-glow');
   const rt = $<HTMLInputElement>('set-rt');
+  const vol = $<HTMLInputElement>('set-vol');
   const sens = $<HTMLInputElement>('set-sens');
   const sensVal = $<HTMLElement>('set-sens-val');
   const invert = $<HTMLInputElement>('set-invert');
@@ -357,6 +362,7 @@ export function initSettings(opts: {
     gainVal.textContent = `${s.lightGain.toFixed(1)}×`;
     glow.checked = opts.getGlow();
     rt.checked = s.raytracedLighting;
+    vol.checked = s.volumetrics;
     sens.value = String(controller.sensitivityMultiplier);
     sensVal.textContent = `${controller.sensitivityMultiplier.toFixed(2)}×`;
     invert.checked = controller.invertY;
@@ -375,6 +381,10 @@ export function initSettings(opts: {
     markRow(exposure, opts.getExposure() !== EXPOSURE_DEFAULT);
     markRow(gain, s.lightGain !== tierPreset.lightGain);
     markRow(rt, s.raytracedLighting !== tierPreset.raytracedLighting);
+    // volumetrics is a TIER preset field (potato off, medium+ on), so it gets
+    // the deviation badge exactly like the RT row — unlike glow, which is a
+    // runtime preference on top of a constantly-true preset field
+    markRow(vol, s.volumetrics !== tierPreset.volumetrics);
   };
 
   preset.addEventListener('change', () => {
@@ -414,6 +424,13 @@ export function initSettings(opts: {
   rt.addEventListener('change', () => {
     quality.setOverride('raytracedLighting', rt.checked);
     syncUI(); // the override flips the preset select to "custom" + marks the row
+    persist();
+  });
+  // volumetrics toggle: QualityManager override, applied live (rt.ts reads
+  // settings.volumetrics every frame — off means no dispatch at all)
+  vol.addEventListener('change', () => {
+    quality.setOverride('volumetrics', vol.checked);
+    syncUI();
     persist();
   });
   sens.addEventListener('input', () => {

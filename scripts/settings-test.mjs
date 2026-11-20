@@ -58,11 +58,25 @@ try {
     preset: !!document.getElementById('set-preset'),
     scale: !!document.getElementById('set-scale'),
     rtDisabled: document.getElementById('set-rt')?.disabled ?? false,
+    vol: !!document.getElementById('set-vol'),
+    volDisabled: document.getElementById('set-vol')?.disabled ?? null,
+    volLabel:
+      document.querySelector('#set-vol')?.closest('.row')?.querySelector('span')?.textContent ?? '',
   }));
   check(`8 keybind rows — player binds only (got ${counts.binds})`, counts.binds === 8);
   check('preset selector present', counts.preset);
   check('render scale slider present', counts.scale);
   check('RT checkbox disabled on firefox (no webgpu)', counts.rtDisabled === true);
+  // phase 1b: the disabled "arrives with phase 1b" row became a working toggle
+  check('volumetrics checkbox present (replaced the phase 1b placeholder)', counts.vol === true);
+  check(
+    'volumetrics row disabled on firefox (fog rides the WebGPU path)',
+    counts.volDisabled === true,
+  );
+  check(
+    `volumetrics row labelled (got "${counts.volLabel}")`,
+    counts.volLabel.startsWith('Volumetrics'),
+  );
 
   // rows must be exactly the actions the game is played with (dev tools like
   // glow/respawn/quality keep working but get no row), and the default screen
@@ -274,6 +288,16 @@ try {
     ovLive.saved.crosshair === false && ovLive.saved.keyHints === true && ovLive.saved.toasts === true,
   );
 
+  // volumetrics: force the override OFF while the persisted tier (high) says
+  // ON — main.ts must restore it on reload exactly like lightGain/exposure.
+  // Written straight to storage because the checkbox is disabled on firefox
+  // (no WebGPU); the restore path under test is main.ts's, not the UI's.
+  await page.evaluate(() => {
+    const raw = JSON.parse(localStorage.getItem('liminal.settings.v1') ?? '{}');
+    raw.volumetrics = false;
+    localStorage.setItem('liminal.settings.v1', JSON.stringify(raw));
+  });
+
   // reload: main.ts must restore exposure from storage
   await page.reload({ waitUntil: 'domcontentloaded', timeout: 20000 });
   for (let i = 0; i < 60 && !(await page.evaluate(() => window.__liminalReady === true)); i++) {
@@ -299,6 +323,24 @@ try {
       ovRestored.ovToasts === true,
   );
 
+  // ...and the volumetrics override (tier preset says ON for 'high', the
+  // stored override says OFF — restore must keep them distinguishable)
+  const volRestored = await page.evaluate(() => {
+    const badge = document.querySelector('#set-vol')?.closest('.row')?.querySelector('.mod');
+    return {
+      value: window.__liminal.quality.settings.volumetrics,
+      checked: document.getElementById('set-vol')?.checked ?? null,
+      badgeShown: badge ? !badge.hidden : null,
+      tier: window.__liminal.quality.tier,
+    };
+  });
+  check(
+    `volumetrics override restored after reload (got ${volRestored.value}, tier ${volRestored.tier})`,
+    volRestored.value === false,
+  );
+  check('volumetrics checkbox reflects the restored override', volRestored.checked === false);
+  check('volumetrics row marked custom after restore', volRestored.badgeShown === true);
+
   // reopened menu still marks the restored value; preset re-select resets it
   const reopened = await page.evaluate(() => {
     window.__liminal.settings.open();
@@ -315,14 +357,20 @@ try {
   await sleep(150);
   const expReset = await page.evaluate(() => {
     const badge = document.querySelector('#set-exp')?.closest('.row')?.querySelector('.mod');
+    const volBadge = document.querySelector('#set-vol')?.closest('.row')?.querySelector('.mod');
     return {
       exposure: window.__liminal.renderer.toneMappingExposure,
       badgeShown: badge ? !badge.hidden : false,
       badgeExists: !!badge,
+      vol: window.__liminal.quality.settings.volumetrics,
+      volBadgeHidden: volBadge ? volBadge.hidden : null,
     };
   });
   check(`preset re-select restores neutral exposure (got ${expReset.exposure})`, expReset.exposure === 1);
   check('exposure badge cleared on preset re-select', expReset.badgeExists && !expReset.badgeShown);
+  // the volumetrics override dies with the preset pick too (high preset = ON)
+  check(`preset re-select restores tier volumetrics (got ${expReset.vol})`, expReset.vol === true);
+  check('volumetrics badge cleared on preset re-select', expReset.volBadgeHidden === true);
 
   // close
   const closed = await page.evaluate(() => {

@@ -30,9 +30,12 @@ dive) and [denoising.md](denoising.md) (noise deep dive).
      AO ray        → one short ray around the normal
      temporal      → blend with last frame (still = converges clean,
                      moving = live frame)
-[3] denoise            edge-aware à-trous filter (in progress — kills
-                         motion noise AND light bleeding across edges)
-[4] composite          diffuse × lighting + emissive → bloom → AgX tone map
+[3] denoise            edge-aware à-trous filter (kills motion noise AND
+                         light bleeding across edges)
+[4] fog (optional)     raymarched at volumetricScale over geomTex →
+                         transmittance + light shafts; off = zero cost
+[5] composite          diffuse × lighting + emissive, then fog
+                         (beauty·T + S) → bloom → AgX tone map
 ```
 
 Debug views: `?rtdebug=1` uv gradient · `2` visibility (bright green = lit,

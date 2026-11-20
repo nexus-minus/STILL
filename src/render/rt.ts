@@ -21,6 +21,7 @@ import {
 } from 'three/tsl';
 import { bloom } from 'three/addons/tsl/display/BloomNode.js';
 import { BVHComputeData, ndcToCameraRay } from 'three-mesh-bvh/webgpu';
+import { VolumetricPass, type VolStats } from './passes/volumetrics.js';
 import type { QualitySettings } from './quality.js';
 
 // vec4 slots per light in the storage buffer:
@@ -79,6 +80,9 @@ export interface AdvancedRenderer {
   setLightGain(value: number): void;
   /** replace the light list (future chunk-streaming) — rebuilds the storage buffer, never truncates */
   setLights(lights: RtLight[]): void;
+  /** fog-march counters (phase 1b): dispatches must stay 0 while
+   *  settings.volumetrics is off — scripts/rt-vol-smoke.mjs asserts this */
+  readonly volStats: VolStats;
   dispose(): void;
 }
 
@@ -91,8 +95,13 @@ export interface AdvancedRenderer {
  *                                list, occlusion via bvh_RaycastAnyHit shadow rays
  *        one bounce           -> cosine-hemisphere ray, shaded at the hit point
  *        + hemisphere ambient                               -> storage texture
+ *   1b. volumetrics (phase 1b): while settings.volumetrics && !?rtdebug, a
+ *        fog march at settings.volumetricScale over geomTex + the light list
+ *        (passes/volumetrics.ts) — OFF = release() + the plain composite,
+ *        whose shader is byte-identical to the pre-volumetrics one
  *   2. raster pass -> MRT { output(beauty), diffuse(albedo), emissive }
- *   3. composite: diffuse * lighting + emissive (selected vs beauty by flag)
+ *   3. composite: diffuse * lighting + emissive (selected vs beauty by flag),
+ *      fog-composited (beauty·T + S) when volumetrics ran
  *      -> bloom -> tone mapping (outputColorTransform)
  *
  * Safety rules (this machine cannot run WebGPU locally):
@@ -268,6 +277,29 @@ export function createAdvancedRenderer(
     return storage(lightsAttr, 'vec4', 0).toReadOnly().setName('rt_lights');
   };
   let lightsNode = makeLightsNode(lights);
+
+  // ---- VOLUMETRICS (phase 1b) ------------------------------------------------
+  // Owned and dispatched from HERE, not from pipeline.ts's passes[] graph:
+  // the fog march needs geomTex (this file's G-buffer), the BVH and the light
+  // storage list, and it composites inside the finalColor graph below — that
+  // graph only exists on this WebGPU path. rt.ts gates it every frame:
+  //   settings.volumetrics === false -> volPass.release() + the plain
+  //   composite (no dispatch, no fog-sized texture, old shader) — "off must
+  //   cost nothing" (docs/render-pipeline.md quality-tiers rule).
+  const volPass = new VolumetricPass({
+    bvhData,
+    geomTex,
+    lightsNode: () => lightsNode,
+    invViewProj,
+    viewMat,
+    frameIndex,
+    lightCount,
+    softShadow,
+    lightGain,
+    workgroupSize,
+    workgroupId,
+    localId,
+  });
 
   // ---- WGSL ------------------------------------------------------------------------
   // Light iteration is a RUNTIME loop over lightCount reading the storage
@@ -806,38 +838,64 @@ export function createAdvancedRenderer(
   // ---- composite + bloom ------------------------------------------------------------
   const rtFlag = uniform(0);
 
-  const finalColor = Fn(() => {
-    const beauty = scenePass.getTextureNode('output');
-    const diffuseN = scenePass.getTextureNode('diffuse');
-    const emissiveN = scenePass.getTextureNode('emissive');
-    // Storage writes use indexUV (row 0 = TOP in WebGPU) while screenUV is
-    // y-up — sample the lighting buffer flipped or the entire lighting image
-    // mirrors vertically ("stairs on the ceiling"). Diffuse/emissive come
-    // from render targets sampled with screenUV natively and must NOT flip.
-    const lightingUv = screenUV.mul(vec2(1.0, -1.0)).add(vec2(0.0, 1.0));
-    // The OLD code averaged a depth-blind 5-tap cross here (0.4 centre + 4 ×
-    // 0.15 diagonal). It killed shimmer, but it happily dragged bright light
-    // across silhouettes and into corners — the "light goes through objects"
-    // artefact. The à-trous pass does that job now, guided by geomTex, so the
-    // composite just picks a buffer:
-    //   rtFlag 1 → traced: albedo × DENOISED lighting + emissive (emissive is
-    //              added here raw, never filtered — it is noise-free by
-    //              construction)
-    //   rtFlag 2 → buffer view for ?rtdebug=1|2 (denoised; for debug1 the geom
-    //              guide is all-sentinel so the pass is a no-op anyway)
-    //   rtFlag 3 → buffer view for ?rtdebug=3: RAW temporal buffer, undenoised
-    //              — the raw-lighting diagnostic must stay honest
-    const rawN = texture(lightingTex, lightingUv);
-    const denN = texture(denoiseOut, lightingUv);
-    const bufferN = mix(denN, rawN, step(2.5, rtFlag));
-    const traced = diffuseN.mul(denN).add(emissiveN);
-    const rtColor = mix(beauty, traced, step(0.5, rtFlag));
-    const shown = mix(rtColor, vec4(bufferN.rgb, 1.0), step(1.5, rtFlag));
-    return shown.add(bloom(shown, 0.5, 0.5, 0.75));  })();
+  const makeFinalColor = (fog: boolean) =>
+    Fn(() => {
+      const beauty = scenePass.getTextureNode('output');
+      const diffuseN = scenePass.getTextureNode('diffuse');
+      const emissiveN = scenePass.getTextureNode('emissive');
+      // Storage writes use indexUV (row 0 = TOP in WebGPU) while screenUV is
+      // y-up — sample the lighting buffer flipped or the entire lighting image
+      // mirrors vertically ("stairs on the ceiling"). Diffuse/emissive come
+      // from render targets sampled with screenUV natively and must NOT flip.
+      const lightingUv = screenUV.mul(vec2(1.0, -1.0)).add(vec2(0.0, 1.0));
+      // The OLD code averaged a depth-blind 5-tap cross here (0.4 centre + 4 ×
+      // 0.15 diagonal). It killed shimmer, but it happily dragged bright light
+      // across silhouettes and into corners — the "light goes through objects"
+      // artefact. The à-trous pass does that job now, guided by geomTex, so the
+      // composite just picks a buffer:
+      //   rtFlag 1 → traced: albedo × DENOISED lighting + emissive (emissive is
+      //              added here raw, never filtered — it is noise-free by
+      //              construction)
+      //   rtFlag 2 → buffer view for ?rtdebug=1|2 (denoised; for debug1 the geom
+      //              guide is all-sentinel so the pass is a no-op anyway)
+      //   rtFlag 3 → buffer view for ?rtdebug=3: RAW temporal buffer, undenoised
+      //              — the raw-lighting diagnostic must stay honest
+      const rawN = texture(lightingTex, lightingUv);
+      const denN = texture(denoiseOut, lightingUv);
+      const bufferN = mix(denN, rawN, step(2.5, rtFlag));
+      const lit = diffuseN.mul(denN).add(emissiveN);
+      // Volumetrics composites over the FINAL image (denoised lighting ×
+      // albedo + emissive) so fixtures get hazed too (reference/vibe.png):
+      // premultiplied fog — final = beauty·T + S, rgb only, beauty alpha kept.
+      // Built into the fog composite ONLY: render() picks the plain graph
+      // whenever the toggle/debug view is off, so that shader stays byte-
+      // identical to the pre-volumetrics one ("off must cost nothing").
+      // Buffer views (rtFlag ≥ 2) never reach this branch — ?rtdebug=3 raw
+      // stays raw even with the toggle on.
+      const fogN = fog ? texture(volPass.fogTexture, lightingUv) : null;
+      const traced = fogN
+        ? vec4(lit.rgb.mul(fogN.a).add(fogN.rgb), lit.a)
+        : lit;
+      const rtColor = mix(beauty, traced, step(0.5, rtFlag));
+      const shown = mix(rtColor, vec4(bufferN.rgb, 1.0), step(1.5, rtFlag));
+      return shown.add(bloom(shown, 0.5, 0.5, 0.75));
+    })();
 
-  const postPipeline = new THREE.RenderPipeline(renderer);
-  // finalColor already includes bloom over whatever branch it displays
-  postPipeline.outputNode = finalColor;
+  // TWO composites built once at construction: the plain graph is the pre-1b
+  // shader (toggle off → zero composite cost, no rebuild churn on toggling),
+  // the fog graph adds `beauty·T + S`. Tier changes never rebuild either —
+  // volumetricScale only resizes the fog TEXTURE inside the pass.
+  const buildPost = (fog: boolean): THREE.RenderPipeline => {
+    const p = new THREE.RenderPipeline(renderer);
+    // each build already includes bloom over whatever branch it displays
+    p.outputNode = makeFinalColor(fog);
+    return p;
+  };
+  const postPlain = buildPost(false);
+  const postFog = buildPost(true);
+  /** true only on frames where the fog march actually ran → render() picks
+   *  postFog; every other frame (toggle off, ?rtdebug, RT idle) runs postPlain */
+  let volActive = false;
 
   // ---- state -------------------------------------------------------------------------
   let logicalW = 1;
@@ -876,6 +934,7 @@ export function createAdvancedRenderer(
     },
     dispatch(cam: THREE.PerspectiveCamera, settings: QualitySettings, pixelRatio: number): void {
       ranThisFrame = false;
+      volActive = false;
       if (!ready || !settings.raytracedLighting) {
         rtFlag.value = 0;
         return;
@@ -952,6 +1011,27 @@ export function createAdvancedRenderer(
           renderer.compute(denoiseNodes[i], [gx, gy, 1]);
         }
       }
+
+      // ---- volumetrics (phase 1b) ------------------------------------------
+      // The sacred toggle: volumetrics OFF (enabled() = settings.volumetrics)
+      // releases the fog buffers (back to 1×1 — no texture cost) and
+      // dispatches NOTHING; render() then picks postPlain, the pre-
+      // volumetrics shader. Debug views skip the march too: rtdebug=1|2|3
+      // are raw buffer diagnostics and fog must never tint them (the
+      // raw-buffer view in particular stays honestly raw).
+      if (!volPass.enabled(settings)) {
+        volPass.release();
+      } else if (debugMode.value < 0.5) {
+        volPass.dispatch(renderer, {
+          logicalW,
+          logicalH,
+          scale: settings.volumetricScale * pixelRatio,
+          // same temporal rule as the lighting pass: still = converge
+          // (the per-frame dither averages into smooth fog), moving = live
+          blendAlpha: blendAlpha.value,
+        });
+        volActive = true;
+      }
       ranThisFrame = true;
       // rtFlag: 0 = beauty · 1 = traced (albedo × DENOISED lighting + emissive)
       //         · 2 = buffer view (?rtdebug=1|2) · 3 = RAW buffer view
@@ -964,7 +1044,10 @@ export function createAdvancedRenderer(
     },
     render(): void {
       if (!ranThisFrame) rtFlag.value = 0;
-      postPipeline.render();
+      // fog marched this frame → fog composite; otherwise the plain graph,
+      // whose shader is identical to the pre-volumetrics build (toggle off /
+      // debug views cost exactly what they cost before phase 1b)
+      (volActive ? postFog : postPlain).render();
     },
     setLogicalSize(width: number, height: number): void {
       logicalW = width;
@@ -992,9 +1075,13 @@ export function createAdvancedRenderer(
       lightsNode = makeLightsNode(next);
       lightCount.value = next.length;
       kernelNode = undefined; // rebuilt lazily on the next dispatch
+      volPass.invalidate(); // the fog kernel indexes rt_lights at module scope
     },
+    volStats: volPass.stats,
     dispose(): void {
-      postPipeline.dispose();
+      postPlain.dispose();
+      postFog.dispose();
+      volPass.dispose();
       lightingTex.dispose();
       historyTex.dispose();
       geomTex.dispose();

@@ -207,6 +207,17 @@ async function main(): Promise<void> {
   if (persisted.lightGain !== undefined) {
     quality.setOverride('lightGain', persisted.lightGain);
   }
+  if (persisted.volumetrics !== undefined) {
+    quality.setOverride('volumetrics', persisted.volumetrics);
+  }
+  // ?vol=0|off|1|on — URL override for the volumetrics toggle (test/tuning
+  // hook: scripts/rt-vol-smoke.mjs boots ?vol=off to prove the off path
+  // dispatches nothing; overrides win over the persisted setting, exactly
+  // like an explicit URL request beats stored state elsewhere in boot)
+  const volParam = urlParams.get('vol');
+  if (volParam !== null) {
+    quality.setOverride('volumetrics', /^(1|on|true)$/i.test(volParam));
+  }
   const pipeline = new FramePipeline(renderer);
   pipeline.setPost(createPostChain(renderer, scene, camera));
 
@@ -781,6 +792,9 @@ async function main(): Promise<void> {
     settings,
     bindings,
     THREE,
+    // fog-march counters (phase 1b) — undefined until the RT path exists;
+    // scripts/rt-vol-smoke.mjs asserts dispatches === 0 while the toggle is off
+    volStats: advanced?.volStats,
   };
   (window as unknown as Record<string, unknown>).__liminalReady = true;
 }

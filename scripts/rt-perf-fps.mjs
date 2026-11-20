@@ -1,7 +1,13 @@
 /**
  * RT lighting FPS benchmark — headful Chromium WebGPU.
  *
- *   node scripts/rt-perf-fps.mjs [http://localhost:5177] [high,ultra]
+ *   node scripts/rt-perf-fps.mjs [http://localhost:5177] [high,ultra] [vol-mode]
+ *
+ * vol-mode (phase 1b, optional3rd arg): '' = tier default · 'off' forces
+ * settings.volumetrics=false after the tier pick (the "toggle off must cost
+ * nothing" A/B — must equal the pre-volumetrics baseline) · 'on' forces it
+ * true. Each run also prints window.__liminal.volStats so the fog dispatch
+ * count proves which side of the toggle was actually measured.
  *
  * For each tier: boots the game fresh (localStorage cleared so no persisted
  * tier/override leaks in), sets the tier via __liminal.quality, warms up
@@ -22,6 +28,7 @@ import puppeteer from 'puppeteer-core';
 
 const BASE = process.argv[2] ?? 'http://localhost:5177';
 const TIERS = (process.argv[3] ?? 'high,ultra').split(',').map((s) => s.trim()).filter(Boolean);
+const VOL = (process.argv[4] ?? '').trim(); // '' | 'off' | 'on'
 const CHROME = '/usr/bin/chromium';
 const XDG = '/tmp/opencode/chromium-xdg-clean';
 const WARMUP_MS = 4000;
@@ -63,8 +70,17 @@ async function measure(tier) {
   for (const l of logs.filter((l) => l.startsWith('[map]'))) console.log(`  ${l}`);
   for (const l of logs.filter((l) => l.startsWith('[liminal][webgpu]'))) console.log(`  WEBGPU-ERR ${l.slice(0, 160)}`);
 
-  // switch tier after boot (T-key equivalent), then let everything settle
+  // switch tier after boot (T-key equivalent), then let everything settle.
+  // The tier pick CLEARS overrides (that's what a preset means), so any
+  // volumetrics mode must be applied AFTER setTier.
   await page.evaluate((t) => window.__liminal.quality.setTier(t), tier);
+  if (VOL) {
+    await page.evaluate(
+      (v) => window.__liminal.quality.setOverride('volumetrics', v === 'on'),
+      VOL,
+    );
+    console.log(`  volumetrics forced ${VOL}`);
+  }
   await sleep(WARMUP_MS);
   // standalone frame counter: survives slow frames, polled from node
   await page.evaluate(() => {
@@ -93,9 +109,11 @@ async function measure(tier) {
   } catch (e) {
     console.log(`  MEASURE-ERROR ${String(e).slice(0, 200)}`);
   }
+  const vol = await page.evaluate(() => window.__liminal.volStats ?? null).catch(() => null);
+  if (vol) console.log(`  volStats: ${JSON.stringify(vol)}`);
   for (const e of errors) console.log(`  PAGEERROR ${e.slice(0, 160)}`);
   await page.close();
-  return { tier, samples, boot };
+  return { tier, samples, boot, vol };
 }
 
 const results = [];
@@ -109,8 +127,11 @@ for (const tier of TIERS) {
 }
 
 await browser.close();
-console.log('\n==== summary (fps of the two samples per tier)');
-for (const r of results) console.log(`  ${r.tier}: ${r.samples.length ? r.samples.join(' / ') : 'FAILED'}`);
+console.log(`\n==== summary (fps of the two samples per tier) — volumetrics mode="${VOL || 'tier default'}"`);
+for (const r of results) {
+  const fog = r.vol ? `  fog: ${r.vol.dispatches} dispatches ${r.vol.width}x${r.vol.height}` : '';
+  console.log(`  ${r.tier}: ${r.samples.length ? r.samples.join(' / ') : 'FAILED'}${fog}`);
+}
 const armed = results.length > 0 && results.every((r) => r.boot.includes('rt=armed'));
 console.log(`\n==== ${armed ? 'PASS' : 'FAIL'} — rt=armed on every boot`);
 process.exitCode = armed ? 0 : 1;
