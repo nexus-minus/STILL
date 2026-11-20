@@ -22,10 +22,14 @@ import type { QualitySettings } from '../quality.js';
  *  invisible in screenshots; above ~0.03 distant geometry turns to soup at
  *  normal camera heights. */
 const FOG_DENSITY = 0.014;
-/** Metres over which the haze thins to 37 % (1/e) above the floor plane
- *  (y = 0 — the map's floor level). WHY 3 m: the backrooms haze pools at
- *  floor/waist height and clears toward the ceiling, so rooms keep their
- *  silhouettes (vibe.png has clean upper edges, hazy ground). */
+/** Metres over which the haze thins to 37 % (1/e) above the level floor —
+ *  anchored at FOG_FLOOR_Y (the shadow-geometry bbox min-y, computed once
+ *  in the pass constructor), NOT world y=0: this map's floor sits at
+ *  y ≈ −9.2, so a world-0 anchor packed full density into a slab below y=0
+ *  with a hard knee at it (the user's "fog is only under height 0").
+ *  WHY 3 m: the backrooms haze pools at floor/waist height and clears toward
+ *  the ceiling, so rooms keep their silhouettes (vibe.png has clean upper
+ *  edges, hazy ground). */
 const FOG_FALLOFF = 3.0;
 /** Ambient in-scatter tint, linear RGB — the misty teal of reference/vibe.png.
  *  Kept blue-teal rather than grey because grey fog just looks like dirt;
@@ -59,11 +63,15 @@ const WORKGROUP = 8;
 
 /** Fog-march counters for scripts/rt-vol-smoke.mjs: `dispatches` must stay
  *  0 while the toggle is off (the "off must cost nothing" proof) and
- *  `width/height` stay 1×1 — no fog-sized texture is ever allocated. */
+ *  `width/height` stay 1×1 — no fog-sized texture is ever allocated.
+ *  `floorY` is the level-floor anchor the height falloff compiles in
+ *  (world Y of the shadow-geometry bbox min-y) — reported so tests/humans
+ *  can verify the falloff hangs off the actual floor, not world 0. */
 export interface VolStats {
   dispatches: number;
   width: number;
   height: number;
+  floorY: number;
 }
 
 interface VolDeps {
@@ -116,7 +124,7 @@ interface VolDeps {
  */
 export class VolumetricPass {
   readonly name = 'volumetrics';
-  readonly stats: VolStats = { dispatches: 0, width: 1, height: 1 };
+  readonly stats: VolStats = { dispatches: 0, width: 1, height: 1, floorY: 0 };
 
   private readonly deps: VolDeps;
   /** storage target the composite samples — rgba16float, linear-filtered so
@@ -135,9 +143,30 @@ export class VolumetricPass {
   /** false while the toggle/debug skip held the pass — forces a history
    *  reset on resume so stale fog never smears over a fresh frame */
   private wasActive = false;
+  /** World Y the height falloff is anchored at — the LEVEL FLOOR, computed
+   *  once at pass init (see constructor). Compiled into the kernel as
+   *  FOG_FLOOR_Y; a static level never moves it. */
+  readonly floorY: number;
 
   constructor(deps: VolDeps) {
     this.deps = deps;
+    // Height-falloff anchor = bounding-box min-y of the traced shadow
+    // geometry (the level itself), computed ONCE. Round 1 anchored at world
+    // y=0: this map's floor is y ≈ −9.2, so every gameplay room sat inside
+    // a full-density slab that stopped dead at y=0 — the user-reported
+    // "fog is only under the height 0". Anchored at the floor: full density
+    // at/below it, smooth exp decay above — correct for any level at any
+    // world height, no knee anywhere.
+    // bvhData.objects isn't in three-mesh-bvh's d.ts but IS the mesh list
+    // its constructor received (BVHComputeData.js: `this.objects = objects`);
+    // world matrices are fresh because main.ts runs scene.updateMatrixWorld
+    // before createAdvancedRenderer builds the BVH.
+    const shadowMeshes = (deps.bvhData as unknown as { objects?: THREE.Object3D[] }).objects ?? [];
+    const bounds = new THREE.Box3();
+    for (const obj of shadowMeshes) bounds.expandByObject(obj);
+    // no meshes / empty bounds → keep the legacy 0 rather than ±Infinity
+    this.floorY = Number.isFinite(bounds.min.y) ? bounds.min.y : 0;
+    this.stats.floorY = this.floorY;
     this.fogTexture = new THREE.StorageTexture(1, 1);
     this.fogTexture.type = THREE.HalfFloatType;
     this.fogTexture.format = THREE.RGBAFormat;
@@ -241,6 +270,11 @@ export class VolumetricPass {
       ) -> vec4f {
         const FOG_DENSITY = ${FOG_DENSITY};
         const FOG_FALLOFF = ${FOG_FALLOFF};
+        // level-floor anchor (bbox min-y of the shadow geometry, computed
+        // once at pass init) — falloff measures height ABOVE this, so the
+        // fog is full-density at/below the floor and decays smoothly up,
+        // with no world-0 knee (the round-1 "fog only under height 0" bug)
+        const FOG_FLOOR_Y = ${this.floorY};
         const FOG_COLOR = vec3f(${FOG_COLOR[0]}, ${FOG_COLOR[1]}, ${FOG_COLOR[2]});
         const FOG_AMBIENT = ${FOG_AMBIENT};
         const FOG_MAX_DIST = ${FOG_MAX_DIST};
@@ -292,10 +326,12 @@ export class VolumetricPass {
         for (var i = 0; i < FOG_STEPS; i++) {
           if (t >= marchDist) { break; }
           let P = ray.origin + ray.direction * t;
-          // homogeneous density + height falloff: backrooms haze pooling near
-          // the floor, thinning upward — no noise texture, because uniform
-          // air reads as atmosphere while textured air reads as clouds
-          let rho = FOG_DENSITY * exp(-max(P.y, 0.0) / FOG_FALLOFF);
+          // homogeneous density + height falloff: backrooms haze pooling on
+          // the LEVEL FLOOR (FOG_FLOOR_Y) and thinning upward — anchored at
+          // the floor, not world 0, so it works at any level height and
+          // never draws a horizontal knee across the view. No noise texture:
+          // uniform air reads as atmosphere, textured air reads as clouds
+          let rho = FOG_DENSITY * exp(-max(P.y - FOG_FLOOR_Y, 0.0) / FOG_FALLOFF);
           if (rho > 1e-5) {
             // ambient teal veil — tiny on purpose (see FOG_AMBIENT WHY)
             var L = FOG_COLOR * FOG_AMBIENT;

@@ -84,6 +84,13 @@ jump height feel inconsistent on slopes and may be part of the user's
 perceived jump bugs. NOT changed (would alter approved feel) — needs the
 user's call: cap the carried vy, or keep it.
 
+Test-robustness note (4 sightings, 2026-11-20): `steptest`'s
+`step-lips` case 4 (the 0.1-deep nub) occasionally lands at the
+feature's true top (climb ≈ 0.102 vs the window ≤ h+0.005) under
+frame-timing variance — both outcomes are correct climbs (no pop, no
+slide-down) and it passes on clean re-runs. Widen that window to the
+feature's real height when next touching steptest.
+
 ## 7. Interaction feedback = world reacts only (design contract, 2026-11-20)
 
 Toasts default OFF ("nearly nothing" UI), so **every E-interaction must
