@@ -37,6 +37,25 @@ const WALL_SLEEP = 0.1;
  */
 const MOMENTUM_TAU = 1.0;
 /**
+ * Classification hold: a single steep contact flips the wall-like verdict
+ * ON, and edge contacts (and exactly-limit slopes) alternate between face
+ * sets frame to frame — the wall response / sleep / step-up gate then
+ * toggled every other frame (stutter on ramps and edges). Hold the steep
+ * verdict this long after any steep contact; a genuine walkable contact
+ * with no steep face in the window releases it.
+ */
+const WALL_LIKE_HOLD = 0.1;
+/** m/s² — jumpSpeed is derived from this (see JUMP_HEIGHT) */
+const GRAVITY = 16;
+/**
+ * Jump tuning is HEIGHT-driven (user: "jump → 0.5"). Read-only git-history
+ * dig: `jumpSpeed` was 5.0 m/s IMPULSE in every commit since the first
+ * (c0b2809) — never changed — i.e. a 0.78 m hop at g = 16 ("before").
+ * 0.5 was never an impulse in the old units (as an impulse it would be an
+ * ~8 mm hop), so 0.5 is the requested hop HEIGHT: v = √(2·g·h) = 4.0 m/s.
+ */
+const JUMP_HEIGHT = 0.5;
+/**
  * Coyote time: after walking off a ledge the jump stays valid this long
  * (~6 frames @60 fps) — players press jump a frame too late and shouldn't
  * just fall. Reset on ground contact, ZEROED by a real jump, so it only
@@ -70,10 +89,10 @@ const DEFAULTS: Options = {
   eyeHeight: 1.58,
   walkSpeed: 3.1,
   runSpeed: 5.4,
-  jumpSpeed: 5.0,
-  gravity: 16,
+  jumpSpeed: Math.sqrt(2 * GRAVITY * JUMP_HEIGHT), // 4.0 m/s → exactly JUMP_HEIGHT
+  gravity: GRAVITY,
   sensitivity: 0.22 * DEG,
-  stepUp: 0.45,
+  stepUp: 0.3, // user tuning: match the tallest common lip, not a counter
 };
 
 /** capsule dimensions, also used by spawn validation in main */
@@ -125,9 +144,17 @@ export class PlayerController {
   private camYOffset = 0;
   /** remaining seconds of wall-contact sleep + the normal we're pressed into */
   private wallSleep = 0;
+  /** remaining seconds of the wall-LIKE classification hold (chatter guard) */
+  private wallLikeHold = 0;
   private readonly wallNormal = new THREE.Vector3();
   /** normalized step-up advance direction (reused ray direction) */
   private readonly advanceDir = new THREE.Vector3();
+  /** scratch capsule position for the ground-snap penetration probe */
+  private readonly snapProbe = new THREE.Vector3();
+  /** horizontal motion direction for the gentle-approach ray */
+  private readonly predictDir = new THREE.Vector3();
+  /** negated wall normal: the wall is BACK along the outward push direction */
+  private readonly wallRayDir = new THREE.Vector3();
   /** last walkable contact normal (world) — feeds tangential gravity */
   private readonly slopeN = new THREE.Vector3(0, 1, 0);
 
@@ -213,6 +240,7 @@ export class PlayerController {
       this.coyote = 0; // physics resumes fresh — no grace inherited from freecam
       this.camYOffset = 0; // re-entering from freecam snaps, it doesn't ease
       this.wallSleep = 0;
+      this.wallLikeHold = 0;
       this.collision.resolveCapsule(this.position, this.opts.height, this.opts.radius);
       this.syncFeet();
     }
@@ -251,6 +279,7 @@ export class PlayerController {
     this.velocity.set(0, 0, 0);
     this.camYOffset = 0; // teleports snap, they don't ease
     this.wallSleep = 0; // contact normal belongs to the old spot
+    this.wallLikeHold = 0; // so does the wall-like classification
     this.coyote = 0; // jump grace belongs to the OLD ground, not here
     this.stepDebugCount = 0; // fresh spawn → fresh [stepup] debug budget
     this.syncFeet();
@@ -319,9 +348,18 @@ export class PlayerController {
     const accel = this.grounded ? 14 : 3;
     const overCap = speedNow > cap + 1e-3;
     const braking = overCap && velocity.x * tx + velocity.z * tz < 0;
-    const t = braking ? 1 - Math.exp(-accel * dt) : overCap
-      ? 1 - Math.exp(-dt / MOMENTUM_TAU)
-      : 1 - Math.exp(-accel * dt);
+    // Ground + NO input = brake on the fast curve: releasing a sprint must
+    // stop in ~0.15 s. The slow momentum tau only applies to speed that is
+    // still accounted for — over-cap coasting WITH input (downhill runs keep
+    // steering toward the cap) and airborne momentum. Coasting on the ground
+    // used to bleed 5.4 → 3.1 over half a second on the tau: "when I press
+    // nothing I want to stop".
+    const coasting = this.moveDir.lengthSq() < 1e-6;
+    const t = braking || (coasting && this.grounded)
+      ? 1 - Math.exp(-accel * dt)
+      : overCap
+        ? 1 - Math.exp(-dt / MOMENTUM_TAU)
+        : 1 - Math.exp(-accel * dt);
     velocity.x += (tx - velocity.x) * t;
     velocity.z += (tz - velocity.z) * t;
 
@@ -371,15 +409,54 @@ export class PlayerController {
     if (this.wallSleep > 0) {
       this.wallSleep -= dt;
       const into = velocity.x * this.wallNormal.x + velocity.z * this.wallNormal.z;
-      if (into < -1e-4) {
-        // Refresh only while the surface is still right there: walking past
-        // the end of a wall must hand control back instead of sliding along
-        // an invisible plane for as long as the key is held.
-        const near = this.collision.raycast(this.position, this.wallNormal, opts.radius + 0.05);
-        if (near) {
+      // Refresh whenever the wall is STILL THERE — not only while pressing:
+      // with the into-wall component already zeroed the window expired
+      // anyway, steering re-added the component, penetration returned and
+      // the capsule bounced every ~100 ms (the wall stutter). Cast BACK toward
+      // the wall: wallNormal is the OUTWARD push, so the surface lies at
+      // -wallNormal (the old ray cast +wallNormal — away from the wall —
+      // always missed, so the hold never refreshed OR stripped: dead code).
+      // The ray still hands control back when the wall ends or the player
+      // walks away (ray misses → window decays out).
+      this.wallRayDir.copy(this.wallNormal).negate();
+      const near = this.collision.raycast(this.position, this.wallRayDir, opts.radius + 0.05);
+      if (near) {
+        if (into < -1e-4) {
           velocity.x -= this.wallNormal.x * into;
           velocity.z -= this.wallNormal.z * into;
-          this.wallSleep = WALL_SLEEP; // still pressed → keep the window alive
+        }
+        this.wallSleep = WALL_SLEEP; // contact persists → keep the hold alive
+      }
+    }
+    // ---- gentle approach: a fast walk into a wall-like surface used to
+    // PENETRATE up to a full frame of motion (9 cm at sprint) and get yanked
+    // back by depenetration — the visible crash jolt ("should be subtle").
+    // Predict the steep face in the path and cap the into-face travel to a
+    // hair of overlap: contact still registers (step-up gate + wall sleep
+    // arm on the first frame) but there's nothing to push back. Only steep
+    // faces count — a walkable slope ahead must never be slowed — and only
+    // the NORMAL component is limited: tangential keeps direction and speed
+    // (no redirect; near-parallel glides are untouched).
+    if (intendedH > 1e-4) {
+      const invH = 1 / intendedH;
+      this.predictDir.set(intendedDX * invH, 0, intendedDZ * invH);
+      const ahead = this.collision.raycast(
+        this.position, this.predictDir, opts.radius + intendedH + 0.05,
+      );
+      if (ahead && ahead.face && ahead.face.normal.y < SLOPE_LIMIT_COS - WALKABLE_EPS) {
+        const n = ahead.face.normal;
+        // normal points back AT us while we approach → negate the ray·normal
+        // product to get travel-into-face cosine (and the perpendicular gap).
+        const dot = -(this.predictDir.x * n.x + this.predictDir.z * n.z);
+        const towards = -(velocity.x * n.x + velocity.z * n.z);
+        if (dot > 1e-3 && towards > 1e-6) {
+          const gap = ahead.distance * dot - opts.radius; // sphere-to-face
+          const maxInto = (Math.max(gap, 0) + 0.001) / dt; // kiss: 1 mm overlap
+          if (towards > maxInto) {
+            const remove = towards - maxInto;
+            velocity.x += n.x * remove;
+            velocity.z += n.z * remove;
+          }
         }
       }
     }
@@ -406,7 +483,15 @@ export class PlayerController {
     // (stalls at ledges/junctions mid-climb).
     const pushLen = this.totalPush.length();
     const contactNy = pushLen > 1e-5 ? this.totalPush.y / pushLen : 1;
-    const wallLike = pushLen > 1e-5 && stepMinNy < SLOPE_LIMIT_COS - WALKABLE_EPS;
+    const steepNow = pushLen > 1e-5 && stepMinNy < SLOPE_LIMIT_COS - WALKABLE_EPS;
+    // Hysteresis (WALL_LIKE_HOLD): edges chatter between face sets frame to
+    // frame — a raw threshold toggled the wall response, sleep and step-up
+    // gate every other frame (stutter against edges). The hold needs an
+    // actual contact too, so walking off a wall stops feeding the verdict.
+    // Pure-slope walks (30°/50° ramps) never see a steep face → never latch.
+    if (steepNow) this.wallLikeHold = WALL_LIKE_HOLD;
+    else this.wallLikeHold = Math.max(0, this.wallLikeHold - dt);
+    const wallLike = steepNow || (this.wallLikeHold > 0 && pushLen > 1e-5);
     // a walkable SLOPE (not a flat floor) is pushing us this frame
     const slopePush = pushLen > 1e-5 && contactNy < 0.999 && !wallLike;
 
@@ -450,8 +535,28 @@ export class PlayerController {
               gap > 0 &&
               (gap <= this.totalPush.y + 1e-4 || (this.grounded && slopePush));
             if (this.grounded && gap > -0.08 && gap <= GROUND_SNAP && !undoLift) {
-              this.position.y -= gap;
-              velocity.y = 0;
+              // Never snap INTO geometry: walking off a small edge the centre
+              // passes the lip's footprint, the down-ray misses the lip and
+              // sees the floor below — snapping down there buries the sphere
+              // in the edge corner and the NEXT frame's depenetration bursts
+              // the capsule up+forward (+0.35 m measured: the phantom
+              // "autjump high then slide down" after small steps). Probe the
+              // snapped spot; any overlap means a real edge is holding us —
+              // keep the contact placement. Buried-below faces lie outside
+              // the flush spot's sphere, so phantom-face snapping still runs.
+              let snap = true;
+              if (gap > 0.015) {
+                this.snapProbe.copy(this.position);
+                this.snapProbe.y -= gap;
+                const re = this.collision.resolveCapsule(
+                  this.snapProbe, opts.height, opts.radius, 3,
+                );
+                snap = re.push.length() < 0.02;
+              }
+              if (snap) {
+                this.position.y -= gap;
+                velocity.y = 0;
+              }
             } else if (!this.grounded && gap > -0.08 && gap <= 0.6 && !undoLift) {
               this.position.y -= Math.min(gap, 0.18); // soft slope chase
               velocity.y = 0;
@@ -510,6 +615,15 @@ export class PlayerController {
             velocity.x -= ux * into;
             velocity.z -= uz * into;
           }
+          // Wall contact may never ADD or KEEP over-cap speed: the projected
+          // tangential of an over-cap approach (downhill momentum) used to
+          // ride along the wall above the sprint cap — clamp the POST-
+          // projection vector so tangential re-addition can't grow past it.
+          const hSpd = Math.hypot(velocity.x, velocity.z);
+          if (hSpd > opts.runSpeed) {
+            velocity.x *= opts.runSpeed / hSpd;
+            velocity.z *= opts.runSpeed / hSpd;
+          }
           // only wall-like contact arms the sleep; floors and ramps keep the
           // per-frame projection — sleeping a ramp normal would cancel
           // up-slope walking velocity
@@ -550,9 +664,48 @@ export class PlayerController {
           advZ *= minAdvance / advLen;
         }
       }
-      const realAdv = Math.hypot(advX, advZ);
+      let realAdv = Math.hypot(advX, advZ);
       const trial = this.position.clone();
-      trial.y += opts.stepUp;
+      // Measure BEFORE lifting (T5a): one down-ray at the landing column
+      // gives the TRUE destination height, so the lift is only what clears
+      // THAT — min(stepUp, obstacle + margin). A small lip is climbed with a
+      // proportional lift (0.05 lip → 0.10 lift, not the full 0.3) and the
+      // drop+settle below lands exactly on the true surface — no overshoot
+      // pop, nothing to slide off. Over-tall / walkable-flat destinations
+      // keep the standard lift; fit checks and the gained cap still reject.
+      let lift = opts.stepUp;
+      let measY = -Infinity; // true surface at the intended destination
+      const feetY = this.position.y - opts.height / 2;
+      const measureAt = (ax: number, az: number): number => {
+        trial.set(
+          this.position.x + ax,
+          this.position.y + opts.stepUp + 0.5,
+          this.position.z + az,
+        );
+        const h = this.collision.raycast(trial, DOWN, opts.stepUp + opts.height / 2 + 0.6);
+        if (h && (!h.face || h.face.normal.y >= SLOPE_LIMIT_COS - WALKABLE_EPS)) return h.point.y;
+        return -Infinity;
+      };
+      measY = measureAt(advX, advZ);
+      if (!(measY > feetY + 0.02) && realAdv > 0.3) {
+        // No step at the full advance: the radius-sized min-advance OVERSHOT
+        // a thin lip (the landing column fell past its far edge → measured
+        // "nothing to climb" → such edges were never climbed at all). Probe
+        // halfway and land there: half of radius+margin still puts the centre
+        // ON a 0.1 m-deep lip, so the trial gets its step.
+        advX *= 0.5;
+        advZ *= 0.5;
+        realAdv = Math.hypot(advX, advZ);
+        measY = measureAt(advX, advZ);
+      }
+      if (measY > -Infinity) {
+        const obstacleH = measY - feetY;
+        if (obstacleH > -0.05) {
+          lift = Math.min(opts.stepUp, Math.max(obstacleH + 0.05, 0.02));
+        }
+      }
+      trial.copy(this.position);
+      trial.y += lift;
       this.collision.resolveCapsule(trial, opts.height, opts.radius);
 
       // (fit 1) the landing capsule occupies realAdv + radius ahead of the
@@ -567,21 +720,40 @@ export class PlayerController {
 
       let dropGrounded = false;
       let gained = 0;
+      let preSettle = this.position.y;
+      let settleY = -1;
       if (valid) {
         trial.x += advX;
         trial.z += advZ;
         this.collision.resolveCapsule(trial, opts.height, opts.radius);
-        trial.y -= opts.stepUp + 0.1;
+        trial.y -= lift + 0.1; // proportional drop (matches the lift)
         const drop = this.collision.resolveCapsule(trial, opts.height, opts.radius);
         dropGrounded = drop.grounded;
         // Settle BEFORE judging the gain: depenetration overshoot (capsule
         // propped on a corner, or dropped inside geometry) reads as a fake
         // climb otherwise — the accept would teleport the player against flat
         // walls. Settling first puts the feet ON the landed surface, so
-        // `gained` becomes the REAL step height.
-        const hit = this.collision.raycast(trial, DOWN, opts.height / 2 + opts.stepUp + 0.15);
+        // `gained` becomes the REAL step height. Range reaches 0.5 below the
+        // START: the drop-resolve can overshoot the centre up to ~0.8 m after
+        // the settle origin, and with stepUp 0.3 the old +0.15 range missed a
+        // 0.25 lip by a centimetre — the overshoot then slipped through the
+        // gained cap as a 0.71 m pop.
+        const settleFar = opts.height / 2 + opts.stepUp + 0.5;
+        const hit = this.collision.raycast(trial, DOWN, settleFar);
+        preSettle = trial.y;
+        // Land at the true surface — but never BELOW the measured one: the
+        // drop-resolve can SHOVE the trial sideways past a thin lip's far
+        // edge (logged at x=4.66 for a lip ending at 4.6), the local ray then
+        // sees the floor and the climb reads as "nothing here" — an edge you
+        // can never walk over. The capsule still overlaps the obstacle it
+        // was shoved across, so it rests on max(local, measured).
+        let surface = measY;
         if (hit && (!hit.face || hit.face.normal.y >= SLOPE_LIMIT_COS - WALKABLE_EPS)) {
-          const gap = trial.y - opts.height / 2 - hit.point.y;
+          surface = Math.max(surface, hit.point.y);
+        }
+        settleY = Number.isFinite(surface) ? surface : -1;
+        if (Number.isFinite(surface)) {
+          const gap = trial.y - opts.height / 2 - surface;
           if (gap > -0.1 && gap <= opts.stepUp + opts.radius + 0.15) {
             trial.y -= gap;
           }
@@ -598,9 +770,14 @@ export class PlayerController {
         if (drift > maxDrift) {
           trial.x = this.position.x + (drX * maxDrift) / drift;
           trial.z = this.position.z + (drZ * maxDrift) / drift;
-          const hit2 = this.collision.raycast(trial, DOWN, opts.height / 2 + opts.stepUp + 0.15);
+          const hit2 = this.collision.raycast(trial, DOWN, opts.height / 2 + opts.stepUp + 0.5);
+          // same rule as the first settle: never below the measured surface
+          let surface2 = measY;
           if (hit2 && (!hit2.face || hit2.face.normal.y >= SLOPE_LIMIT_COS - WALKABLE_EPS)) {
-            const gap2 = trial.y - opts.height / 2 - hit2.point.y;
+            surface2 = Math.max(surface2, hit2.point.y);
+          }
+          if (Number.isFinite(surface2)) {
+            const gap2 = trial.y - opts.height / 2 - surface2;
             if (gap2 > -0.1 && gap2 <= opts.stepUp + opts.radius + 0.15) trial.y -= gap2;
             else valid = false;
           } else {
@@ -622,13 +799,21 @@ export class PlayerController {
 
       // Depenetration can overshoot (summed corrections settle up to a radius
       // high over the corner) — accept that range and settle down after.
+      // Floor 0.015 (was 0.03): the edge graze can lift the player a hair
+      // before the trial runs (0.05 lip − 0.02 graze = 0.03 read), which
+      // starved the smallest steps; flat destinations read ≤ 0 and are
+      // sign-rejected anyway.
       const inRange =
-        valid && dropGrounded && gained > 0.03 && gained <= opts.stepUp + opts.radius + 0.1;
-      if (this.stepDebugCount < 4) {
+        valid && dropGrounded && gained > 0.015 && gained <= opts.stepUp + opts.radius + 0.1;
+      // attempts are budgeted (console spam); real ACCEPTS always log —
+      // they're rare and every one must be auditable in the e2e traces
+      const attemptLog = inRange || this.stepDebugCount < 8;
+      if (attemptLog) {
         this.stepDebugCount++;
         console.info(
-          `[stepup] attempt intended=${intendedH.toFixed(3)} ` +
+          `[stepup] attempt intended=${intendedH.toFixed(3)} lift=${lift.toFixed(2)} ` +
             `adv=(${advX.toFixed(2)},${advZ.toFixed(2)}) gained=${gained.toFixed(3)} ` +
+            `dropY=${(preSettle - opts.height / 2).toFixed(2)} hitY=${settleY.toFixed(2)} ` +
             `grounded=${dropGrounded} valid=${valid} accepted=${inRange} ` +
             `trial=(${trial.x.toFixed(2)},${trial.y.toFixed(2)},${trial.z.toFixed(2)})`,
         );

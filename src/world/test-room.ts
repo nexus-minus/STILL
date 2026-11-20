@@ -137,6 +137,23 @@ export function buildTestRoom(): TestRoom {
   // the ramp surface (y≈1.85 there), so the transition has no seam gap
   box(2.1, 1.95, 3, 4.9, 0.875, -4, pillarMat);
 
+  // --- auto-step lip runway for scripts/steptest.mjs (T5) ------------------
+  // Four thresholds of increasing height crossing a straight +x run at z=5:
+  // each must climb on the FIRST contact frame without an overshoot "pop"
+  // above its true height (proportional lift), and the thin nub (0.05×0.1)
+  // must be walkable too — a lip the capsule can't get over at all.
+  box(0.4, 0.05, 1.5, 2, 0.025, 5, pillarMat);    // 0.05 lip
+  box(0.4, 0.1, 1.5, 3.2, 0.05, 5, pillarMat);    // 0.10 lip
+  box(0.4, 0.25, 1.5, 4.4, 0.125, 5, pillarMat);  // 0.25 lip
+  box(0.1, 0.05, 1.5, 5.6, 0.025, 5, pillarMat);  // thin 0.05×0.10 nub
+
+  // --- 60° (>50° limit) slide ramp for scripts/steptest.mjs (T7b) ---------
+  // Standing idle on it must slide/fall naturally — unwalkable faces may
+  // never be held by pin/sleep/depenetration. (Walkable-limit ramps are
+  // covered by the 30°/50° checks.)
+  const slide60 = box(2.0, 0.3, 3, 6.9, 0.6, 0, pillarMat);
+  slide60.rotation.z = (60 * Math.PI) / 180; // top normal (-sin60, cos60) → descends -x
+
   // --- wall corner + 0.3 step for the no-tunnel test ----------------------
   // Pressing diagonally into the NE room corner while standing on this
   // block drives repeated step-up trials into both walls at once — the

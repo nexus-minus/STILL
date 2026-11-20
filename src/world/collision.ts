@@ -3,6 +3,15 @@ import { MeshBVH, StaticGeometryGenerator } from 'three-mesh-bvh';
 
 const UP = new THREE.Vector3(0, 1, 0);
 
+/**
+ * Same walkable limit as the controller (SLOPE_LIMIT_COS − its float margin):
+ * contacts flatter than ~50° are ground; steeper are walls. `grounded` must
+ * never come from a wall — grounded freezes vy and applies the no-input
+ * brake, which HELD players on 50–60° faces (they should slide/fall). The
+ * old threshold was dir.y > 0.5 (= 60°), leaving that entire band stuck.
+ */
+const WALKABLE_NY = Math.cos((50 * Math.PI) / 180) - 1e-3;
+
 export interface CapsuleResolveResult {
   grounded: boolean;
   /** how many depenetration passes were needed this frame (debug/perf) */
@@ -120,7 +129,7 @@ export class WorldCollision {
 
           push.addScaledVector(dir, radius - distance);
           if (dir.y < minNy) minNy = dir.y;
-          if (dir.y > 0.5) grounded = true;
+          if (dir.y >= WALKABLE_NY) grounded = true;
           hit = true;
           return false;
         },

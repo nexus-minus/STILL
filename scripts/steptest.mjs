@@ -22,6 +22,15 @@
  *      no second impulse (single jump per airtime)
  *  12. jump-buffer: press ~50 ms BEFORE landing a fall → the press sits
  *      inside the 100 ms window and fires on the landing frame
+ *  13. stop: releasing sprint on the ground halts within ~0.2 s (brake)
+ *  14/15. wall-glide: 30° press along a wall ≤ sprint cap, zero accel;
+ *      into-wall position steady (no ~100 ms bounce)
+ *  16. impact: head-on sprint crash stops dead, no bounce/jolt
+ *  17/18. step-lips: 0.05/0.10/0.25 lips + thin nub climb within 2 frames
+ *      at run speed, at their TRUE heights (no pop, no slide-down)
+ *  19. ramp-climb: 50° walk-up mid-climb vy steady (no stutter)
+ *  20. walk-off: stepping off the 50° ramp side always falls
+ *  21. slide: idle on a 60° face slides off (unwalkable never held)
  *
  *   node scripts/steptest.mjs [url]
  *   (default url: http://localhost:4173/?testroom)
@@ -194,9 +203,10 @@ try {
   // no-tunnel check (which asserts those logs exist) runs first.
   // =========================================================================
 
-  /** per-frame trace: respawns, holds keys in-page, optional early resolve
-   *  on a feet-height threshold, optional in-page jump at first ground
-   *  contact on the flat. Columns: [t, feetX, feetY, feetZ, camY, grounded]. */
+  /** per-frame trace: respawns, holds keys in-page, optional release of all
+   *  keys at releaseAt ms, optional early resolve on a feet-height threshold,
+   *  optional in-page jump at first ground contact on the flat. Columns:
+   *  [t, feetX, feetY, feetZ, camY, grounded]. */
   const traceRun = (keys, opts) =>
     page.evaluate(
       (keys, opts) =>
@@ -208,6 +218,7 @@ try {
           const out = [];
           const t0 = performance.now();
           let jumped = false;
+          let released = false;
           const tick = () => {
             const t = performance.now() - t0;
             const c = g.controller;
@@ -218,6 +229,10 @@ try {
               c.grounded ? 1 : 0,
             ]);
             const i = out.length - 1;
+            if (!released && opts.releaseAt != null && t >= opts.releaseAt) {
+              released = true;
+              for (const k of keys) document.dispatchEvent(new KeyboardEvent('keyup', { code: k }));
+            }
             if (opts.jumpAtFlat && !jumped && i > 5 && c.grounded && c.feet.y < 0.05) {
               jumped = true;
               document.dispatchEvent(new KeyboardEvent('keydown', { code: 'Space' }));
@@ -581,30 +596,37 @@ try {
     ce.tLeave >= 0 &&
       ce.tPress - ce.tLeave >= 35 && ce.tPress - ce.tLeave <= 95 &&
       ce.tJump >= 0 && ce.tJump - ce.tPress <= 60 &&
-      rise >= 0.3 && vyMax > 0,
+      // T1 jump-height update: impulse 4.0 m/s (JUMP_HEIGHT 0.5 m at g=16)
+      // → apex rise 0.5 m minus one frame of pre-jump fall ≈ 0.49 m. The
+      // window [0.4, 0.6] is NARROWER than the old ≥0.3 (5.0 m/s → 0.78 m):
+      // logic conditions (timing windows, vy>0) unchanged.
+      rise >= 0.4 && rise <= 0.6 && vyMax > 0,
     `leave→press=${(ce.tPress - ce.tLeave).toFixed(0)}ms press→jump=${(ce.tJump - ce.tPress).toFixed(0)}ms ` +
       `rise=${rise.toFixed(3)}m vy=${vyMax.toFixed(2)}m/s`,
   );
   check(
     'no-double-jump: second mid-air press after a coyote jump adds no impulse',
     ce.tJump >= 0 && ce.tLand > 0 &&
-      ce.peakY < 1.5 && // normal apex ≈1.0 m; a 2nd impulse would reach ≈3+
+      ce.peakY < 1.2 && // normal apex ≈0.75 m (0.5 m hop); a 2nd impulse reaches ≈2.1 m
       maxStep <= 0.011 && // monotonic descent, apex → landing
       ce.maxAfterLand < 0.05, // press2's buffer expired before landing
     `peak=${ce.peakY.toFixed(3)}m maxStep=${maxStep.toFixed(4)}m landingMax=${ce.maxAfterLand.toFixed(3)}m`,
   );
 
   // --- 12. jump-buffer: press jump ~50 ms BEFORE landing a fall -----------
-  // Walk off the same ledge, press jump when ~0.15 m of fall remain
-  // (~55–60 ms at this fall speed — inside JUMP_BUFFER_MS): the press must
+  // Fall from the platform (1.85 m) and press when ~0.30 m of fall remain
+  // (~26–41 ms at this fall speed — inside JUMP_BUFFER_MS): the press must
   // NOT jump early, must NOT be dropped, and must fire on the landing frame.
+  // Taller drop than the ledge on purpose: the ledge walk-off now ROLLS down
+  // its edge corner, so airborne (and coyote expiry) starts late — from the
+  // platform the coyote is long dead by y=0.30, a clean buffered-only fall.
   const buf = await page.evaluate(
     () =>
       new Promise((resolve) => {
         const g = window.__liminal;
         const c = g.controller;
-        c.respawnAt(new g.THREE.Vector3(0, 0.3, -2.4));
-        c.yaw = 0;
+        c.respawnAt(new g.THREE.Vector3(4.9, 1.85, -4));
+        c.yaw = -Math.PI / 2; // face +x: off the platform's east edge
         document.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyW' }));
         const ev = { tPress: -1, pressY: 0, tLand: -1, maxBeforeLand: -1, maxAfterLand: -1 };
         const frames = [];
@@ -621,7 +643,7 @@ try {
           } else if (phase === 1 && !gr) {
             document.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyW' }));
             phase = 2;
-          } else if (phase === 2 && !gr && y <= 0.15) {
+          } else if (phase === 2 && !gr && y <= 0.3) {
             ev.tPress = t;
             ev.pressY = y;
             document.dispatchEvent(new KeyboardEvent('keydown', { code: 'Space' }));
@@ -665,6 +687,206 @@ try {
       be.maxBeforeLand <= be.pressY + 0.01 &&
       be.maxAfterLand > 0.05,
     `maxBefore=${be.maxBeforeLand.toFixed(3)} (pressY=${be.pressY.toFixed(3)}) maxAfter=${be.maxAfterLand.toFixed(3)}m`,
+  );
+
+  // =========================================================================
+  // Round-2 player-control suite (stop-on-no-input, wall contact, lips,
+  // ramp smoothness, walk-off, unwalkable slide).
+  // =========================================================================
+
+  // --- 13. T2: releasing every key on the ground must BRAKE, not coast -----
+  const t2r = await traceRun(['ShiftLeft', 'KeyW'], {
+    spawn: [3, 0, 30], yaw: 0, ms: 2400, releaseAt: 1400,
+  });
+  const t2s = smooth(hSpeeds(t2r));
+  const t2v0 = avgSpeedWin(t2r, t2s, 1350, 1450);
+  const t2v40 = avgSpeedWin(t2r, t2s, 1420, 1470);
+  const t2v200 = avgSpeedWin(t2r, t2s, 1580, 1680);
+  console.log('stop:', JSON.stringify({
+    v0: +t2v0.toFixed(2), v40: +t2v40.toFixed(2), v200: +t2v200.toFixed(2),
+  }));
+  check(
+    'stop: releasing sprint on the ground halts within ~0.2 s (brake, no coast)',
+    t2v0 > 4.0 && t2v40 > 1.5 && t2v200 < 1.0,
+    `v@release=${t2v0.toFixed(2)} +40ms=${t2v40.toFixed(2)} +200ms=${t2v200.toFixed(2)} m/s`,
+  );
+
+  // --- 14/15. T3: 30° press into a wall — speed ≤ cap, no acceleration,
+  // and the into-wall position rock-steady (no ~100 ms bounce) --------------
+  const t3r = await traceRun(['ShiftLeft', 'KeyW'], {
+    spawn: [-7, 0, 30], yaw: Math.PI + Math.PI / 3, ms: 3000,
+  });
+  const t3s = smooth(hSpeeds(t3r));
+  const t3contact = t3r.find((f) => f[3] >= 31.4)?.[0] ?? -1;
+  const t3early = avgSpeedWin(t3r, t3s, t3contact + 100, t3contact + 400);
+  const t3late = avgSpeedWin(t3r, t3s, 2400, 2900);
+  // sustained speed = max of 200 ms window means (a per-frame max is poisoned
+  // by single-frame position artifacts; the sustained value is what "glides
+  // really fast" means). Late-window strictness stays cap + 0.15.
+  let t3maxSpd = 0;
+  for (let w = t3contact + 300; w + 200 <= 2900; w += 100) {
+    t3maxSpd = Math.max(t3maxSpd, avgSpeedWin(t3r, t3s, w, w + 200));
+  }
+  let t3into = 0;
+  for (let i = 1; i < t3r.length; i++) {
+    if (t3r[i][0] < t3contact + 400) continue;
+    t3into = Math.max(t3into, Math.abs(t3r[i][3] - t3r[i - 1][3]));
+  }
+  console.log('glide:', JSON.stringify({
+    contact: t3contact, early: +t3early.toFixed(2), late: +t3late.toFixed(2),
+    maxSpd: +t3maxSpd.toFixed(2), into: +t3into.toFixed(4),
+  }));
+  check(
+    'wall-glide: 30° press along a wall stays ≤ sprint cap with zero acceleration',
+    t3contact > 0 && t3maxSpd <= 5.6 && t3late <= 5.55 && Math.abs(t3late - t3early) <= 0.3,
+    `contact@${t3contact}ms early=${t3early.toFixed(2)} late=${t3late.toFixed(2)} sustainedMax=${t3maxSpd.toFixed(2)} (cap 5.4)`,
+  );
+  check(
+    'wall-press: into-wall position steady while pressing (no ~100 ms bounce)',
+    t3contact > 0 && t3into < 0.003,
+    `max |Δz| per frame=${t3into.toFixed(4)} m`,
+  );
+
+  // --- 16. T4: head-on sprint crash is clean — no bounce, dead stop -------
+  const t4r = await traceRun(['ShiftLeft', 'KeyW'], {
+    spawn: [3, 0, 20], yaw: Math.PI, ms: 3200,
+  });
+  const t4imp = t4r.find((f) => f[3] >= 31.3)?.[0] ?? -1;
+  const t4s = smooth(hSpeeds(t4r));
+  const t4after = avgSpeedWin(t4r, t4s, t4imp + 300, t4imp + 800);
+  let t4osc = 0;
+  for (let i = 1; i < t4r.length; i++) {
+    if (t4r[i][0] < t4imp + 500) continue;
+    t4osc = Math.max(t4osc, Math.abs(t4r[i][3] - t4r[i - 1][3]));
+  }
+  console.log('impact:', JSON.stringify({
+    impact: t4imp, vAfter: +t4after.toFixed(2), osc: +t4osc.toFixed(4),
+  }));
+  check(
+    'impact: head-on sprint into a wall stops dead with no bounce/jolt',
+    t4imp > 0 && t4after < 0.25 && t4osc < 0.004,
+    `impact@${t4imp}ms vAfter=${t4after.toFixed(2)} into-osc=${t4osc.toFixed(4)} m`,
+  );
+
+  // --- 17/18. T5: run across the four lips — first-contact climbs at the
+  //  TRUE heights (no full-stepUp pop, no slide-down) -----------------------
+  const lipDefs = [
+    { face: 1.8, h: 0.05, depth: 0.4 }, { face: 3.0, h: 0.1, depth: 0.4 },
+    { face: 4.2, h: 0.25, depth: 0.4 }, { face: 5.5, h: 0.05, depth: 0.1 },
+  ].map((l) => ({
+    ...l,
+    // physical first-touch: where the capsule sphere reaches the lip's top
+    // edge — the real "contact frame" the climb must not lag behind
+    touch: Math.sqrt(0.35 * 0.35 - (0.35 - l.h) * (0.35 - l.h)),
+  }));
+  const lipRun = await traceRun(['ShiftLeft', 'KeyW'], {
+    spawn: [0.6, 0, 5], yaw: -Math.PI / 2, ms: 2600,
+  });
+  /** first frame the capsule physically reaches lip `li` (or the trace end) */
+  const lipTouchI = (li) => {
+    const l = lipDefs[li];
+    for (let i = 1; i < lipRun.length; i++) if (lipRun[i][1] >= l.face - l.touch) return i;
+    return lipRun.length;
+  };
+  const lipRes = lipDefs.map((lip, li) => {
+    const ci = lipTouchI(li);
+    let ki = -1;
+    if (ci < lipRun.length) {
+      for (let i = ci; i < lipRun.length; i++) {
+        if (lipRun[i][2] >= lip.h - 0.015) { ki = i; break; }
+      }
+    }
+    const nextCi = li < lipDefs.length - 1 ? lipTouchI(li + 1) : lipRun.length;
+    let peak = -1;
+    if (ci < lipRun.length) for (let i = ci; i < nextCi; i++) peak = Math.max(peak, lipRun[i][2]);
+    // while the capsule axis is still over the lip (before its far edge) it
+    // must stay ON the climbed height — a drop back = slide-down
+    let minOnTop = Infinity;
+    if (ki >= 0) {
+      for (let i = ki; i < lipRun.length && lipRun[i][1] <= lip.face + lip.depth; i++) {
+        minOnTop = Math.min(minOnTop, lipRun[i][2]);
+      }
+    }
+    return {
+      lip: lip.h, contactT: ci < lipRun.length ? +lipRun[ci][0].toFixed(0) : -1,
+      lag: ci < lipRun.length && ki >= 0 ? ki - ci : -1,
+      climbY: ki >= 0 ? +lipRun[ki][2].toFixed(3) : null,
+      peak: +peak.toFixed(3), minOnTop: Number.isFinite(minOnTop) ? +minOnTop.toFixed(3) : null,
+    };
+  });
+  console.log('lips:', JSON.stringify(lipRes));
+  check(
+    'step-lips: 0.05/0.10/0.25 lips + thin nub climb within 2 frames of contact (run speed)',
+    lipRes.every((r) => r.contactT >= 0 && r.lag >= 0 && r.lag <= 2),
+    lipRes.map((r) => `${r.lip}@${r.contactT}ms lag=${r.lag}`).join(' '),
+  );
+  check(
+    'step-lips: climbs land at the true height — no full-step pop, no slide-down',
+    lipRes.every((r) =>
+      r.climbY != null &&
+      r.climbY >= r.lip - 0.02 && r.climbY <= r.lip + 0.05 &&
+      r.peak <= r.lip + 0.05 &&
+      (r.minOnTop == null || r.minOnTop >= r.lip - 0.03),
+    ),
+    lipRes.map((r) => `${r.lip}: climb=${r.climbY} peak=${r.peak} onTop≥${r.minOnTop}`).join(' '),
+  );
+
+  // --- 19. T6: 50° ramp walk-up is smooth (mid-climb only: excludes the toe
+  //  edge cases, the junction step and the walk-off fall at the end) --------
+  const rcRun = await traceRun(['KeyW'], {
+    spawn: [1.7, 0, -4], yaw: -Math.PI / 2, ms: 4200,
+  });
+  let rcMaxJerk = 0;
+  let rcN = 0;
+  let rcPrevY = null;
+  let rcPrevT = null;
+  let rcPrevVy = null;
+  for (const f of rcRun) {
+    // mid-climb only: x ≤ 4.5 excludes the walk-off-the-platform FALL, which
+    // descends back through this y-band at x ≥ 6.5 later in the trace
+    if (f[2] < 0.1 || f[2] > 1.65 || f[1] > 4.5) continue;
+    if (rcPrevT != null && f[0] - rcPrevT > 4) {
+      const dt = (f[0] - rcPrevT) / 1000;
+      const vy = (f[2] - rcPrevY) / dt;
+      if (rcPrevVy != null) rcMaxJerk = Math.max(rcMaxJerk, Math.abs(vy - rcPrevVy));
+      rcPrevVy = vy;
+      rcN++;
+    }
+    rcPrevY = f[2];
+    rcPrevT = f[0];
+  }
+  console.log('ramp-climb:', JSON.stringify({ frames: rcN, maxJerk: +rcMaxJerk.toFixed(3) }));
+  check(
+    'ramp-climb: 50° walk-up mid-climb is smooth (vy steady, no stutter)',
+    rcN > 20 && rcMaxJerk <= 0.5,
+    `frames=${rcN} max|Δvy|=${rcMaxJerk.toFixed(3)} m/s`,
+  );
+
+  // --- 20. T7a: walking off a walkable (angled) surface must always fall --
+  const woRun = await traceRun(['KeyW'], {
+    spawn: [3.0, 0.85, -2.9], yaw: Math.PI, ms: 1600,
+  });
+  const woFallI = woRun.findIndex((f) => f[2] < 0.15);
+  console.log('walk-off:', JSON.stringify({
+    fallT: woFallI >= 0 ? +woRun[woFallI][0].toFixed(0) : -1,
+    yEnd: +woRun[woRun.length - 1][2].toFixed(3),
+  }));
+  check(
+    'walk-off: stepping off the 50° ramp side always falls (never held on the edge)',
+    woFallI >= 0 && woRun[woFallI][0] <= 700 && woRun[woRun.length - 1][2] < 0.15,
+    `fell@${woFallI >= 0 ? woRun[woFallI][0].toFixed(0) : 'never'}ms yEnd=${woRun[woRun.length - 1][2].toFixed(3)}`,
+  );
+
+  // --- 21. T7b: ≥50° faces slide — unwalkable never held -------------------
+  const slRun = await traceRun([], { spawn: [7.0, 1.0, 0], yaw: 0, ms: 2500 });
+  const slEnd = slRun[slRun.length - 1];
+  console.log('slide-60:', JSON.stringify({
+    y0: +slRun[0][2].toFixed(3), yEnd: +slEnd[2].toFixed(3), xEnd: +slEnd[1].toFixed(3),
+  }));
+  check(
+    'slide: idle on a 60° face slides off — pin/sleep never hold unwalkable',
+    slRun[0][2] > 0.5 && slEnd[2] < 0.25 && slEnd[1] < 6.5,
+    `y ${slRun[0][2].toFixed(3)} -> ${slEnd[2].toFixed(3)}, xEnd=${slEnd[1].toFixed(3)}`,
   );
 
   if (failed) {
