@@ -135,13 +135,27 @@ through the SAME lighting path as everything else so they read correctly
 from every viewer's perspective (potato = bake + dynamic lights). No code
 now — engine-ready first.
 
-## 12. SSR wet-floor option (pending user call, 2026-11-20)
+## 12. Reflections: raytraced, not SSR (DECIDED 2026-11-20)
 
-External advice + the reference images (`reference/vibe.png` shows a wet
-reflective floor) suggest screen-space reflections for glossy surfaces.
-The user previously chose "color + gloss only, no reflections". If
-revisited: SSR reads the per-material roughness introduced by the
-materials batch (zero rework — it slots in after), gated to low-roughness
-materials only; screen-space limits (only on-screen geometry appears in
-the reflection) are acceptable for floors. One word from the user → it
-joins the materials batch.
+User: "screen space reflections have limitations and moments where they
+do not look that great, especially at special angles" — agreed; same
+objection as SSGI: screen-space lies (the reflected object must already
+be on screen → holes at screen edges, smearing/vanishing at grazing
+angles, corner artifacts — no denoiser can fix a *missing* reflection).
+Decision: **per-material raytraced reflections** on the WebGPU path —
+
+- one reflection ray per glossy pixel (**roughness gate** from the
+  materials batch — only rough < ~0.5 pixels pay) against the existing
+  BVH, at lighting resolution (quarter-res on medium);
+- shade the hit **emissive-first** (glowing panels reflected in wet floors
+  = the `vibe.png` look) + approximate diffuse, so the reflection shows
+  your actual light sources;
+- cleaned by temporal + the edge-aware denoise stack — noise IS
+  denoisable, screen-space holes are not (the fundamental asymmetry);
+- cost bounded: gated by roughness, and the mesh-light change left big
+  headroom (ultra locked at 60 fps with4 shadow rays/pixel);
+- Potato/WebGL2 tier: no reflections for now (or a planar floor pass
+  later) — decide together with the bake work.
+
+Slots into the queue **right after materials** (it consumes their
+roughness). SSR permanently rejected for the main path.

@@ -1,0 +1,57 @@
+# Builds the game and deploys it to GitHub Pages on every push to master.
+# One-time setup: repo Settings → Pages → Source = "GitHub Actions".
+# See docs/deploy.md.
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# one deploy at a time; a newer push cancels an in-flight one
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # --base=./ makes asset URLs relative so the site works at any repo
+      # name / sub-path (user.github.io/<repo>/), not just at a domain root.
+      - name: Build
+        run: npx tsc --noEmit && npx vite build --base=./
+
+      - uses: actions/configure-pages@v5
+
+      # dist/ already contains everything: game, pathtrace pages, assets/map,
+      # draco decoders and the OIDN weights (they live under assets/, the
+      # Vite publicDir — nothing extra to copy).
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
