@@ -16,6 +16,12 @@
  *   8. momentum: descend the 50° ramp over the sprint cap, jump at speed →
  *      horizontal speed carried mid-air and on landing, decays ~1–2 s
  *   9. no-bob: walking 2 s on flat ground → camera Y constant (no walk bob)
+ *  10. coyote: walk off the 0.3 m ledge → jump 50 ms after leaving the
+ *      ground still fires (COYOTE_MS grace)
+ *  11. no-double-jump: mashing jump again on the next mid-air frame adds
+ *      no second impulse (single jump per airtime)
+ *  12. jump-buffer: press ~50 ms BEFORE landing a fall → the press sits
+ *      inside the 100 ms window and fires on the landing frame
  *
  *   node scripts/steptest.mjs [url]
  *   (default url: http://localhost:4173/?testroom)
@@ -459,6 +465,206 @@ try {
     'no-bob: camera Y constant while walking 2 s (delta < 0.005)',
     nbMaxDelta < 0.005 && nbMax - nbMin < 0.01,
     `maxDelta=${nbMaxDelta.toFixed(5)} range=${(nbMax - nbMin).toFixed(5)}`,
+  );
+
+  // =========================================================================
+  // Jump-feel suite: coyote time + jump input buffering (COYOTE_MS /
+  // JUMP_BUFFER_MS in gameplay/controller.ts). Both runs respawn on the
+  // 0.3 m ledge facing -z and walk straight off its north edge onto the
+  // flat floor — the one walk-off path the suite already exercises.
+  // =========================================================================
+
+  // --- 10/11. coyote + no-double-jump -------------------------------------
+  // Leave the ground, wait 50 ms (inside the 100 ms coyote window), press
+  // jump → must fire and rise. Mash jump again on the NEXT frame while
+  // still airborne: the real jump consumed the coyote window, so no second
+  // impulse may ever appear (apex stays at a normal jump's height, the
+  // descent stays monotonic, the landing gets no buffered jump either).
+  const coy = await page.evaluate(
+    () =>
+      new Promise((resolve) => {
+        const g = window.__liminal;
+        const c = g.controller;
+        c.respawnAt(new g.THREE.Vector3(0, 0.3, -2.4));
+        c.yaw = 0; // face -z: straight off the north edge of the ledge
+        document.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyW' }));
+        const press = () => {
+          document.dispatchEvent(new KeyboardEvent('keydown', { code: 'Space' }));
+          document.dispatchEvent(new KeyboardEvent('keyup', { code: 'Space' }));
+        };
+        const ev = {
+          tLeave: -1, tPress: -1, pressY: 0, tPress2: -1,
+          tJump: -1, peakY: -1, tPeak: -1, tLand: -1, maxAfterLand: -1,
+        };
+        const frames = []; // [t ms, feetY, grounded]
+        let phase = 0;
+        const t0 = performance.now();
+        const tick = () => {
+          const t = performance.now() - t0;
+          const y = c.feet.y;
+          const gr = c.grounded;
+          frames.push([+t.toFixed(1), +y.toFixed(4), gr ? 1 : 0]);
+          const i = frames.length - 1;
+          if (phase === 0 && i > 2 && gr) {
+            phase = 1; // standing on the ledge — armed
+          } else if (phase === 1 && !gr) {
+            ev.tLeave = t;
+            ev.peakY = y;
+            document.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyW' })); // keep drift off the pillar
+            phase = 2;
+          } else if (phase === 2 && t >= ev.tLeave + 50) {
+            ev.tPress = t;
+            ev.pressY = y;
+            press();
+            phase = 3;
+          } else if (phase === 3) {
+            if (t >= ev.tLeave + 66 && ev.tPress2 < 0) {
+              ev.tPress2 = t;
+              press(); // second mash, ~1 frame after the first, mid-air
+            }
+            if (ev.tJump < 0 && y > ev.pressY + 0.05) ev.tJump = t; // left the ground
+            if (y > ev.peakY) {
+              ev.peakY = y;
+              ev.tPeak = t;
+            }
+            if (gr && t > ev.tLeave + 300) {
+              ev.tLand = t;
+              phase = 4;
+            }
+          } else if (phase === 4) {
+            ev.maxAfterLand = Math.max(ev.maxAfterLand, y);
+            if (t > ev.tLand + 300) {
+              resolve({ ev, frames });
+              return;
+            }
+          }
+          if (t < 6000) requestAnimationFrame(tick);
+          else resolve({ ev, frames });
+        };
+        requestAnimationFrame(tick);
+      }),
+  );
+  const ce = coy.ev;
+  const cf = coy.frames;
+  // derived vertical velocity after the coyote press (m/s)
+  let vyMax = -Infinity;
+  for (let i = 1; i < cf.length; i++) {
+    if (cf[i][0] < ce.tPress) continue;
+    const dt = (cf[i][0] - cf[i - 1][0]) / 1000;
+    if (dt > 0.001) vyMax = Math.max(vyMax, (cf[i][1] - cf[i - 1][1]) / dt);
+  }
+  if (!Number.isFinite(vyMax)) vyMax = 0;
+  let rise = 0;
+  if (ce.tJump >= 0) {
+    for (const f of cf) if (f[0] >= ce.tJump) rise = Math.max(rise, f[1] - ce.pressY);
+  }
+  // apex → landing must only ever go DOWN: any upward step = 2nd impulse
+  let maxStep = -Infinity;
+  if (ce.tJump >= 0 && ce.tPeak >= 0 && ce.tLand > 0) {
+    let prev = null;
+    for (const f of cf) {
+      if (f[0] < ce.tPeak) continue;
+      if (f[0] > ce.tLand) break;
+      if (prev != null) maxStep = Math.max(maxStep, f[1] - prev);
+      prev = f[1];
+    }
+  }
+  if (!Number.isFinite(maxStep)) maxStep = 0;
+  console.log('coyote:', JSON.stringify({
+    leave: +ce.tLeave.toFixed(0), press: +ce.tPress.toFixed(0), press2: +ce.tPress2.toFixed(0),
+    jump: +ce.tJump.toFixed(0), peak: +ce.peakY.toFixed(3), land: +ce.tLand.toFixed(0),
+    vyMax: +vyMax.toFixed(2), rise: +rise.toFixed(3), maxStep: +maxStep.toFixed(4),
+    landingMax: +ce.maxAfterLand.toFixed(3),
+  }));
+  check(
+    'coyote: jump 50 ms after walking off a ledge still fires (rises)',
+    ce.tLeave >= 0 &&
+      ce.tPress - ce.tLeave >= 35 && ce.tPress - ce.tLeave <= 95 &&
+      ce.tJump >= 0 && ce.tJump - ce.tPress <= 60 &&
+      rise >= 0.3 && vyMax > 0,
+    `leave→press=${(ce.tPress - ce.tLeave).toFixed(0)}ms press→jump=${(ce.tJump - ce.tPress).toFixed(0)}ms ` +
+      `rise=${rise.toFixed(3)}m vy=${vyMax.toFixed(2)}m/s`,
+  );
+  check(
+    'no-double-jump: second mid-air press after a coyote jump adds no impulse',
+    ce.tJump >= 0 && ce.tLand > 0 &&
+      ce.peakY < 1.5 && // normal apex ≈1.0 m; a 2nd impulse would reach ≈3+
+      maxStep <= 0.011 && // monotonic descent, apex → landing
+      ce.maxAfterLand < 0.05, // press2's buffer expired before landing
+    `peak=${ce.peakY.toFixed(3)}m maxStep=${maxStep.toFixed(4)}m landingMax=${ce.maxAfterLand.toFixed(3)}m`,
+  );
+
+  // --- 12. jump-buffer: press jump ~50 ms BEFORE landing a fall -----------
+  // Walk off the same ledge, press jump when ~0.15 m of fall remain
+  // (~55–60 ms at this fall speed — inside JUMP_BUFFER_MS): the press must
+  // NOT jump early, must NOT be dropped, and must fire on the landing frame.
+  const buf = await page.evaluate(
+    () =>
+      new Promise((resolve) => {
+        const g = window.__liminal;
+        const c = g.controller;
+        c.respawnAt(new g.THREE.Vector3(0, 0.3, -2.4));
+        c.yaw = 0;
+        document.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyW' }));
+        const ev = { tPress: -1, pressY: 0, tLand: -1, maxBeforeLand: -1, maxAfterLand: -1 };
+        const frames = [];
+        let phase = 0;
+        const t0 = performance.now();
+        const tick = () => {
+          const t = performance.now() - t0;
+          const y = c.feet.y;
+          const gr = c.grounded;
+          frames.push([+t.toFixed(1), +y.toFixed(4), gr ? 1 : 0]);
+          const i = frames.length - 1;
+          if (phase === 0 && i > 2 && gr) {
+            phase = 1; // standing on the ledge — armed
+          } else if (phase === 1 && !gr) {
+            document.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyW' }));
+            phase = 2;
+          } else if (phase === 2 && !gr && y <= 0.15) {
+            ev.tPress = t;
+            ev.pressY = y;
+            document.dispatchEvent(new KeyboardEvent('keydown', { code: 'Space' }));
+            document.dispatchEvent(new KeyboardEvent('keyup', { code: 'Space' }));
+            ev.maxBeforeLand = y;
+            phase = 3;
+          } else if (phase === 3) {
+            ev.maxBeforeLand = Math.max(ev.maxBeforeLand, y); // an early jump shows here
+            if (gr) {
+              ev.tLand = t;
+              phase = 4;
+            }
+          } else if (phase === 4) {
+            ev.maxAfterLand = Math.max(ev.maxAfterLand, y);
+            if (t > ev.tLand + 300) {
+              resolve({ ev, frames });
+              return;
+            }
+          }
+          if (t < 6000) requestAnimationFrame(tick);
+          else resolve({ ev, frames });
+        };
+        requestAnimationFrame(tick);
+      }),
+  );
+  const be = buf.ev;
+  const lead = be.tLand - be.tPress;
+  console.log('jump-buffer:', JSON.stringify({
+    press: +be.tPress.toFixed(0), land: +be.tLand.toFixed(0), lead: +lead.toFixed(0),
+    pressY: +be.pressY.toFixed(3), maxBefore: +be.maxBeforeLand.toFixed(3),
+    maxAfter: +be.maxAfterLand.toFixed(3),
+  }));
+  check(
+    'jump-buffer: press ~50 ms before landing sits inside the 100 ms window',
+    be.tPress >= 0 && be.tLand > be.tPress && lead >= 15 && lead <= 100,
+    `press→land=${Number.isFinite(lead) ? lead.toFixed(0) : 'n/a'}ms`,
+  );
+  check(
+    'jump-buffer: buffered jump fires on the landing frame (not earlier, not dropped)',
+    be.tLand > 0 &&
+      be.maxBeforeLand <= be.pressY + 0.01 &&
+      be.maxAfterLand > 0.05,
+    `maxBefore=${be.maxBeforeLand.toFixed(3)} (pressY=${be.pressY.toFixed(3)}) maxAfter=${be.maxAfterLand.toFixed(3)}m`,
   );
 
   if (failed) {

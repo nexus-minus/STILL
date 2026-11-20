@@ -36,6 +36,20 @@ const WALL_SLEEP = 0.1;
  * settle, so excess speed never clamps instantly but also doesn't linger.
  */
 const MOMENTUM_TAU = 1.0;
+/**
+ * Coyote time: after walking off a ledge the jump stays valid this long
+ * (~6 frames @60 fps) — players press jump a frame too late and shouldn't
+ * just fall. Reset on ground contact, ZEROED by a real jump, so it only
+ * ever covers the "walked off" case — never a mid-air second jump.
+ */
+const COYOTE_MS = 100;
+/**
+ * Jump input buffer: a press up to this long BEFORE landing still fires
+ * (on the landing frame) — an early press used to be swallowed whole and
+ * the jump felt unresponsive. Same 100 ms as coyote: the standard
+ * "feels instant" input window. No settings, no keybinds — feel only.
+ */
+const JUMP_BUFFER_MS = 100;
 
 interface Options {
   height: number;
@@ -103,7 +117,10 @@ export class PlayerController {
   private readonly totalPush = new THREE.Vector3();
   private readonly spawnFeet: THREE.Vector3;
   private stepDebugCount = 0;
-  private jumpQueued = false;
+  /** ms left in which a jump press still counts (see JUMP_BUFFER_MS) */
+  private jumpBuffer = 0;
+  /** ms of jump grace left after the last ground contact (see COYOTE_MS) */
+  private coyote = 0;
   /** view-only Y offset: eased out after a sudden upward correction (step-up) */
   private camYOffset = 0;
   /** remaining seconds of wall-contact sleep + the normal we're pressed into */
@@ -132,7 +149,7 @@ export class PlayerController {
     document.addEventListener('keydown', (e) => {
       this.keys.add(e.code);
       if (this.binds.matches('jump', e.code)) {
-        this.jumpQueued = true;
+        this.jumpBuffer = JUMP_BUFFER_MS;
         e.preventDefault();
       }
       if (this.binds.matches('interact', e.code) && this.locked && !this.freecam) this.onInteract?.();
@@ -147,7 +164,7 @@ export class PlayerController {
       this.keys.add(code);
       // parity with keyboard: bound interact/jump must fire from mouse too
       if (this.binds.matches('interact', code)) this.onInteract?.();
-      if (this.binds.matches('jump', code)) this.jumpQueued = true;
+      if (this.binds.matches('jump', code)) this.jumpBuffer = JUMP_BUFFER_MS;
     });
     window.addEventListener('mouseup', (e) => this.keys.delete(`Mouse${e.button}`));
 
@@ -188,11 +205,12 @@ export class PlayerController {
     this.freecam = !this.freecam;
     if (this.freecam) {
       this.velocity.set(0, 0, 0);
-      this.jumpQueued = false;
+      this.jumpBuffer = 0;
     } else {
       this.position.copy(this.camera.position);
       this.velocity.set(0, 0, 0);
-      this.jumpQueued = false;
+      this.jumpBuffer = 0;
+      this.coyote = 0; // physics resumes fresh — no grace inherited from freecam
       this.camYOffset = 0; // re-entering from freecam snaps, it doesn't ease
       this.wallSleep = 0;
       this.collision.resolveCapsule(this.position, this.opts.height, this.opts.radius);
@@ -203,7 +221,7 @@ export class PlayerController {
 
   private updateFreecam(dt: number): void {
     const { keys } = this;
-    this.jumpQueued = false; // swallow space-jump input meant for normal mode
+    this.jumpBuffer = 0; // swallow space-jump input meant for normal mode
     this.camera.rotation.set(this.pitch, this.yaw, 0, 'YXZ');
 
     const fz = (keys.has('KeyW') || keys.has('ArrowUp') ? 1 : 0)
@@ -233,6 +251,7 @@ export class PlayerController {
     this.velocity.set(0, 0, 0);
     this.camYOffset = 0; // teleports snap, they don't ease
     this.wallSleep = 0; // contact normal belongs to the old spot
+    this.coyote = 0; // jump grace belongs to the OLD ground, not here
     this.stepDebugCount = 0; // fresh spawn → fresh [stepup] debug budget
     this.syncFeet();
   }
@@ -307,13 +326,20 @@ export class PlayerController {
     velocity.z += (tz - velocity.z) * t;
 
     // ---- jump / gravity ---------------------------------------------------
-    if (active && this.jumpQueued && this.grounded) {
+    // Fires from ground contact, from COYOTE_MS of recent ground (walked off
+    // a ledge), or from a JUMP_BUFFER_MS press made just before landing.
+    // Both windows make jump feel instant; the impulse below zeroes BOTH of
+    // them, so a real jump can never be followed by a coyote/buffered second
+    // jump mid-air (single jump per airtime — the e2e asserts this).
+    if (!active) this.jumpBuffer = 0; // menus swallow jump intent, as before
+    if (active && this.jumpBuffer > 0 && (this.grounded || this.coyote > 0)) {
       // impulse ADDS to any upward velocity (a jump off a rising slope
       // carries it); from rest this is the plain fixed-height jump
       velocity.y = Math.max(velocity.y, 0) + opts.jumpSpeed;
       this.grounded = false;
+      this.coyote = 0; // consumed — no coyote after a real jump
+      this.jumpBuffer = 0;
     }
-    this.jumpQueued = false;
 
     velocity.y = Math.max(velocity.y - opts.gravity * dt, -55);
     // Momentum: on a slope, add gravity's TANGENT component to horizontal
@@ -640,6 +666,16 @@ export class PlayerController {
         if (gap > -0.08 && gap <= GROUND_SNAP) this.position.y -= gap;
       }
     }
+
+    // ---- jump timing windows (AFTER every grounded write — resolve, ground
+    // snap, step-up: each of those counts as ground contact) ---------------
+    // Coyote: refreshed while grounded, burned down while airborne. A real
+    // jump zeroed it above and nothing re-arms it until the next landing, so
+    // the grace only ever covers walking off a ledge — never a double jump.
+    if (this.grounded) this.coyote = COYOTE_MS;
+    else this.coyote = Math.max(0, this.coyote - dt * 1000);
+    // Buffer: ages every frame; consumed by the jump above when it fires.
+    this.jumpBuffer = Math.max(0, this.jumpBuffer - dt * 1000);
 
     // ---- fell out of the world? ------------------------------------------
     if (this.position.y < -60) this.respawnAt(this.spawnFeet);

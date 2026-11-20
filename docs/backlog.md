@@ -73,6 +73,16 @@ Likely suspects when picking this up: the additive jump impulse
 (`max(vy,0) + jumpSpeed`), airborne slope-stick, and jump-on-slope /
 jump-into-ceiling interactions with the new momentum model.
 
+Coyote/buffer session probed these (2026-11-20): jump standing on the
+30° ramp ✓, jump mid-climb on the 50° ramp ✓, jump mash (8 presses /
+3 s) → exactly the windowed count ✓ — no clear bug found. One recorded
+observation: the additive impulse makes jumping WHILE climbing a 50°
+ramp give ~+1.12 m instead of ~+0.78 m (the climb's vertical velocity
+carries into the jump) — intentional per the code comment, but it makes
+jump height feel inconsistent on slopes and may be part of the user's
+perceived jump bugs. NOT changed (would alter approved feel) — needs the
+user's call: cap the carried vy, or keep it.
+
 ## 7. Interaction feedback = world reacts only (design contract, 2026-11-20)
 
 Toasts default OFF ("nearly nothing" UI), so **every E-interaction must
