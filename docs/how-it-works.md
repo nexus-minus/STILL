@@ -34,8 +34,8 @@ dive) and [denoising.md](denoising.md) (noise deep dive).
                          light bleeding across edges)
 [4] fog (optional)     raymarched at volumetricScale over geomTex →
                          transmittance + light shafts; off = zero cost
-[5] composite          diffuse × lighting + emissive, then fog
-                         (beauty·T + S) → bloom → AgX tone map
+[5] composite          diffuse × lighting + specular + emissive, then
+                         fog (beauty·T + S) → bloom → AgX tone map
 ```
 
 Debug views: `?rtdebug=1` uv gradient · `2` visibility (bright green = lit,
@@ -163,15 +163,18 @@ a different engine.
 
 ## 10. Roadmap to "engine ready"
 
-- **In flight**: edge-aware denoiser → materials (per-object color +
-  Principled roughness gloss) → raytraced reflections (backlog #12) →
-  volumetrics/fog (phase 1b); in parallel: coyote time + jump input
-  buffering.
-- **Queued**: light-distance culling; bake pipeline (hybrid: Cycles-baked
-  static lightmaps + realtime dynamic layer — #9); jump-bug pass
-  (awaiting repros, #6); automatic chunk streaming (#8). GitHub Pages
-  deploy = DONE (`.github/workflows/deploy.yml` + `docs/deploy.md`;
-  activates on the first push to a GitHub repo). Deferred with recorded
-  triggers: Rapier physics swap (#10), multiplayer via PeerJS (#11).
+- **Landed**: edge-aware denoiser; per-object color + Principled
+  roughness gloss (per-vertex roughness in the BVH + specular buffer);
+  volumetrics/fog phase 1b; coyote time + jump buffering; bake tooling
+  (Blender side); GitHub Pages deploy (`.github/workflows/deploy.yml` +
+  `docs/deploy.md`).
+- **In flight**: fog floor-anchor fix (user bug: haze keyed to world y=0
+  instead of the level floor).
+- **Queued**: raytraced reflections (#12 — its roughness batch now
+  exists); bake consumption with the user's two rules (#9: no
+  double-lighting, RGBM/HDR if sRGB clips under AgX); surface-loop
+  light-distance culling; jump-bug pass (#6, awaiting repros); automatic
+  chunk streaming (#8). Deferred with recorded triggers: Rapier (#10),
+  multiplayer via PeerJS (#11).
 - **Yours**: build the level (export audit guards you), author materials
   with Principled emission/roughness, small optimizations.

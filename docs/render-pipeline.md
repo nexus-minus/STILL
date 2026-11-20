@@ -50,6 +50,8 @@ optional):
 | `?rtsoft=0` | soft on | deterministic face-center shadow ray (hard legacy look) instead of fixture-surface jittered soft shadows |
 | `?rtnd=0..4` | 4 | spatial à-trous denoise iterations (0 = raw lighting only, for A/B) |
 | `?vol=0\|off\|1\|on` | per tier | force the volumetric fog off/on (test + tuning override) |
+| `?rtspec=0` | gloss on | disable the specular lobe (pre-gloss A/B baseline) |
+| `?rtmat=1\|2` | off | material inspection views: raw albedo target / specular buffer (no bloom, no fog) |
 
 ### Recommended production split
 
@@ -159,8 +161,19 @@ path (see `test-room.ts`).
   `bvh_RaycastFirstHit` shadow rays (`sh.dist > 0.02` self-hit guard) → one cosine-hemisphere bounce, shaded at
   its hit → hemisphere ambient → storage texture.
   Mirrors the official three-mesh-bvh WebGPU path-tracing example exactly.
-- **raster MRT** `{ output, diffuse, emissive }` (3 attachments,
-  `maxColorAttachments: 4` requested) — flat albedo + HDR emissive.
+- **materials**: per-object albedo arrives via the raster pass (proven by
+  probe); per-material **roughness** is baked into a float BVH vertex
+  attribute (`prepareRoughness`) so the lighting ray samples gloss at the
+  exact hit with zero extra fetches — GGX + Schlick (F0 = 0.04, Principled
+  dielectric) + Schlick-GGX on the SAME shadow sample (specular costs ALU
+  only, never an extra shadow ray), written to its own buffer with
+  temporal/à-trous in lockstep, masked on emissive surfaces in the
+  composite. `?rtspec=0` = pre-gloss baseline, `?rtmat=1|2` =
+  albedo/specular inspection views, `?matroom` = demo scene.
+- **raster MRT** `{ output, diffuse, emissive }` (3 attachments; the 4th
+  `maxColorAttachments` slot stayed free — per-material specular lives in
+  its own rgba16float buffer set because the composite multiplies the
+  lighting buffer by albedo, which would tint a highlight by the wall).
 - **composite**: `diffuse × lighting + emissive` selected against the beauty
   pass by a uniform flag (tier changes never rebuild the graph), then bloom.
 - **lights**: emissive meshes in Blender → one mesh-light entry each

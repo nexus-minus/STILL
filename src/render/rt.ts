@@ -12,6 +12,7 @@ import {
   vec4,
   mix,
   step,
+  vec3,
   mrt,
   pass,
   output,
@@ -93,16 +94,24 @@ export interface AdvancedRenderer {
  *        primary camera ray   -> ndcToCameraRay + bvh_RaycastFirstHit
  *        direct lighting      -> next-event estimation over the emissive light
  *                                list, occlusion via bvh_RaycastAnyHit shadow rays
- *        one bounce           -> cosine-hemisphere ray, shaded at the hit point
+ *                                + per-material GGX specular (roughness comes
+ *                                from the BVH vertex attributes — the compute
+ *                                runs BEFORE the raster pass, so the G-buffer
+ *                                cannot feed it; the lobe rides its own buffer
+ *                                because the composite multiplies the lighting
+ *                                buffer by diffuse albedo)
+ *        one bounce           -> cosine-hemisphere ray, shaded at the hit
+ *                                point (diffuse only — specScale 0)
  *        + hemisphere ambient                               -> storage texture
- *   1b. volumetrics (phase 1b): while settings.volumetrics && !?rtdebug, a
- *        fog march at settings.volumetricScale over geomTex + the light list
+ *   1b. volumetrics (phase 1b): while settings.volumetrics && !?rtdebug && !?rtmat,
+ *        a fog march at settings.volumetricScale over geomTex + the light list
  *        (passes/volumetrics.ts) — OFF = release() + the plain composite,
- *        whose shader is byte-identical to the pre-volumetrics one
+ *        which carries no fog code at all
  *   2. raster pass -> MRT { output(beauty), diffuse(albedo), emissive }
- *   3. composite: diffuse * lighting + emissive (selected vs beauty by flag),
- *      fog-composited (beauty·T + S) when volumetrics ran
- *      -> bloom -> tone mapping (outputColorTransform)
+ *   3. composite: diffuse * lighting + emissive + specular (gloss masked on
+ *      emissive pixels — their primary ray passes through the fixture),
+ *      selected vs beauty by flag, fog-composited (beauty·T + S) when
+ *      volumetrics ran -> bloom -> tone mapping (outputColorTransform)
  *
  * Safety rules (this machine cannot run WebGPU locally):
  *  - mirrors the official three-mesh-bvh webgpu example APIs exactly — every
@@ -123,9 +132,54 @@ export function createAdvancedRenderer(
   lights: RtLight[],
 ): AdvancedRenderer {
   // ---- BVH first: kernel deps reference its fns ------------------------------
+  // Per-hit MATERIAL data. The lighting compute runs BEFORE the raster pass
+  // (pipeline calls dispatch() then render()), so it cannot sample the
+  // G-buffer — but it already interpolates the hit's vertex attributes via
+  // bvh_sampleTrianglePoint. Roughness is uniform per material, so bake it
+  // into a 1-float vertex attribute: every primary hit then carries its
+  // material's gloss with zero extra rays and zero extra texture reads
+  // (multi-material meshes fill per geometry group; a geometry shared with a
+  // mesh of a different material gets its own clone).
+  const roughnessOf = (m: THREE.Material): number => {
+    const r = (m as THREE.MeshStandardMaterial).roughness;
+    return typeof r === 'number' && Number.isFinite(r) ? Math.min(1, Math.max(0, r)) : 1;
+  };
+  const prepareRoughness = (mesh: THREE.Mesh): void => {
+    const mat = mesh.material;
+    const geo = mesh.geometry;
+    if (geo.userData.rtRoughMat === mat && geo.getAttribute('roughness')) return;
+    let target = geo;
+    if (geo.getAttribute('roughness')) {
+      target = geo.clone(); // shared geometry, different material — own copy
+      mesh.geometry = target;
+    }
+    const count = target.getAttribute('position').count;
+    const data = new Float32Array(count);
+    if (Array.isArray(mat)) {
+      data.fill(mat.length ? roughnessOf(mat[0]) : 1);
+      for (const g of target.groups) {
+        const m = (g.materialIndex !== undefined ? mat[g.materialIndex] : undefined) ?? mat[0];
+        data.fill(m ? roughnessOf(m) : 1, g.start, g.start + g.count);
+      }
+    } else {
+      data.fill(roughnessOf(mat));
+    }
+    target.setAttribute('roughness', new THREE.BufferAttribute(data, 1));
+    target.userData.rtRoughMat = mat;
+  };
+  for (const mesh of bvhMeshes) prepareRoughness(mesh);
+
   const bvhData = new BVHComputeData(bvhMeshes, {
-    attributes: { position: 'vec4f', normal: 'vec4f' },
+    attributes: { position: 'vec4f', normal: 'vec4f', roughness: 'float' },
   });
+  // Safety net for the attribute above: a geometry missing `roughness` packs
+  // the library default (0 = perfect mirror) — override it to 1 (fully
+  // diffuse) so any packing gap degrades to today's look, never to a mirror.
+  const defaultAttr = (
+    bvhData as unknown as { getDefaultAttributeValue: (k: string, t: THREE.Vector4) => THREE.Vector4 }
+  ).getDefaultAttributeValue.bind(bvhData);
+  (bvhData as unknown as { getDefaultAttributeValue: (k: string, t: THREE.Vector4) => THREE.Vector4 }).getDefaultAttributeValue =
+    (key, target) => (key === 'roughness' ? target.set(1, 0, 0, 0) : defaultAttr(key, target));
   let ready = false;
   void bvhData.updateAsync().then(() => {
     ready = true;
@@ -180,6 +234,33 @@ export function createAdvancedRenderer(
   denoiseTexB.format = THREE.RGBAFormat;
   denoiseTexB.minFilter = THREE.LinearFilter;
   denoiseTexB.magFilter = THREE.LinearFilter;
+  // ---- SPECULAR (per-material gloss) buffers --------------------------------
+  // The specular lobe must NOT ride in the lighting buffer's rgb: the
+  // composite multiplies that by diffuse albedo, and a highlight is tinted by
+  // the LIGHT, not the surface (nor can one alpha channel hold its colour).
+  // So gloss gets its own temporally-blended + à-trous-filtered rgb triplet,
+  // updated in lockstep with the diffuse lighting (same kernels, same
+  // ping-pong parity, zero extra dispatches).
+  const specTex = new THREE.StorageTexture(1, 1);
+  specTex.type = THREE.HalfFloatType;
+  specTex.format = THREE.RGBAFormat;
+  specTex.minFilter = THREE.LinearFilter;
+  specTex.magFilter = THREE.LinearFilter;
+  const specHistoryTex = new THREE.StorageTexture(1, 1);
+  specHistoryTex.type = THREE.HalfFloatType;
+  specHistoryTex.format = THREE.RGBAFormat;
+  specHistoryTex.minFilter = THREE.LinearFilter;
+  specHistoryTex.magFilter = THREE.LinearFilter;
+  const specDenoiseA = new THREE.StorageTexture(1, 1);
+  specDenoiseA.type = THREE.HalfFloatType;
+  specDenoiseA.format = THREE.RGBAFormat;
+  specDenoiseA.minFilter = THREE.LinearFilter;
+  specDenoiseA.magFilter = THREE.LinearFilter;
+  const specDenoiseB = new THREE.StorageTexture(1, 1);
+  specDenoiseB.type = THREE.HalfFloatType;
+  specDenoiseB.format = THREE.RGBAFormat;
+  specDenoiseB.minFilter = THREE.LinearFilter;
+  specDenoiseB.magFilter = THREE.LinearFilter;
 
   // ---- uniforms -----------------------------------------------------------------
   const invViewProj = uniform(new THREE.Matrix4());
@@ -195,6 +276,25 @@ export function createAdvancedRenderer(
   /** ?rtnd=N — à-trous iterations, 0 = spatial denoise off (default 4) */
   const rtndRaw = new URLSearchParams(location.search).get('rtnd');
   const rtnd = rtndRaw !== null && /^[0-4]$/.test(rtndRaw) ? Number(rtndRaw) : 4;
+  /** ?rtspec=0 — per-material specular OFF = the exact pre-gloss code path
+   *  (diffuse math untouched, spec buffers stay zero) — the A/B baseline
+   *  scripts/rt-mat-smoke.mjs measures "before" against */
+  const specOn = uniform(new URLSearchParams(location.search).get('rtspec') === '0' ? 0 : 1);
+  /** ?rtmat=1|2 — material inspection views (1 = diffuse/albedo G-buffer,
+   *  2 = specular buffer): exact buffer values, no bloom/fog, for the
+   *  grid readbacks in scripts/rt-mat-smoke.mjs */
+  const matView = uniform(
+    new URLSearchParams(location.search).get('rtmat') === '2'
+      ? 2
+      : new URLSearchParams(location.search).get('rtmat') === '1'
+        ? 1
+        : 0,
+  );
+  if (matView.value > 0) {
+    console.info(
+      `[rt] material view ${matView.value} — showing the ${matView.value === 1 ? 'diffuse/albedo G-buffer' : 'specular buffer'} raw (no lighting, no bloom, fog skipped)`,
+    );
+  }
   /** temporal blend: 1 = live frame (moving), <1 = accumulate */
   const blendAlpha = uniform(1);
   /** runtime intensity multiplier (settings slider) — multiplied in-shader */
@@ -284,7 +384,7 @@ export function createAdvancedRenderer(
   // storage list, and it composites inside the finalColor graph below — that
   // graph only exists on this WebGPU path. rt.ts gates it every frame:
   //   settings.volumetrics === false -> volPass.release() + the plain
-  //   composite (no dispatch, no fog-sized texture, old shader) — "off must
+  //   composite (no dispatch, no fog-sized texture, no-fog shader) — "off must
   //   cost nothing" (docs/render-pipeline.md quality-tiers rule).
   const volPass = new VolumetricPass({
     bvhData,
@@ -313,7 +413,9 @@ export function createAdvancedRenderer(
     fn compute(
       lightingTex: texture_storage_2d<rgba16float, write>,
       geomTex: texture_storage_2d<rgba16float, write>,
+      specTex: texture_storage_2d<rgba16float, write>,
       historyTex: texture_2d<f32>,
+      specHistory: texture_2d<f32>,
       blendAlpha: f32,
       invViewProj: mat4x4f,
       viewMat: mat4x4f,
@@ -323,6 +425,7 @@ export function createAdvancedRenderer(
       debugMode: f32,
       softShadow: f32,
       lightGain: f32,
+      specOn: f32,
       workgroupSize: vec3u,
       workgroupId: vec3u,
       localId: vec3u,
@@ -346,6 +449,7 @@ export function createAdvancedRenderer(
         // the uv gradient is displayed exactly as written
         textureStore(geomTex, indexUV, vec4f(0.0, 0.0, 0.0, -1.0));
         textureStore(lightingTex, indexUV, vec4f(uv, 0.3, 1.0));
+        textureStore(specTex, indexUV, vec4f(0.0, 0.0, 0.0, 1.0));
         return vec4f(0.0);
       }
 
@@ -364,11 +468,16 @@ export function createAdvancedRenderer(
         // void/seam pixels are unmistakable instead of blending to black
         if (debugMode > 1.5 && debugMode < 2.5) {
           textureStore(lightingTex, indexUV, vec4f(1.0, 0.0, 0.0, 1.0));
+          textureStore(specTex, indexUV, vec4f(0.0, 0.0, 0.0, 1.0));
           return vec4f(0.0);
         }
         let prevM = textureLoad(historyTex, indexUV, 0).rgb;
         let blendedM = mix(prevM, vec3f(0.0), blendAlpha);
         textureStore(lightingTex, indexUV, vec4f(blendedM, 1.0));
+        // void has no surface to gloss — fade its specular history to zero
+        // with the same temporal rule as the diffuse buffer
+        let prevSM = textureLoad(specHistory, indexUV, 0).rgb;
+        textureStore(specTex, indexUV, vec4f(mix(prevSM, vec3f(0.0), blendAlpha), 1.0));
         return vec4f(0.0);
       }
 
@@ -376,8 +485,12 @@ export function createAdvancedRenderer(
       if (dot(N, -ray.direction) < 0.0) { N = -N; }
       // smooth shading: prefer INTERPOLATED vertex normals (Blender smooth
       // shading) when they agree with the face — flat triangle normals are
-      // what makes lighting look stepped "per face"
-      let vN3 = bvh_sampleTrianglePoint(hit.barycoord, hit.indices.xyz).normal.xyz;
+      // what makes lighting look stepped "per face". The SAME interpolation
+      // call yields the hit's material roughness (baked per vertex in
+      // prepareRoughness) — gloss for free, no extra fetch.
+      let spt = bvh_sampleTrianglePoint(hit.barycoord, hit.indices.xyz);
+      let hitRough = clamp(spt.roughness, 0.0, 1.0);
+      let vN3 = spt.normal.xyz;
       if (dot(vN3, vN3) > 1e-6) {
         var sn = normalize(vN3);
         if (dot(sn, -ray.direction) < 0.0) { sn = -sn; }
@@ -394,6 +507,10 @@ export function createAdvancedRenderer(
       let P = hitP + N * 0.04; // clears thin overlaps
 
       var acc = vec3f(0.0);
+      // specular accumulates in its OWN buffer (see DirectLight): never
+      // albedo-scaled, clamped once per frame so a mirror-like sample cannot
+      // smear a white blob through the denoiser
+      var spec = vec3f(0.0);
       let nLights = u32(lightCount + 0.5);
 
       if (debugMode > 1.5 && debugMode < 2.5) {
@@ -428,9 +545,12 @@ export function createAdvancedRenderer(
         // direct lighting: next-event estimation — ONE surface sample per light
         // per frame (jseed + light index decorrelate the jitter; temporal
         // accumulation converges it into a continuous penumbra)
+        let V = -ray.direction; // surface → camera (primary ray), normalised
         for (var li = 0u; li < nLights; li++) {
           let lseed = jseed + vec2f(f32(li) * 17.31, f32(li) * 9.17);
-          acc += directLight(li, P, N, 1.0, lseed, softShadow, lightGain);
+          let dl = directLight(li, P, N, V, hitRough, 1.0, specOn, lseed, softShadow, lightGain);
+          acc += dl.diffuse;
+          spec += dl.specular;
         }
 
         // one bounce: cosine hemisphere ray, shade at the hit point
@@ -456,7 +576,10 @@ export function createAdvancedRenderer(
             var bacc = vec3f(0.0);
             for (var li = 0u; li < nLights; li++) {
               let lseed = seed + vec2f(f32(li) * 17.31, f32(li) * 9.17);
-              bacc += directLight(li, BP, BN, 0.72, lseed, softShadow, lightGain);
+              // specScale = 0: the bounce is shaded as DIFFUSE radiance
+              // (bacc/π below) — a specular lobe leaving the bounce point is
+              // directional and would leak the wrong way through this term
+              bacc += directLight(li, BP, BN, -dir, 1.0, 0.72, 0.0, lseed, softShadow, lightGain).diffuse;
             }
             // FIREFLY CLAMP: a bounce landing next to a light spikes 1/d² into
             // single white pixels — the "particles" in screenshots. Cap the
@@ -466,17 +589,38 @@ export function createAdvancedRenderer(
         }
       }
 
+      // SPECULAR FIREFLY CLAMP: a smooth surface can mirror a near-field
+      // sample into the thousands; one spike would smear into a white blob
+      // through temporal + à-trous. AgX rolls anything ≥ ~16 to white, so the
+      // cap only removes garbage — highlights stay tight and bright.
+      spec = min(spec, vec3f(48.0));
+
       // temporal accumulation: blend with the PREVIOUS frame's result, which
       // historyTex holds as a sampled texture (written by the copy kernel
       // after this pass — one usage per pass, never read+write together)
       let prev = textureLoad(historyTex, indexUV, 0).rgb;
       let blended = mix(prev, acc, blendAlpha);
       textureStore(lightingTex, indexUV, vec4f(blended, 1.0));
+      // specular history in lockstep (same rule: still = converge, move = live)
+      let prevS = textureLoad(specHistory, indexUV, 0).rgb;
+      textureStore(specTex, indexUV, vec4f(mix(prevS, spec, blendAlpha), 1.0));
       return vec4f(0.0);
     }
 
     // helpers AFTER compute — Tint accepts module-scope forward references
     // (verified by probe), and compute must stay first for three's parser.
+    // (A struct declared BEFORE compute would break that parser: three's WGSL
+    // function regex must match 'fn ...' at the very start of the source.)
+
+    // Direct-light sample: diffuse irradiance (goes through the albedo
+    // multiply in the composite) + specular radiance (must NOT — the
+    // composite adds it un-multiplied, so a highlight keeps the light's
+    // colour). One struct return because WGSL has no multi-value returns.
+    struct DirectLight {
+      diffuse: vec3f,
+      specular: vec3f,
+    }
+
     fn hash12(coordinate: vec2f) -> f32 {
       var h3 = fract(vec3f(coordinate.xyx) * 0.1031);
       h3 += dot(h3, h3.yzx + 33.33);
@@ -595,42 +739,93 @@ export function createAdvancedRenderer(
       return vec4f(lightPt, 1.0);
     }
 
-    fn directLight(li: u32, P: vec3f, N: vec3f, albedoScale: f32, seed: vec2f, soft: f32, gain: f32) -> vec3f {
+    // Per-material specular lobe for direct NEE: Cook-Torrance
+    //   f = π · D · F · G / (4 · NdotV · NdotL)
+    // GGX (Trowbridge-Reitz) normal distribution, Schlick Fresnel with a
+    // dielectric F0 = 0.04 (Blender/Principled default — gloss without
+    // metalness; the scope here is colour + gloss only), Smith-style
+    // Schlick-GGX geometry. The π factor matches this renderer's diffuse
+    // convention: the composite does albedo × buffer (Lambert WITHOUT 1/π —
+    // the light-power heuristic was tuned that way), so specular scales the
+    // same way or it would read ~3× too dim next to diffuse.
+    fn specularLobe(N: vec3f, V: vec3f, L: vec3f, rough: f32) -> f32 {
+      let a = max(rough * rough, 0.0016); // α = roughness² (glTF), floored at 0.04
+      let a2 = a * a;
+      let H = normalize(V + L);
+      let ndoth = max(dot(N, H), 0.0);
+      let ndotv = max(dot(N, V), 1e-3);
+      let ndotl = max(dot(N, L), 1e-3);
+      // D — the lobe WIDTH IS the material gloss: smooth = tight bright dot,
+      // rough = broad dim sheen (and rough ≥ 0.98 never gets here at all)
+      let dDen = ndoth * ndoth * (a2 - 1.0) + 1.0;
+      let D = a2 / (3.14159265 * dDen * dDen);
+      // F — Schlick, F0 = 0.04, rising to 1 at grazing angles
+      let F = 0.04 + 0.96 * pow(1.0 - max(dot(V, H), 0.0), 5.0);
+      // G — Schlick-GGX geometry (k = α²/2), keeps grazing from exploding
+      let k = a2 * 0.5;
+      let G = (ndotl / max(ndotl + k * (1.0 - ndotl), 1e-4))
+        * (ndotv / max(ndotv + k * (1.0 - ndotv), 1e-4));
+      return 3.14159265 * D * F * G / max(4.0 * ndotv * ndotl, 1e-4);
+    }
+
+    fn directLight(
+      li: u32,
+      P: vec3f,
+      N: vec3f,
+      V: vec3f,
+      rough: f32,
+      albedoScale: f32,
+      specScale: f32,
+      seed: vec2f,
+      soft: f32,
+      gain: f32,
+    ) -> DirectLight {
       let b = li * 5u;
       let lp = rt_lights.value[b];
       let lc = rt_lights.value[b + 1u];
       let le = rt_lights.value[b + 2u];
       let ld = rt_lights.value[b + 3u];
       let lq = rt_lights.value[b + 4u];
-      if (lp.w <= 0.0) { return vec3f(0.0); }
+      if (lp.w <= 0.0) { return DirectLight(vec3f(0.0), vec3f(0.0)); }
       // one-way cone: lights only the region the fixture POINTS at (Blender
       // prop cone_deg) — a clipped-through fixture stops lighting its outside
       if (ld.w > -0.5) {
         let toP = normalize(P - lp.xyz);
-        if (dot(toP, ld.xyz) < ld.w) { return vec3f(0.0); }
+        if (dot(toP, ld.xyz) < ld.w) { return DirectLight(vec3f(0.0), vec3f(0.0)); }
       }
       let hasBox = max(le.x, max(le.y, le.z)) > 1e-4;
       let sv = shadowVis(lp, lc, le, lq, P, N, seed, soft);
-      if (sv.w <= 0.0) { return vec3f(0.0); }
+      if (sv.w <= 0.0) { return DirectLight(vec3f(0.0), vec3f(0.0)); }
       // geometry from the SAMPLE for box lights (the sample IS the emitter),
       // from the centre for point lights (legacy behaviour preserved)
       let geom = select(lp.xyz, sv.xyz, hasBox);
       let toL = geom - P;
       let d2 = dot(toL, toL);
       let dist = sqrt(d2);
-      if (dist < 1e-4) { return vec3f(0.0); }
+      if (dist < 1e-4) { return DirectLight(vec3f(0.0), vec3f(0.0)); }
       let L = toL / dist;
       // STRICT N*L (the near-field "spill" wrap that made circular lit patches
       // is gone — embedded fixtures are handled by sampling the mesh surface,
       // which is physically consistent)
       let ndotl = max(dot(N, L), 0.0);
-      if (ndotl <= 0.0) { return vec3f(0.0); }
+      if (ndotl <= 0.0) { return DirectLight(vec3f(0.0), vec3f(0.0)); }
       var w = 1.0;
       if (hasBox) {
         w = faceWeight(lp, le, lq, sv.xyz, P, dist);
-        if (w <= 0.0) { return vec3f(0.0); }
+        if (w <= 0.0) { return DirectLight(vec3f(0.0), vec3f(0.0)); }
       }
-      return lc.rgb * (lp.w * gain * albedoScale * ndotl * w / max(d2, 0.25)) * sv.w;
+      let diffuse = lc.rgb * (lp.w * gain * albedoScale * ndotl * w / max(d2, 0.25)) * sv.w;
+      // Gloss: per-material only — rough ≥ 0.98 skips the lobe entirely (and
+      // ?rtspec=0 skips it for every material = the pre-gloss baseline). The
+      // same shadow sample and the same 1/d² term serve both lobes, so gloss
+      // costs ALU, never a shadow ray.
+      var specular = vec3f(0.0);
+      if (specScale > 0.5 && rough < 0.98) {
+        specular = lc.rgb
+          * (lp.w * gain * albedoScale * w / max(d2, 0.25))
+          * (specularLobe(N, V, L, rough) * ndotl * sv.w);
+      }
+      return DirectLight(diffuse, specular);
     }
 
     // pure visibility term for debug mode: 1 = lit by this light, 0 = shadowed
@@ -661,7 +856,9 @@ export function createAdvancedRenderer(
   const params = {
     lightingTex: textureStore(lightingTex),
     geomTex: textureStore(geomTex),
+    specTex: textureStore(specTex),
     historyTex: texture(historyTex),
+    specHistory: texture(specHistoryTex),
     blendAlpha,
     invViewProj,
     viewMat,
@@ -671,6 +868,7 @@ export function createAdvancedRenderer(
     debugMode,
     softShadow,
     lightGain,
+    specOn,
     workgroupSize,
     workgroupId,
     localId,
@@ -705,6 +903,8 @@ export function createAdvancedRenderer(
     fn copyHistory(
       src: texture_2d<f32>,
       dst: texture_storage_2d<rgba16float, write>,
+      srcSpec: texture_2d<f32>,
+      dstSpec: texture_storage_2d<rgba16float, write>,
       workgroupSize: vec3u,
       workgroupId: vec3u,
       localId: vec3u,
@@ -713,6 +913,9 @@ export function createAdvancedRenderer(
       let indexUV = workgroupSize.xy * workgroupId.xy + localId.xy;
       if (indexUV.x >= dimensions.x || indexUV.y >= dimensions.y) { return vec4f(0.0); }
       textureStore(dst, indexUV, textureLoad(src, indexUV, 0));
+      // specular history follows the diffuse one in the SAME dispatch —
+      // gloss must converge (still camera) and reset (motion) identically
+      textureStore(dstSpec, indexUV, textureLoad(srcSpec, indexUV, 0));
       return vec4f(0.0);
     }
   `;
@@ -720,6 +923,8 @@ export function createAdvancedRenderer(
   const copyNode = copyFn({
     src: texture(lightingTex),
     dst: textureStore(historyTex),
+    srcSpec: texture(specTex),
+    dstSpec: textureStore(specHistoryTex),
     workgroupSize,
     workgroupId,
     localId,
@@ -742,6 +947,8 @@ export function createAdvancedRenderer(
       src: texture_2d<f32>,
       geom: texture_2d<f32>,
       dst: texture_storage_2d<rgba16float, write>,
+      srcSpec: texture_2d<f32>,
+      dstSpec: texture_storage_2d<rgba16float, write>,
       stride: f32,
       projScale: vec2f,
       workgroupSize: vec3u,
@@ -754,11 +961,15 @@ export function createAdvancedRenderer(
 
       let g0 = textureLoad(geom, indexUV, 0);
       let c0 = textureLoad(src, indexUV, 0);
+      // specular rides the SAME edge-aware weights (same surface = same
+      // gloss): a highlight denoises exactly like the light around it
+      let s0 = textureLoad(srcSpec, indexUV, 0);
       // MISS sentinel (view depth < 0): void keeps its own value — averaging
       // a lit neighbour into the background (or the reverse) is precisely the
       // silhouette bleed this pass exists to prevent
       if (g0.w < 0.0) {
         textureStore(dst, indexUV, c0);
+        textureStore(dstSpec, indexUV, s0);
         return vec4f(0.0);
       }
 
@@ -775,6 +986,7 @@ export function createAdvancedRenderer(
       // B3-spline kernel: centre 4, axis 2, corner 1 (sums to 16), then
       // renormalised by whatever survives the edge-stopping weights below
       var acc = c0.rgb * 4.0;
+      var sacc = s0.rgb * 4.0;
       var wsum = 4.0;
       for (var j = -1; j <= 1; j++) {
         for (var i = -1; i <= 1; i++) {
@@ -784,6 +996,7 @@ export function createAdvancedRenderer(
           let g1 = textureLoad(geom, p, 0);
           if (g1.w < 0.0) { continue; }   // void neighbour: no weight
           let c1 = textureLoad(src, p, 0);
+          let s1 = textureLoad(srcSpec, p, 0);
 
           let uv1 = (vec2f(p) + vec2f(0.5)) / dims;
           let ndc1 = uv1 * 2.0 - 1.0;
@@ -802,10 +1015,12 @@ export function createAdvancedRenderer(
           let kw = select(1.0, 2.0, i == 0 || j == 0);
           let w = kw * wn * wz;
           acc += c1.rgb * w;
+          sacc += s1.rgb * w;
           wsum += w;
         }
       }
       textureStore(dst, indexUV, vec4f(acc / max(wsum, 1e-6), c0.a));
+      textureStore(dstSpec, indexUV, vec4f(sacc / max(wsum, 1e-6), 1.0));
       return vec4f(0.0);
     }
   `;
@@ -813,11 +1028,18 @@ export function createAdvancedRenderer(
   /** stride values for iterations 0..3 — set on the shared uniform right
    *  before each dispatch so all four nodes compile to ONE shader */
   const DENOISE_STEPS = [1, 2, 4, 8];
-  const mkDenoise = (src: THREE.Texture, dst: THREE.StorageTexture) =>
+  const mkDenoise = (
+    src: THREE.Texture,
+    dst: THREE.StorageTexture,
+    specSrc: THREE.Texture,
+    specDst: THREE.StorageTexture,
+  ) =>
     denoiseFn({
       src: texture(src),
       geom: texture(geomTex),
       dst: textureStore(dst),
+      srcSpec: texture(specSrc),
+      dstSpec: textureStore(specDst),
       stride: atrousStep,
       projScale,
       workgroupSize,
@@ -825,15 +1047,19 @@ export function createAdvancedRenderer(
       localId,
     }).computeKernel([WORKGROUP, WORKGROUP, 1]) as KernelNode;
   // ping-pong: lightingTex → A → B → A → B ; after k passes the result sits
-  // in A for odd k, B for even k (k = 0 means "no spatial pass at all")
+  // in A for odd k, B for even k (k = 0 means "no spatial pass at all").
+  // The specular twins follow the SAME parity so gloss and the diffuse
+  // lighting around it are always the same iteration's output.
   const denoiseNodes = [
-    mkDenoise(lightingTex, denoiseTexA),
-    mkDenoise(denoiseTexA, denoiseTexB),
-    mkDenoise(denoiseTexB, denoiseTexA),
-    mkDenoise(denoiseTexA, denoiseTexB),
+    mkDenoise(lightingTex, denoiseTexA, specTex, specDenoiseA),
+    mkDenoise(denoiseTexA, denoiseTexB, specDenoiseA, specDenoiseB),
+    mkDenoise(denoiseTexB, denoiseTexA, specDenoiseB, specDenoiseA),
+    mkDenoise(denoiseTexA, denoiseTexB, specDenoiseA, specDenoiseB),
   ];
   const denoiseOut: THREE.Texture =
     rtnd === 0 ? lightingTex : rtnd % 2 === 1 ? denoiseTexA : denoiseTexB;
+  const specOut: THREE.Texture =
+    rtnd === 0 ? specTex : rtnd % 2 === 1 ? specDenoiseA : specDenoiseB;
 
   // ---- composite + bloom ------------------------------------------------------------
   const rtFlag = uniform(0);
@@ -863,31 +1089,59 @@ export function createAdvancedRenderer(
       const rawN = texture(lightingTex, lightingUv);
       const denN = texture(denoiseOut, lightingUv);
       const bufferN = mix(denN, rawN, step(2.5, rtFlag));
+      // specular buffer (per-material gloss), denoised in lockstep: mixed the
+      // same way so ?rtdebug=3 stays RAW — including its raw specular, which
+      // is lighting too
+      const specRawN = texture(specTex, lightingUv);
+      const specDenN = texture(specOut, lightingUv);
+      const specN = mix(specDenN, specRawN, step(2.5, rtFlag));
       const lit = diffuseN.mul(denN).add(emissiveN);
+      // Gloss is added UN-multiplied by albedo (a highlight is tinted by the
+      // light, not the wall) — but masked on EMISSIVE pixels: the primary ray
+      // passes straight through a fixture (fixtures are excluded from the
+      // BVH), so the spec computed there belongs to the hidden wall behind it
+      // and must not glow on top of the fixture's own emission.
+      const emMask = vec3(1.0, 1.0, 1.0).sub(emissiveN.rgb.clamp(0.0, 1.0));
+      const beautyRgb = lit.rgb.add(specN.rgb.mul(emMask));
       // Volumetrics composites over the FINAL image (denoised lighting ×
-      // albedo + emissive) so fixtures get hazed too (reference/vibe.png):
-      // premultiplied fog — final = beauty·T + S, rgb only, beauty alpha kept.
+      // albedo + emissive + gloss) so fixtures get hazed too (reference/
+      // vibe.png): premultiplied fog — final = beauty·T + S, rgb only, beauty
+      // alpha kept. Gloss therefore hazes with everything else — no special
+      // case, same composite order.
       // Built into the fog composite ONLY: render() picks the plain graph
-      // whenever the toggle/debug view is off, so that shader stays byte-
-      // identical to the pre-volumetrics one ("off must cost nothing").
+      // whenever the toggle/debug/material view is off, so that shader
+      // carries no fog code at all ("off must cost nothing").
       // Buffer views (rtFlag ≥ 2) never reach this branch — ?rtdebug=3 raw
       // stays raw even with the toggle on.
       const fogN = fog ? texture(volPass.fogTexture, lightingUv) : null;
       const traced = fogN
-        ? vec4(lit.rgb.mul(fogN.a).add(fogN.rgb), lit.a)
-        : lit;
+        ? vec4(beautyRgb.mul(fogN.a).add(fogN.rgb), lit.a)
+        : vec4(beautyRgb, lit.a);
       const rtColor = mix(beauty, traced, step(0.5, rtFlag));
-      const shown = mix(rtColor, vec4(bufferN.rgb, 1.0), step(1.5, rtFlag));
-      return shown.add(bloom(shown, 0.5, 0.5, 0.75));
+      const bufferShown = vec4(bufferN.rgb.add(specN.rgb), 1.0);
+      const shown = mix(rtColor, bufferShown, step(1.5, rtFlag));
+      // ?rtmat=1|2 — material inspection views: EXACT buffer values (albedo /
+      // specular), no bloom, no fog — the grid readbacks in rt-mat-smoke.mjs
+      // measure these directly
+      const matShown = mix(
+        vec4(diffuseN.rgb, 1.0),
+        vec4(specN.rgb, 1.0),
+        step(1.5, matView),
+      );
+      const viewShown = mix(shown, matShown, step(0.5, matView));
+      const bloomed = viewShown.add(bloom(viewShown, 0.5, 0.5, 0.75));
+      return mix(bloomed, viewShown, step(0.5, matView));
     })();
 
-  // TWO composites built once at construction: the plain graph is the pre-1b
-  // shader (toggle off → zero composite cost, no rebuild churn on toggling),
-  // the fog graph adds `beauty·T + S`. Tier changes never rebuild either —
-  // volumetricScale only resizes the fog TEXTURE inside the pass.
+  // TWO composites built once at construction: the plain graph carries the
+  // whole frame (albedo/lighting/emissive/gloss + bloom, but no fog code —
+  // toggle off → no fog cost, no rebuild churn on toggling), the fog graph
+  // adds `beauty·T + S`. Tier changes never rebuild either — volumetricScale
+  // only resizes the fog TEXTURE inside the pass.
   const buildPost = (fog: boolean): THREE.RenderPipeline => {
     const p = new THREE.RenderPipeline(renderer);
-    // each build already includes bloom over whatever branch it displays
+    // each build includes bloom over the normal branches (the ?rtmat
+    // inspection views mix it out — they show exact buffer values)
     p.outputNode = makeFinalColor(fog);
     return p;
   };
@@ -924,6 +1178,10 @@ export function createAdvancedRenderer(
       geomTex.setSize(w, h, 1);
       denoiseTexA.setSize(w, h, 1);
       denoiseTexB.setSize(w, h, 1);
+      specTex.setSize(w, h, 1);
+      specHistoryTex.setSize(w, h, 1);
+      specDenoiseA.setSize(w, h, 1);
+      specDenoiseB.setSize(w, h, 1);
       historyReset = true;
     }
   };
@@ -1015,13 +1273,14 @@ export function createAdvancedRenderer(
       // ---- volumetrics (phase 1b) ------------------------------------------
       // The sacred toggle: volumetrics OFF (enabled() = settings.volumetrics)
       // releases the fog buffers (back to 1×1 — no texture cost) and
-      // dispatches NOTHING; render() then picks postPlain, the pre-
-      // volumetrics shader. Debug views skip the march too: rtdebug=1|2|3
+      // dispatches NOTHING; render() then picks postPlain, the no-fog graph.
+      // Debug views skip the march too: rtdebug=1|2|3
       // are raw buffer diagnostics and fog must never tint them (the
-      // raw-buffer view in particular stays honestly raw).
+      // raw-buffer view in particular stays honestly raw). Material
+      // inspection views (?rtmat=1|2) are raw-buffer reads as well.
       if (!volPass.enabled(settings)) {
         volPass.release();
-      } else if (debugMode.value < 0.5) {
+      } else if (debugMode.value < 0.5 && matView.value < 0.5) {
         volPass.dispatch(renderer, {
           logicalW,
           logicalH,
@@ -1045,8 +1304,8 @@ export function createAdvancedRenderer(
     render(): void {
       if (!ranThisFrame) rtFlag.value = 0;
       // fog marched this frame → fog composite; otherwise the plain graph,
-      // whose shader is identical to the pre-volumetrics build (toggle off /
-      // debug views cost exactly what they cost before phase 1b)
+      // which contains no fog code at all (toggle off / debug / material
+      // views cost exactly what no-fog costs)
       (volActive ? postFog : postPlain).render();
     },
     setLogicalSize(width: number, height: number): void {
@@ -1087,6 +1346,10 @@ export function createAdvancedRenderer(
       geomTex.dispose();
       denoiseTexA.dispose();
       denoiseTexB.dispose();
+      specTex.dispose();
+      specHistoryTex.dispose();
+      specDenoiseA.dispose();
+      specDenoiseB.dispose();
       scenePass.dispose();
     },
   };

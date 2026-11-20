@@ -1,13 +1,15 @@
 /**
  * RT lighting FPS benchmark — headful Chromium WebGPU.
  *
- *   node scripts/rt-perf-fps.mjs [http://localhost:5177] [high,ultra] [vol-mode]
+ *   node scripts/rt-perf-fps.mjs [http://localhost:5177] [high,ultra] [vol-mode] [extra-query]
  *
- * vol-mode (phase 1b, optional3rd arg): '' = tier default · 'off' forces
+ * vol-mode (phase 1b, optional 3rd arg): '' = tier default · 'off' forces
  * settings.volumetrics=false after the tier pick (the "toggle off must cost
  * nothing" A/B — must equal the pre-volumetrics baseline) · 'on' forces it
  * true. Each run also prints window.__liminal.volStats so the fog dispatch
  * count proves which side of the toggle was actually measured.
+ * extra-query (optional 4th arg): appended to the boot URL — used for the
+ * per-material gloss A/B (`rtspec=0` = specular branch skipped).
  *
  * For each tier: boots the game fresh (localStorage cleared so no persisted
  * tier/override leaks in), sets the tier via __liminal.quality, warms up
@@ -29,6 +31,9 @@ import puppeteer from 'puppeteer-core';
 const BASE = process.argv[2] ?? 'http://localhost:5177';
 const TIERS = (process.argv[3] ?? 'high,ultra').split(',').map((s) => s.trim()).filter(Boolean);
 const VOL = (process.argv[4] ?? '').trim(); // '' | 'off' | 'on'
+// Optional 5th arg: extra URL query for the boot (e.g. rtspec=0) — the
+// per-material specular A/B: same build, gloss branch skipped vs enabled.
+const EXTRA = (process.argv[5] ?? '').trim();
 const CHROME = '/usr/bin/chromium';
 const XDG = '/tmp/opencode/chromium-xdg-clean';
 const WARMUP_MS = 4000;
@@ -57,8 +62,8 @@ async function measure(tier) {
       sessionStorage.clear();
     } catch { /* ignore */ }
   });
-  console.log(`\n== tier=${tier}`);
-  await page.goto(`${BASE}/`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  console.log(`\n== tier=${tier}${EXTRA ? ` (${EXTRA})` : ''}`);
+  await page.goto(`${BASE}/${EXTRA ? `?${EXTRA}` : ''}`, { waitUntil: 'domcontentloaded', timeout: 30000 });
   for (let i = 0; i < 150; i++) {
     if (await page.evaluate(() => window.__liminalReady === true).catch(() => false)) break;
     await sleep(200);

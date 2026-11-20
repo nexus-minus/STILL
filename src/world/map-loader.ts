@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
-import { buildTestRoom } from './test-room.js';
+import { buildTestRoom, type TestRoom } from './test-room.js';
 import type { RtLight } from '../render/rt.js';
 
 export interface WorldCheckpoint {
@@ -280,9 +280,17 @@ export function fixtureExposed(
  * emission strength × largest-face area is the power heuristic (tuned later).
  */
 export async function loadWorld(opts: { forceTest?: boolean } = {}): Promise<WorldDef> {
-  if (opts.forceTest) {
-    console.info('[world] testroom requested — using the procedural test room');
-    return testWorld();
+  // ?matroom — material A/B scene for scripts/rt-mat-smoke.mjs: the demo
+  // room PLUS two spheres with deliberately different colour + gloss under
+  // one mesh fixture, so per-material colour and per-material specular are
+  // read back from the same frame. Flag-only: steptest / settings-test boot
+  // ?testroom (or the plain map) and must see the untouched world.
+  const matroom = new URLSearchParams(location.search).has('matroom');
+  if (opts.forceTest || matroom) {
+    console.info(
+      `[world] ${opts.forceTest ? 'testroom' : 'matroom'} requested — using the procedural test room`,
+    );
+    return testWorld(matroom);
   }
   const manifest = (await fetch('map/manifest.json')
     .then((r) => (r.ok ? r.json() : null))
@@ -538,9 +546,102 @@ export async function loadWorld(opts: { forceTest?: boolean } = {}): Promise<Wor
   };
 }
 
+/**
+ * ?matroom extras — the material A/B pair for scripts/rt-mat-smoke.mjs.
+ *
+ * Two spheres, same size, same fixture, deliberately different COLOUR and
+ * GLOSS (the Blender authoring loop the export targets: Principled BSDF →
+ * base colour + roughness), plus a cube carrying the real map's material
+ * (0.8 grey, roughness 0.9) so the tie-in to objects.glb is measurable.
+ * One MESH fixture (extents set → box-surface NEE, the same path the Blender
+ * map's lights take) hangs above them; its emissive box stays OUT of
+ * collisionMeshes so it never occludes its own light (same rule as the
+ * ceiling panels). The spheres go INTO collisionMeshes, i.e. into the shadow
+ * BVH, so primary rays hit them and their per-vertex roughness is what the
+ * lighting kernel reads.
+ */
+function addMaterialPair(room: TestRoom): void {
+  const sphere = (
+    x: number,
+    color: number,
+    roughness: number,
+    name: string,
+  ): THREE.Mesh => {
+    const mesh = new THREE.Mesh(
+      new THREE.SphereGeometry(0.7, 48, 32),
+      new THREE.MeshStandardMaterial({ color, roughness }),
+    );
+    mesh.position.set(x, 0.7, 21);
+    mesh.name = name;
+    room.group.add(mesh);
+    room.collisionMeshes.push(mesh);
+    return mesh;
+  };
+  sphere(-1.9, 0x27c2b4, 0.1, 'mat-smooth'); // glossy: tight highlight
+  sphere(1.9, 0xcf6a2c, 0.95, 'mat-rough');  // matte: must stay unchanged
+  const grey = new THREE.Mesh(
+    new THREE.BoxGeometry(1, 1, 1),
+    new THREE.MeshStandardMaterial({ color: 0xe7e7e7, roughness: 0.9 }),
+  );
+  grey.position.set(0, 0.5, 23.8);
+  grey.name = 'mat-mapgrey';
+  room.group.add(grey);
+  room.collisionMeshes.push(grey);
+
+  const fixture = new THREE.Mesh(
+    new THREE.BoxGeometry(1.4, 0.1, 1.4),
+    new THREE.MeshStandardMaterial({
+      color: 0x000000,
+      emissive: 0xfff3d8,
+      emissiveIntensity: 5,
+    }),
+  );
+  fixture.position.set(0, 3.0, 21);
+  fixture.name = 'mat-fixture';
+  room.group.add(fixture); // no collision → not in the shadow BVH
+
+  // Mesh light: power = emission strength × face area (map-loader's
+  // heuristic for the real export), extents = local half-extents
+  const c = new THREE.Color(0xfff3d8).convertSRGBToLinear();
+  room.rtLights.push({
+    position: [0, 3.0, 21],
+    color: [c.r, c.g, c.b],
+    power: 5 * 1.4 * 1.4,
+    halfSize: 0.7,
+    extents: [0.7, 0.05, 0.7],
+  });
+
+  // SPARK: a small, high-RADIANCE fixture (radiance ≈ strength/π, so a 0.16 m
+  // emitter at intensity 100 reflects ≈ F0 × strength ≈ 4 linear on a smooth
+  // surface — a crisp highlight, where the big panel above can only paint a
+  // dim wide smear of the same energy). Positioned camera-side of the pair so
+  // the mirror image lands on the spheres' visible faces. Dim enough
+  // (power = strength × face area ≈ 2.6, spread over the room) that it barely
+  // changes diffuse.
+  const spark = new THREE.Mesh(
+    new THREE.BoxGeometry(0.16, 0.16, 0.16),
+    new THREE.MeshStandardMaterial({
+      color: 0x000000,
+      emissive: 0xfff3d8,
+      emissiveIntensity: 100,
+    }),
+  );
+  spark.position.set(0, 2.3, 19.6);
+  spark.name = 'mat-spark';
+  room.group.add(spark);
+  room.rtLights.push({
+    position: [0, 2.3, 19.6],
+    color: [c.r, c.g, c.b],
+    power: 100 * 0.16 * 0.16,
+    halfSize: 0.08,
+    extents: [0.08, 0.08, 0.08],
+  });
+}
+
 /** Procedural fallback — the demo content used until a real map exists. */
-function testWorld(): WorldDef {
+function testWorld(matroom = false): WorldDef {
   const room = buildTestRoom();
+  if (matroom) addMaterialPair(room);
   const bounds = new THREE.Box3().setFromObject(room.group);
   return {
     group: room.group,

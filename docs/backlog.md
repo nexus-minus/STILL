@@ -194,3 +194,10 @@ Decision: **per-material raytraced reflections** on the WebGPU path —
 
 Slots into the queue **right after materials** (it consumes their
 roughness). SSR permanently rejected for the main path.
+
+**Roughness batch ready (materials landed 2026-11-20):** per-hit
+`roughness` already rides the BVH vertex attributes
+(`bvh_sampleTrianglePoint(...).roughness`), the specular buffer with
+temporal/à-trous runs in lockstep with the lighting buffer, `?matroom`
+provides the A/B scene (smooth vs matte spheres) and `?rtspec=0` is the
+no-gloss baseline. Reflections consume exactly this roughness.
