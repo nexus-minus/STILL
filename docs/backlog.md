@@ -64,3 +64,30 @@ keep the light list identical so bake and runtime paths agree visually.
 
 Shadow visibility is now part of `?rtdebug=2` (bright green = lit,
 dark green = in shadow) — see `docs/render-pipeline.md`.
+
+## 6. Jump / movement edge cases (user-reported 2026-11-20, DEFERRED)
+
+User: "there are some bugs still in jumping and other parts" after the
+momentum overhaul (e621684) — agreed to fix later, once repros exist.
+Likely suspects when picking this up: the additive jump impulse
+(`max(vy,0) + jumpSpeed`), airborne slope-stick, and jump-on-slope /
+jump-into-ceiling interactions with the new momentum model.
+
+## 7. Interaction feedback = world reacts only (design contract, 2026-11-20)
+
+Toasts default OFF ("nearly nothing" UI), so **every E-interaction must
+visibly change the world** (checkpoint color change, door opens, light
+shifts). Authoring rule: an interaction whose only feedback was a message
+needs a world reaction instead. No UI prompts, no toast dependency.
+
+## 8. Auto-chunking + light culling (engine roadmap, 2026-11-20)
+
+- **User will NEVER split the map manually** — chunking must be automatic
+  (engine/exporter side) and invisible to the authoring workflow.
+- Short term: **light-distance culling** in the shader (far lights cost
+  nothing per pixel — the advisory's "limit light distance" point).
+- When map size demands it: automatic spatial chunking at export (triangle
+  binning, no manual collections), per-chunk BVHs, distance-based unload,
+  per-chunk light lists via the existing `setLights()` hook. Until then a
+  single BVH at load is fine (build time + memory are the only costs that
+  grow; rays are short-range and raster is frustum-culled already).
