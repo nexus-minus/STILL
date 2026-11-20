@@ -151,26 +151,55 @@ export function createAdvancedRenderer(
   historyTex.format = THREE.RGBAFormat;
   historyTex.minFilter = THREE.LinearFilter;
   historyTex.magFilter = THREE.LinearFilter;
+  // per-pixel geometry guide for the à-trous denoise: primary-hit world normal
+  // (view-facing) in .xyz, linear view-space depth in .w. MISS pixels carry
+  // the sentinel -1 so the filter never averages across a silhouette.
+  const geomTex = new THREE.StorageTexture(1, 1);
+  geomTex.type = THREE.HalfFloatType;
+  geomTex.format = THREE.RGBAFormat;
+  geomTex.minFilter = THREE.NearestFilter;
+  geomTex.magFilter = THREE.NearestFilter;
+  // à-trous ping-pong buffers (only ever read via textureLoad, so Nearest is
+  // fine for the passes; the composite samples the final one, hence Linear)
+  const denoiseTexA = new THREE.StorageTexture(1, 1);
+  denoiseTexA.type = THREE.HalfFloatType;
+  denoiseTexA.format = THREE.RGBAFormat;
+  denoiseTexA.minFilter = THREE.LinearFilter;
+  denoiseTexA.magFilter = THREE.LinearFilter;
+  const denoiseTexB = new THREE.StorageTexture(1, 1);
+  denoiseTexB.type = THREE.HalfFloatType;
+  denoiseTexB.format = THREE.RGBAFormat;
+  denoiseTexB.minFilter = THREE.LinearFilter;
+  denoiseTexB.magFilter = THREE.LinearFilter;
 
   // ---- uniforms -----------------------------------------------------------------
   const invViewProj = uniform(new THREE.Matrix4());
+  /** same matrix invViewProj is built from — turns a primary hit into a
+   *  view-space depth for the à-trous edge-stopping weights */
+  const viewMat = uniform(new THREE.Matrix4());
   const frameIndex = uniform(0);
   const lightCount = uniform(lights.length);
   const bounceCount = uniform(0);
   const debugMode = uniform(0);
   /** area-jittered surface samples on / legacy single-tap off — ?rtsoft=0 = A/B */
   const softShadow = uniform(new URLSearchParams(location.search).get('rtsoft') === '0' ? 0 : 1);
+  /** ?rtnd=N — à-trous iterations, 0 = spatial denoise off (default 4) */
+  const rtndRaw = new URLSearchParams(location.search).get('rtnd');
+  const rtnd = rtndRaw !== null && /^[0-4]$/.test(rtndRaw) ? Number(rtndRaw) : 4;
   /** temporal blend: 1 = live frame (moving), <1 = accumulate */
   const blendAlpha = uniform(1);
   /** runtime intensity multiplier (settings slider) — multiplied in-shader */
   const lightGain = uniform(1);
-  // Precomputed4-tap offsets: TSL miscompiles unary minus on swizzle
-  // components inside vec2(...) (it emitted literal NaN.0 into WGSL and broke
-  // every fragment pipeline) — no node arithmetic, just four uniforms.
-  const tapNE = uniform(new THREE.Vector2(1, 1));
-  const tapSW = uniform(new THREE.Vector2(-1, -1));
-  const tapSE = uniform(new THREE.Vector2(1, -1));
-  const tapNW = uniform(new THREE.Vector2(-1, 1));
+  /** à-trous stride — mutated before EACH dispatch: three re-reads uniform
+   *  values per compute call (objectGroup is NodeUpdateType.OBJECT, so the
+   *  binding is re-serialised every time), and all four passes share this one
+   *  uniform node so their generated shader — hence their pipeline — is
+   *  identical. Values are set in dispatch(), never here. */
+  const atrousStep = uniform(1);
+  /** projection scale (P00, P11) — reconstructs view-space positions from
+   *  (ndc, depth) inside the denoise kernel, which is what turns the depth
+   *  test into a true tangent-plane distance instead of a naive Δz */
+  const projScale = uniform(new THREE.Vector2(1, 1));
   const workgroupSize = uniform(new THREE.Vector3(WORKGROUP, WORKGROUP, 1));
 
   // ---- UNCAPPED LIGHT LIST ------------------------------------------------
@@ -251,9 +280,11 @@ export function createAdvancedRenderer(
     // return vec4f and let the caller discard it (Tint-verified accepted).
     fn compute(
       lightingTex: texture_storage_2d<rgba16float, write>,
+      geomTex: texture_storage_2d<rgba16float, write>,
       historyTex: texture_2d<f32>,
       blendAlpha: f32,
       invViewProj: mat4x4f,
+      viewMat: mat4x4f,
       frameIndex: f32,
       lightCount: f32,
       bounceCount: f32,
@@ -278,6 +309,10 @@ export function createAdvancedRenderer(
       // debug modes (?rtdebug=1|2) — written before any ray math so each
       // stage of the pipeline can be isolated with one screenshot
       if (debugMode > 0.5 && debugMode < 1.5) {
+        // no rays are traced here, so the geometry guide gets the MISS
+        // sentinel: the à-trous pass passes such pixels through untouched and
+        // the uv gradient is displayed exactly as written
+        textureStore(geomTex, indexUV, vec4f(0.0, 0.0, 0.0, -1.0));
         textureStore(lightingTex, indexUV, vec4f(uv, 0.3, 1.0));
         return vec4f(0.0);
       }
@@ -289,6 +324,10 @@ export function createAdvancedRenderer(
       bvh_RaycastFirstHit(ray, &hit);
 
       if (!hit.didHit) {
+        // MISS sentinel (view depth -1): the spatial filter must never average
+        // geometry into the void or the void into geometry — that is exactly
+        // the silhouette bleed this guide exists to stop
+        textureStore(geomTex, indexUV, vec4f(0.0, 0.0, 0.0, -1.0));
         // debug2 promises "red = miss" (HUD + comment below) — paint it so
         // void/seam pixels are unmistakable instead of blending to black
         if (debugMode > 1.5 && debugMode < 2.5) {
@@ -312,7 +351,15 @@ export function createAdvancedRenderer(
         if (dot(sn, -ray.direction) < 0.0) { sn = -sn; }
         if (dot(sn, N) > 0.5) { N = sn; }
       }
-      let P = ray.origin + ray.direction * hit.dist + N * 0.04; // clears thin overlaps
+      let hitP = ray.origin + ray.direction * hit.dist;
+      // per-pixel geometry guide for the à-trous denoise: the same
+      // view-facing normal shading uses, rotated into VIEW space, plus linear
+      // view depth (positive in front of the camera). Written for every hit —
+      // the spatial filter stops at whatever this texture says is an edge.
+      let vp = viewMat * vec4f(hitP, 1.0);
+      let vn = (viewMat * vec4f(N, 0.0)).xyz;
+      textureStore(geomTex, indexUV, vec4f(vn, 0.0 - vp.z));
+      let P = hitP + N * 0.04; // clears thin overlaps
 
       var acc = vec3f(0.0);
       let nLights = u32(lightCount + 0.5);
@@ -581,9 +628,11 @@ export function createAdvancedRenderer(
 
   const params = {
     lightingTex: textureStore(lightingTex),
+    geomTex: textureStore(geomTex),
     historyTex: texture(historyTex),
     blendAlpha,
     invViewProj,
+    viewMat,
     frameIndex,
     lightCount,
     bounceCount,
@@ -644,6 +693,116 @@ export function createAdvancedRenderer(
     localId,
   }).computeKernel([WORKGROUP, WORKGROUP, 1]) as KernelNode;
 
+  // ---- À-TROUS EDGE-AWARE DENOISE (SVGF-lite) ------------------------------
+  // Spatial pass over the temporally-blended lighting buffer: four dispatches
+  // at strides 1,2,4,8, ping-ponging A/B (never read+write the same texture in
+  // one usage scope — same rule as lightingTex/historyTex above). The
+  // edge-stopping weights come from geomTex (primary-hit view normal + view
+  // depth), so noise averages away ON a surface while bright light can never
+  // cross a silhouette or a corner — which is exactly what the depth-blind
+  // 5-tap cross in the composite used to do.
+  //
+  // No luminance term on purpose: luminance variance IS the noise we are
+  // removing, so weighting by it would preserve the very speckle this pass
+  // exists to kill. Geometry edges are what made corners glow.
+  const denoiseSource = /* wgsl */ `
+    fn denoise(
+      src: texture_2d<f32>,
+      geom: texture_2d<f32>,
+      dst: texture_storage_2d<rgba16float, write>,
+      stride: f32,
+      projScale: vec2f,
+      workgroupSize: vec3u,
+      workgroupId: vec3u,
+      localId: vec3u,
+    ) -> vec4f {
+      let dimensions = textureDimensions(src);
+      let indexUV = workgroupSize.xy * workgroupId.xy + localId.xy;
+      if (indexUV.x >= dimensions.x || indexUV.y >= dimensions.y) { return vec4f(0.0); }
+
+      let g0 = textureLoad(geom, indexUV, 0);
+      let c0 = textureLoad(src, indexUV, 0);
+      // MISS sentinel (view depth < 0): void keeps its own value — averaging
+      // a lit neighbour into the background (or the reverse) is precisely the
+      // silhouette bleed this pass exists to prevent
+      if (g0.w < 0.0) {
+        textureStore(dst, indexUV, c0);
+        return vec4f(0.0);
+      }
+
+      let dims = vec2f(dimensions);
+      let uv0 = (vec2f(indexUV) + vec2f(0.5)) / dims;
+      let ndc0 = uv0 * 2.0 - 1.0;
+      let z0 = g0.w;
+      let n0 = g0.xyz;
+      // view-space position of the centre tap: for a pinhole camera
+      // x = ndc.x * z / P00, y = ndc.y * z / P11, z_view = -z
+      let p0 = vec3f(ndc0.x * z0 / projScale.x, ndc0.y * z0 / projScale.y, 0.0 - z0);
+
+      let s = i32(stride);
+      // B3-spline kernel: centre 4, axis 2, corner 1 (sums to 16), then
+      // renormalised by whatever survives the edge-stopping weights below
+      var acc = c0.rgb * 4.0;
+      var wsum = 4.0;
+      for (var j = -1; j <= 1; j++) {
+        for (var i = -1; i <= 1; i++) {
+          if (i == 0 && j == 0) { continue; }
+          let p = vec2i(i32(indexUV.x), i32(indexUV.y)) + vec2i(i * s, j * s);
+          if (p.x < 0 || p.y < 0 || p.x >= i32(dimensions.x) || p.y >= i32(dimensions.y)) { continue; }
+          let g1 = textureLoad(geom, p, 0);
+          if (g1.w < 0.0) { continue; }   // void neighbour: no weight
+          let c1 = textureLoad(src, p, 0);
+
+          let uv1 = (vec2f(p) + vec2f(0.5)) / dims;
+          let ndc1 = uv1 * 2.0 - 1.0;
+          let z1 = g1.w;
+          let p1 = vec3f(ndc1.x * z1 / projScale.x, ndc1.y * z1 / projScale.y, 0.0 - z1);
+
+          // normal similarity: a 90° corner stops dead, smooth shading passes
+          let nd = clamp(dot(n0, g1.xyz), 0.0, 1.0);
+          let wn = pow(max(nd, 1e-6), 32.0);
+          // depth: distance from the centre's tangent PLANE. Zero on a slanted
+          // surface at ANY stride (so grazing floors still filter), metres
+          // across a silhouette (so light never crosses it)
+          let dz = abs(dot(n0, p1 - p0));
+          let wz = exp(-dz / (0.01 * z0 + 1e-4));
+          // axis taps weigh 2, corners 1
+          let kw = select(1.0, 2.0, i == 0 || j == 0);
+          let w = kw * wn * wz;
+          acc += c1.rgb * w;
+          wsum += w;
+        }
+      }
+      textureStore(dst, indexUV, vec4f(acc / max(wsum, 1e-6), c0.a));
+      return vec4f(0.0);
+    }
+  `;
+  const denoiseFn = wgslFn(denoiseSource, [] as never);
+  /** stride values for iterations 0..3 — set on the shared uniform right
+   *  before each dispatch so all four nodes compile to ONE shader */
+  const DENOISE_STEPS = [1, 2, 4, 8];
+  const mkDenoise = (src: THREE.Texture, dst: THREE.StorageTexture) =>
+    denoiseFn({
+      src: texture(src),
+      geom: texture(geomTex),
+      dst: textureStore(dst),
+      stride: atrousStep,
+      projScale,
+      workgroupSize,
+      workgroupId,
+      localId,
+    }).computeKernel([WORKGROUP, WORKGROUP, 1]) as KernelNode;
+  // ping-pong: lightingTex → A → B → A → B ; after k passes the result sits
+  // in A for odd k, B for even k (k = 0 means "no spatial pass at all")
+  const denoiseNodes = [
+    mkDenoise(lightingTex, denoiseTexA),
+    mkDenoise(denoiseTexA, denoiseTexB),
+    mkDenoise(denoiseTexB, denoiseTexA),
+    mkDenoise(denoiseTexA, denoiseTexB),
+  ];
+  const denoiseOut: THREE.Texture =
+    rtnd === 0 ? lightingTex : rtnd % 2 === 1 ? denoiseTexA : denoiseTexB;
+
   // ---- composite + bloom ------------------------------------------------------------
   const rtFlag = uniform(0);
 
@@ -656,20 +815,24 @@ export function createAdvancedRenderer(
     // mirrors vertically ("stairs on the ceiling"). Diffuse/emissive come
     // from render targets sampled with screenUV natively and must NOT flip.
     const lightingUv = screenUV.mul(vec2(1.0, -1.0)).add(vec2(0.0, 1.0));
-    // 5-tap smoothing: one bounce sample per pixel is inherently noisy — a
-    // one-texel cross average kills most of the shimmer (full temporal
-    // accumulation/denoise is in the backlog)
-    const s0 = texture(lightingTex, lightingUv);
-    const s1 = texture(lightingTex, lightingUv.add(tapNE));
-    const s2 = texture(lightingTex, lightingUv.add(tapSW));
-    const s3 = texture(lightingTex, lightingUv.add(tapSE));
-    const s4 = texture(lightingTex, lightingUv.add(tapNW));
-    const lightingN = s0.mul(0.4).add(s1.add(s2).add(s3).add(s4).mul(0.15));
-    const traced = diffuseN.mul(lightingN).add(emissiveN);
-    // rtFlag: 0 = beauty · 1 = traced (albedo x lighting) · 2 = RAW lighting
-    // (?rtdebug=3 — the un-multiplied buffer, for isolating flat/banding)
+    // The OLD code averaged a depth-blind 5-tap cross here (0.4 centre + 4 ×
+    // 0.15 diagonal). It killed shimmer, but it happily dragged bright light
+    // across silhouettes and into corners — the "light goes through objects"
+    // artefact. The à-trous pass does that job now, guided by geomTex, so the
+    // composite just picks a buffer:
+    //   rtFlag 1 → traced: albedo × DENOISED lighting + emissive (emissive is
+    //              added here raw, never filtered — it is noise-free by
+    //              construction)
+    //   rtFlag 2 → buffer view for ?rtdebug=1|2 (denoised; for debug1 the geom
+    //              guide is all-sentinel so the pass is a no-op anyway)
+    //   rtFlag 3 → buffer view for ?rtdebug=3: RAW temporal buffer, undenoised
+    //              — the raw-lighting diagnostic must stay honest
+    const rawN = texture(lightingTex, lightingUv);
+    const denN = texture(denoiseOut, lightingUv);
+    const bufferN = mix(denN, rawN, step(2.5, rtFlag));
+    const traced = diffuseN.mul(denN).add(emissiveN);
     const rtColor = mix(beauty, traced, step(0.5, rtFlag));
-    const shown = mix(rtColor, vec4(lightingN.rgb, 1.0), step(1.5, rtFlag));
+    const shown = mix(rtColor, vec4(bufferN.rgb, 1.0), step(1.5, rtFlag));
     return shown.add(bloom(shown, 0.5, 0.5, 0.75));  })();
 
   const postPipeline = new THREE.RenderPipeline(renderer);
@@ -700,6 +863,9 @@ export function createAdvancedRenderer(
       texH = h;
       lightingTex.setSize(w, h, 1);
       historyTex.setSize(w, h, 1);
+      geomTex.setSize(w, h, 1);
+      denoiseTexA.setSize(w, h, 1);
+      denoiseTexB.setSize(w, h, 1);
       historyReset = true;
     }
   };
@@ -715,12 +881,6 @@ export function createAdvancedRenderer(
         return;
       }
       resizeTex(settings.lightingScale * pixelRatio);
-      const ex = 1 / texW;
-      const ey = 1 / texH;
-      tapNE.value.set(ex, ey);
-      tapSW.value.set(-ex, -ey);
-      tapSE.value.set(ex, -ey);
-      tapNW.value.set(-ex, ey);
 
       // ---- temporal accumulation control ------------------------------------
       // moving camera or debug view = live frame (no smear); standing still
@@ -757,28 +917,50 @@ export function createAdvancedRenderer(
       // live without touching the buffer
 
       frame++;
+      // Camera matrices are only refreshed by renderer.render(), which runs
+      // AFTER this dispatch (inside advanced.render()). Reading them here
+      // would use LAST frame's pose while the raster G-buffer — drawn a
+      // moment later by render() — uses the current one, i.e. RT lighting
+      // offset from geometry by exactly one frame of camera motion: light
+      // spilling past edges / through objects whenever the player moves.
+      // Refresh first so invViewProj and viewMat describe the pose the
+      // G-buffer is actually drawn with. No-op when the camera is still.
+      cam.updateMatrixWorld();
       invViewProj.value.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse).invert();
+      // same matrix, same moment as invViewProj → the geometry guide lines up
+      // with the rays that produced lightingTex exactly
+      viewMat.value.copy(cam.matrixWorldInverse);
+      projScale.value.set(cam.projectionMatrix.elements[0], cam.projectionMatrix.elements[5]);
       frameIndex.value = frame % 1024;
       bounceCount.value = settings.rtBounces >= 1 ? 1 : 0;
 
+      const gx = Math.ceil(texW / WORKGROUP);
+      const gy = Math.ceil(texH / WORKGROUP);
       kernelNode ??= buildKernel();
-      renderer.compute(kernelNode, [
-        Math.ceil(texW / WORKGROUP),
-        Math.ceil(texH / WORKGROUP),
-        1,
-      ]);
-      // history := current frame (separate pass = separate bindings)
-      renderer.compute(copyNode, [
-        Math.ceil(texW / WORKGROUP),
-        Math.ceil(texH / WORKGROUP),
-        1,
-      ]);
+      renderer.compute(kernelNode, [gx, gy, 1]);
+      // history := current frame (separate pass = separate bindings) — and it
+      // must stay the PRE-denoise temporal result, otherwise the à-trous blur
+      // would feed back into history and compound every frame
+      renderer.compute(copyNode, [gx, gy, 1]);
+      // spatial à-trous AFTER the temporal blend, BEFORE the composite:
+      // temporal → spatial → composite. Each iteration is its own pass (a pass
+      // may not read a texture it writes), and the shared atrousStep uniform
+      // is re-uploaded per dispatch.
+      if (rtnd > 0) {
+        for (let i = 0; i < rtnd; i++) {
+          atrousStep.value = DENOISE_STEPS[i];
+          renderer.compute(denoiseNodes[i], [gx, gy, 1]);
+        }
+      }
       ranThisFrame = true;
-      // Any debug mode (?rtdebug=1|2|3) displays the lighting buffer RAW.
-      // The traced path multiplies by the gbuffer diffuse — and void/seam
-      // pixels have zero diffuse (MRT clear), which multiplied the debug
-      // "red = miss" to black, hiding exactly the holes it exists to show.
-      rtFlag.value = debugMode.value > 0.5 ? 2 : 1;
+      // rtFlag: 0 = beauty · 1 = traced (albedo × DENOISED lighting + emissive)
+      //         · 2 = buffer view (?rtdebug=1|2) · 3 = RAW buffer view
+      //         (?rtdebug=3 — the raw-lighting diagnostic must stay undenoised).
+      // Buffer view rather than traced, because the traced path multiplies by
+      // the gbuffer diffuse — and void/seam pixels have zero diffuse (MRT
+      // clear), which multiplied the debug "red = miss" to black, hiding
+      // exactly the holes it exists to show.
+      rtFlag.value = debugMode.value > 2.5 ? 3 : debugMode.value > 0.5 ? 2 : 1;
     },
     render(): void {
       if (!ranThisFrame) rtFlag.value = 0;
@@ -815,6 +997,9 @@ export function createAdvancedRenderer(
       postPipeline.dispose();
       lightingTex.dispose();
       historyTex.dispose();
+      geomTex.dispose();
+      denoiseTexA.dispose();
+      denoiseTexB.dispose();
       scenePass.dispose();
     },
   };

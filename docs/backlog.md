@@ -41,9 +41,10 @@ keep the light list identical so bake and runtime paths agree visually.
 
 ## 5. Light quality issues (raytracing tuning, reported after wrap-fix)
 
-- **Noise** — partially mitigated (5-tap smoothing of the lighting sample);
-  proper fix = temporal accumulation with motion reprojection + a small
-  denoiser (the original plan's "history buffer").
+- **Noise** — spatial denoiser landed (à-trous, SVGF-lite, guided by view
+  normal + depth; measured motion-noise penalty 2.29× → 1.05×, structure
+  preserved within 1.3%); remaining = motion reprojection for the temporal
+  pass (the original plan's "history buffer").
 - **Leaks through surfaces, especially edges** — two causes: (a) the0.25 m
   self-surface shadow epsilon (needed for embedded fixtures) also skips real
   occluders closer than0.25 m; (b) plane-based levels have *seams* at mesh

@@ -147,19 +147,19 @@ per-frame sample budget small enough for the rest of this recipe to work.
 | stage | game renderer (`src/render/rt.ts`) | comparison page (`/pathtrace.html`) |
 | --- | --- | --- |
 | primary rays / G-buffer | raster MRT `{output, diffuse, emissive}` + BVH primary ray in the lighting compute pass | BVH camera rays, `maxBounces = 4` |
-| direct light | NEE over up to 12 nearest analytic lights; soft-shadow visibility (3 taps jittered over the fixture disc) is landing in the working tree, `?rtsoft=0` keeps the single hard ray | rectangular area-light sampling + MIS |
+| direct light | NEE over mesh lights — one point sampled on each fixture's box surface per pixel per frame (uncapped storage list), `?rtsoft=0` = deterministic face-center ray | rectangular area-light sampling + MIS |
 | indirect | one bounce (the shader caps `rtBounces >= 1` at a single bounce), firefly clamp `0.6`, jittered 0.6 m AO ray + hemisphere ambient | up to 4 bounces, `clampIndirect = 3`, `filterGlossyFactor = 1` |
 | temporal | history texture, `blendAlpha = 0.08` when still (now also in debug views); resets on motion, resize, and debug-mode change — **no reprojection** | full reset on camera move (`updateCamera()`), low-res preview while moving |
-| spatial | 5-tap blur in the composite (0.4 center + 0.15 x 4 diagonal taps) — a smoothing tap, not a denoiser | none (the blit is a bilinear upscale) |
-| denoiser | **none yet** | OIDN with albedo + normal guides — the library runs it only after sampling settles; page-side movement fix in progress |
+| spatial | à-trous edge-aware pass, strides 1/2/4/8, guided by per-pixel view normal + view depth (`geomTex`); runs after temporal, before composite; `?rtnd=0..4` limits it | none (the blit is a bilinear upscale) |
+| denoiser | spatial à-trous (SVGF-lite); `?rtnd=0` disables | OIDN with albedo + normal guides — runs only after sampling settles; movement fix landed on the page |
 | resolution | lighting buffer at `lightingScale` (0.25 on medium) | render-scale slider, default 0.5 |
 | budget | every frame | adaptive frame budget, `targetFrameTime = 14` ms |
 
 **Game renderer.** Phase 1a is a real traced pipeline (G-buffer, NEE shadow
-rays, one bounce, temporal history) but it has no spatial or neural denoiser:
-noise is suppressed only by the temporal blend, the 5-tap smoothing, and the
-firefly clamp. Standing still converges to a clean image; moving shows live,
-noisy quarter-res lighting. The residual noise sources are the single bounce
+rays, one bounce, temporal history) plus an à-trous spatial pass: noise is
+suppressed by the temporal blend, the à-trous pass, and the firefly clamp.
+Standing still converges to a clean image; moving is now near-still quality
+(measured motion-noise penalty 2.29x → 1.05x). The residual noise sources are the single bounce
 sample, the per-frame AO jitter, and the absence of history during motion —
 backlog item 5 tracks this ("proper fix = temporal accumulation with motion
 reprojection + a small denoiser"). Soft-shadow taps (also backlog item 5) are
@@ -218,16 +218,15 @@ smoke script before treating it as landed.
 
 1. **Motion reprojection** so the temporal history survives camera movement
    (backlog item 5).
-2. **A spatial/neural denoise pass over the lighting buffer** — albedo
-   (MRT `diffuse`) and normal (primary BVH hit) are already available as
-   guides; the weights are already vendored (README phase 1b: "volumetrics +
-   denoiser / quality settings — planned").
+2. ~~A spatial/neural denoise pass~~ **DONE** — à-trous spatial pass landed
+   (view normal + depth guides from the primary ray, `?rtnd` A/B knob);
+   OIDN-on-settle also wired on the comparison page. Remaining polish:
+   motion reprojection (item 1).
 3. **Baked static GI** for the environment (backlog item 4) so the traced
    budget only has to cover dynamic light.
-4. **Soft shadows** (backlog item 5) — being implemented in the working tree
-   of `src/render/rt.ts` (jittered visibility taps, A/B via `?rtsoft=0`); the
-   taps only converge while the temporal history is alive, so it pairs with
-   item 1.
+4. ~~Soft shadows~~ **DONE** — fixture-surface sampling replaced the disc
+   taps entirely (one surface point per light per frame; temporal converges
+   the jitter); A/B via `?rtsoft=0`.
 
 ## 4. If we adopt X, we get Y
 

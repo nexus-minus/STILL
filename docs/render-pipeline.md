@@ -47,6 +47,8 @@ optional):
 | `?worker=1` | off | builds mesh BVHs in `GenerateMeshBVHWorker` workers (the game-sized async path); default builds synchronously to isolate worker-BVH bugs from lighting bugs |
 | `?bg=green` | off | green background so missed camera rays are obvious — a green wall of background means the tracer's BVH never sees the map mesh |
 | `?sun` | off | adds a diagnostic `DirectionalLight` at startup (same as the "Diagnostic sun" checkbox) |
+| `?rtsoft=0` | soft on | deterministic face-center shadow ray (hard legacy look) instead of fixture-surface jittered soft shadows |
+| `?rtnd=0..4` | 4 | spatial à-trous denoise iterations (0 = raw lighting only, for A/B) |
 
 ### Recommended production split
 
