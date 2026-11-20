@@ -120,6 +120,15 @@ blender-conventions.md → "Baking". **Remaining: renderer consumption**
 blend the baked static lighting under the realtime layer) — sequenced after
 materials per the plan below.
 
+**Renderer-consumption requirements (user, 2026-11-20) — must hold for
+1:1 Cycles/realtime match without overexposure:**
+1. When a lightmap is present, **exclude baked static lights from the
+   realtime RT light buffer** — static lights must not be double-lit;
+   realtime rays serve only animated/dynamic lights.
+2. If the 8-bit sRGB `lightmap.png` clips bright highlights under AgX,
+   **re-encode the bake as RGBM (or half-float HDR)** so fixtures keep
+   smooth Cycles falloff instead of clipping white-hot.
+
 Promotes item 4 to the full production split: **Cycles-baked static
 lightmaps for all static fixtures + the realtime mesh-light layer for
 anything dynamic** — static lighting becomes noise-free at 60 fps on any
