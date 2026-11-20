@@ -48,8 +48,13 @@ console.log(`== ${file} — ${json.meshes?.length ?? 0} meshes, ${json.nodes?.le
 const walk = (n, depth) => {
   const t = n.translation ?? [0, 0, 0];
   const s = n.scale ?? [1, 1, 1];
+  // rotation matters for box-surface light sampling: a non-identity quaternion
+  // means the world AABB half-extents are NOT the mesh's true half-extents
+  const q = n.rotation;
+  const rot = q && (Math.abs(q[0]) > 1e-6 || Math.abs(q[1]) > 1e-6 || Math.abs(q[2]) > 1e-6 || Math.abs(q[3] - 1) > 1e-6)
+    ? ` q=${fmt(q)}` : ' q=identity';
   const mesh = n.mesh !== undefined ? json.meshes?.[n.mesh]?.name : undefined;
-  console.log(`    ${'  '.repeat(depth)}node "${n.name ?? '?'}"${mesh ? ` -> mesh "${mesh}"` : ''} t=${fmt(t)} s=${fmt(s)}`);
+  console.log(`    ${'  '.repeat(depth)}node "${n.name ?? '?'}"${mesh ? ` -> mesh "${mesh}"` : ''} t=${fmt(t)} s=${fmt(s)}${rot}`);
   (n.children ?? []).forEach((c) => walk(json.nodes[c], depth + 1));
 };
 console.log('== node tree');

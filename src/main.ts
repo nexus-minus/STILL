@@ -163,6 +163,12 @@ async function main(): Promise<void> {
     ];
     let nudged = 0;
     for (const light of world.rtLights) {
+      // Mesh lights (extents set) are surface-sampled from their fixture box
+      // by the renderer — displacing the box would detach the light pool from
+      // the glowing mesh. The loader's exposure gate already handles burial
+      // (walk-out only for fully-buried boxes); this legacy pass remains for
+      // point lights without extents (test room).
+      if (light.extents) continue;
       const center = new THREE.Vector3(light.position[0], light.position[1], light.position[2]);
       let blocked = 0;
       let bestDir: THREE.Vector3 | null = null;
@@ -258,7 +264,9 @@ async function main(): Promise<void> {
       console.info('[rt] raytraced lighting armed (medium+ tiers)');
     } catch (err) {
       console.warn('[rt] raytraced path unavailable, using standard path', err);
-      hud.message('raytracing unavailable on this device — standard renderer', 6000);
+      // alert (not message): toasts default OFF since the overlay work —
+      // a construction failure (incl. oversized light list) must stay visible
+      hud.alert('raytracing unavailable on this device — standard renderer', 6000);
       advanced = undefined;
     }
   }

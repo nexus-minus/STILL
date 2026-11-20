@@ -49,13 +49,16 @@ keep the light list identical so bake and runtime paths agree visually.
   occluders closer than0.25 m; (b) plane-based levels have *seams* at mesh
   edges — shadow rays slip through unwelded gaps (authoring fix: weld/thicken
   walls, or we ship collision-proxy boxes for thin walls).
-- **Hard cut-offs** — binary shadow visibility = hard shadow edges. Soft
-  shadows: jitter the shadow ray over the light's sphere (pack fixture radius
-  into lightCol.w), average a few taps.
-- **Light position offset** — embedded fixture centers sit behind the wall, so
-  the spill hotspot shifts toward the room; fix = nudge the analytic light
-  position outward along the host surface normal at load (needs the nearest
-  face normal — Box3-neighborhood sampling at the loader).
+- **Hard cut-offs** — ~~binary shadow visibility = hard shadow edges~~
+  **superseded**: mesh lights sample a jittered point on the fixture's box
+  surface each frame (temporal accumulation converges a fixture-shaped
+  penumbra); `?rtsoft=0` gives a deterministic face-center sample for A/B.
+  Test-room point lights keep the disc jitter (1 tap).
+- **Light position offset** — **done, exposure-gated**: the loader walks
+  fully-buried fixture boxes out into the open; clipped/exposed boxes stay
+  glued to their mesh (a box face is open — see `fixtureExposed()` in
+  `map-loader.ts`) and emit from their exposed faces. The legacy analytic
+  pass in main.ts now skips mesh lights (`light.extents`).
 
 ## Status of the "fix first" item
 

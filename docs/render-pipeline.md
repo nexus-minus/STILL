@@ -68,10 +68,13 @@ are unavailable on web.
 
 ### Current custom renderer limitations
 
-- Emission is approximated by one analytic point sample per fixture. It can
-  never match a rectangular Cycles emitter's shape/falloff, regardless of
-  tuning. **Do not add more point samples**; compare `/pathtrace.html` or move
-  the static environment to baked lightmaps.
+- Emissive geometry **is** the light: one mesh-light entry per fixture
+  (bbox center, local half-extents + orientation, power, cone) and one
+  uniformly sampled point on the fixture's **box surface** per pixel per
+  frame (front-face cosine only; temporal accumulation converges the jitter
+  into a fixture-shaped penumbra). No point-light proxies — a fixture
+  clipped into geometry still emits from its exposed faces. Static
+  environment can still move to baked lightmaps for the potato tier.
 - `rgba16float` fixes the earlier HDR clipping at1.0; it does not make the
   lighting physically based by itself.
 - The temporal history currently resets on camera motion; it improves
@@ -154,8 +157,13 @@ path (see `test-room.ts`).
   `maxColorAttachments: 4` requested) — flat albedo + HDR emissive.
 - **composite**: `diffuse × lighting + emissive` selected against the beauty
   pass by a uniform flag (tier changes never rebuild the graph), then bloom.
-- **lights**: emissive meshes in Blender (`L_*`) → light list (position,
-  linear color, power), max 12, passed as individual uniform vec4 params.
+- **lights**: emissive meshes in Blender → one mesh-light entry each
+  (center, local half-extents + orientation quaternion, linear color, power,
+  cone) in an **uncapped storage buffer** (5 vec4 slots/light, runtime
+  `for (i < lightCount)` loop — no MAX_LIGHTS; a map exceeding
+  `maxStorageBufferBindingSize` fails loudly instead of truncating;
+  mechanism proven by `scripts/rt-storage-probe.mjs`). `setLights()` exists
+  for future chunk-streamed rebuilds.
 - **safety**: construction failure → standard path + on-screen notice;
   WGSL validation error → `uncapturederror` hook disables the path once;
   black frames → existing detector → forced-WebGL reload.

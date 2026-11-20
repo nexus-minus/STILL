@@ -232,6 +232,48 @@ export function nudgeEmbeddedLight(
 }
 
 /**
+ * Does ANY face of a fixture's box have open air just outside it?
+ *
+ * Mesh-surface lights answer "where does light come from" with the box
+ * itself, so a fixture whose box already reaches open space must NOT be
+ * displaced by the nudge (moving the box away from its own mesh would shift
+ * the pool off the glowing fixture — the exact complaint the nudge exists to
+ * prevent). Only a box with NO open face (fully buried in solid) qualifies
+ * for the walk-out: its faces cannot emit at all, so moving the box is
+ * strictly better than leaving it dead.
+ *
+ * Probe: from each face centre outward along the (oriented) face normal,
+ * `reach` metres. Clear = face open. Caveat documented honestly: a face
+ * buried DEEPER than `reach` (default2 m) reports clear (the probe finds no
+ * boundary within reach) and keeps its position — the legacy embed heuristic
+ * was no better at that depth (it once walked a light INTO a slab).
+ *
+ * Pure for unit tests: tris / centre / extents in, boolean out.
+ */
+export function fixtureExposed(
+  tris: Float32Array,
+  center: THREE.Vector3,
+  extents: [number, number, number],
+  orientation?: [number, number, number, number],
+  reach = 2.0,
+): boolean {
+  const q = orientation
+    ? new THREE.Quaternion(orientation[0], orientation[1], orientation[2], orientation[3])
+    : null;
+  const dir = new THREE.Vector3();
+  for (let axis = 0; axis < 3; axis++) {
+    for (const sign of [1, -1]) {
+      dir.set(0, 0, 0);
+      dir.setComponent(axis, sign);
+      if (q) dir.applyQuaternion(q);
+      const faceCenter = center.clone().addScaledVector(dir, extents[axis]);
+      if (probeClearance(tris, faceCenter, dir, reach) >= reach - 1e-3) return true;
+    }
+  }
+  return false;
+}
+
+/**
  * PHASE 2 entry: assets/map/manifest.json + objects.glb (your Blender export)
  * become the world. Falls back to the procedural test room when the map isn't
  * exported yet. Emissive meshes (L_*) are extracted as raytracing lights —
@@ -267,14 +309,15 @@ export async function loadWorld(opts: { forceTest?: boolean } = {}): Promise<Wor
   const emissiveMeshes = new Set<THREE.Mesh>();
   const rtLights: RtLight[] = [];
   const bounds = new THREE.Box3();
-  // fixtures whose centres still need the embed-nudge — collected here (the
+  // fixtures whose boxes may still need the embed-nudge — collected here (the
   // shadow geometry isn't known until the traverse finished)
   const pendingLights: Array<{
     name: string;
     center: THREE.Vector3;
-    first: number;
-    count: number;
+    index: number;
     step: number;
+    extents: [number, number, number];
+    orientation?: [number, number, number, number];
     authoredDir?: [number, number, number];
     pointLight: THREE.PointLight;
   }> = [];
@@ -313,32 +356,50 @@ export async function loadWorld(opts: { forceTest?: boolean } = {}): Promise<Wor
         coneCos = Math.cos((cone * Math.PI) / 360);
       }
 
-      // SHAPE-AWARE sampling: a single point at the bbox centre makes a long
-      // strip fixture throw a circular pool on the opposite wall (the "one
-      // light with a weird circle" bug). Sample along the fixture's longest
-      // axis instead — always derived from GEOMETRY bounds, never the object
-      // origin, so an origin outside the level cannot skew placement.
-      const dims = [size.x, size.y, size.z];
-      const longAxis = dims.indexOf(Math.max(...dims));
-      const longLen = dims[longAxis];
-      const sampleCount = Math.min(8, Math.max(1, Math.round(longLen / 0.9)));
-      const powerEach = power / sampleCount;
-      const otherMax = Math.max(...dims.filter((_, i) => i !== longAxis));
-      const halfEach = Math.max(otherMax, longLen / sampleCount) / 2;
-      for (let s = 0; s < sampleCount; s++) {
-        const t = sampleCount === 1 ? 0 : s / (sampleCount - 1) - 0.5;
-        const pos: [number, number, number] = [center.x, center.y, center.z];
-        pos[longAxis] += t * longLen;
-        rtLights.push({
-          position: pos,
-          color: [emissive.r, emissive.g, emissive.b],
-          power: powerEach,
-          halfSize: halfEach,
-          direction,
-          coneCos,
-        });
-      }
+      // ONE light per fixture — the MESH itself is the emitter: the renderer
+      // area-samples this box's surface (no point proxies, no splitting), so
+      // power is the fixture's FULL power. Extents are LOCAL half-extents
+      // (geometry bbox ⊙ |world scale|) plus the world orientation — the
+      // export's strip fixtures (light001/002) carry ~60° quaternions, so a
+      // world-AABB box would fatten them into the wrong emitter. Decompose
+      // assumes TRS (true for glTF fixture nodes; a sheared parent hierarchy
+      // would skew the box).
+      mesh.geometry.computeBoundingBox();
+      const gbox = mesh.geometry.boundingBox!;
+      const wp = new THREE.Vector3();
+      const wq = new THREE.Quaternion();
+      const ws = new THREE.Vector3();
+      mesh.matrixWorld.decompose(wp, wq, ws);
+      const extents: [number, number, number] = [
+        ((gbox.max.x - gbox.min.x) / 2) * Math.abs(ws.x),
+        ((gbox.max.y - gbox.min.y) / 2) * Math.abs(ws.y),
+        ((gbox.max.z - gbox.min.z) / 2) * Math.abs(ws.z),
+      ];
+      const identityQ =
+        Math.abs(wq.x) + Math.abs(wq.y) + Math.abs(wq.z) < 1e-6 && Math.abs(wq.w - 1) < 1e-6;
+      const orientation: [number, number, number, number] | undefined = identityQ
+        ? undefined
+        : [wq.x, wq.y, wq.z, wq.w];
+      // Scalar half-size — kept on the LEGACY per-sample formula even though
+      // the split is gone: main.ts's analytic placement pass still consumes
+      // halfSize for its probe distance, and an exact match means those
+      // probes behave identically to the 12-sample era (no new/lost moves).
+      // halves[1] (median of world-AABB halves) == the legacy otherMax/2 term.
+      const halves = [size.x / 2, size.y / 2, size.z / 2].sort((a, b) => a - b);
+      const longLen = Math.max(size.x, size.y, size.z);
+      const legacySamples = Math.min(8, Math.max(1, Math.round(longLen / 0.9)));
+      const halfSize = Math.max(halves[1], longLen / legacySamples / 2);
 
+      rtLights.push({
+        position: [center.x, center.y, center.z],
+        color: [emissive.r, emissive.g, emissive.b],
+        power,
+        halfSize,
+        extents,
+        orientation,
+        direction,
+        coneCos,
+      });
 
       // Fallback illumination: the WebGL2/potato/compat paths have no traced
       // lighting — without this the imported map is pitch black there (the
@@ -353,14 +414,15 @@ export async function loadWorld(opts: { forceTest?: boolean } = {}): Promise<Wor
       pointLight.position.copy(center);
       group.add(pointLight);
       emissiveMeshes.add(mesh);
-      // remember the fixture so the nudge can move its samples AND the GL
-      // fallback light together (both must stay on the same side of the wall)
+      // remember the fixture so the nudge can move the single light entry AND
+      // the GL fallback together (both must stay on the same side of the wall)
       pendingLights.push({
         name: mesh.name || '(unnamed)',
         center: center.clone(),
-        first: rtLights.length - sampleCount,
-        count: sampleCount,
-        step: halfEach + 0.05,
+        index: rtLights.length - 1,
+        step: halfSize + 0.05,
+        extents,
+        orientation,
         authoredDir: direction,
         pointLight,
       });
@@ -404,17 +466,20 @@ export async function loadWorld(opts: { forceTest?: boolean } = {}): Promise<Wor
   }
 
   // ---- embedded-fixture nudge (backlog #5) --------------------------------
-  // Fixture centres sit at/behind their host surface, which drags every spill
-  // hotspot toward the wall. Walk each centre OUT along the outward direction
-  // (authored cone dir, else nearest shadow-face normal — full heuristic in
-  // nudgeEmbeddedLight) before the lights reach the RT uniform upload and the
-  // GL fallback. One outward axis per fixture: its samples all share the host.
+  // A fixture whose box is fully buried cannot emit at all — walk the single
+  // light entry (RT box + GL fallback move together) OUT along the outward
+  // direction (authored cone dir, else nearest shadow-face normal — full
+  // heuristic in nudgeEmbeddedLight). A fixture with ANY open box face is
+  // left at its mesh: surface sampling lights it through those faces, and
+  // displacing the box would shift the pool off the glowing fixture.
   if (pendingLights.length > 0 && new URLSearchParams(location.search).has('nolightnudge')) {
     // A/B switch for screenshots of the nudge's visual effect
     console.info('[map] light nudge disabled by ?nolightnudge — centres stay as exported');
   } else if (pendingLights.length > 0) {
     const shadowTris = buildShadowTriangles(shadowMeshes);
     const fmt = (v: THREE.Vector3): string => `(${v.x.toFixed(2)}, ${v.y.toFixed(2)}, ${v.z.toFixed(2)})`;
+    const fmtEmbed = (embed: number, step: number): string =>
+      embed >= step ? `>${step.toFixed(2)}` : embed.toFixed(2);
     if (shadowTris.length === 0) {
       console.info('[map] light nudge skipped — no shadow geometry to probe');
     }
@@ -422,25 +487,40 @@ export async function loadWorld(opts: { forceTest?: boolean } = {}): Promise<Wor
       const res = shadowTris.length
         ? nudgeEmbeddedLight(shadowTris, bounds, p.center, p.step, p.authoredDir)
         : { offset: null, embed: Infinity, dir: new THREE.Vector3(0, 1, 0), status: 'clear' as const };
+      if (res.status === 'clear') {
+        console.info(
+          `[map] light "${p.name}": ${fmt(p.center)} — ` +
+            `clear of surfaces (embed ≥${p.step.toFixed(2)}m), not nudged`,
+        );
+        continue;
+      }
+      // surface-lit fixture with an open face: the mesh already emits into
+      // the room — moving the box would only displace the pool (this is the
+      // clipped-into-the-floor fixture: its buried analytic centre made every
+      // shadow ray to it fail, but its EXPOSED faces light fine)
+      if (shadowTris.length && fixtureExposed(shadowTris, p.center, p.extents, p.orientation)) {
+        console.info(
+          `[map] light "${p.name}": ${fmt(p.center)} — ` +
+            `${res.status === 'moved' ? `embedded (embed=${fmtEmbed(res.embed, p.step)}m)` : 'EMBEDDED'} ` +
+            `but a box face is open — box stays with the mesh (surface lighting)`,
+        );
+        continue;
+      }
       if (res.offset) {
         const after = p.center.clone().add(res.offset);
-        for (let i = p.first; i < p.first + p.count; i++) {
-          rtLights[i].position[0] += res.offset.x;
-          rtLights[i].position[1] += res.offset.y;
-          rtLights[i].position[2] += res.offset.z;
-        }
-        p.pointLight.position.add(res.offset); // GL fallback follows the RT lights
+        const light = rtLights[p.index];
+        light.position[0] += res.offset.x;
+        light.position[1] += res.offset.y;
+        light.position[2] += res.offset.z;
+        p.pointLight.position.add(res.offset); // GL fallback follows the RT light
         console.info(
           `[map] light "${p.name}": ${fmt(p.center)} -> ${fmt(after)} ` +
             `outward (${res.dir.x.toFixed(2)}, ${res.dir.y.toFixed(2)}, ${res.dir.z.toFixed(2)}) ` +
-            `embed=${res.embed >= p.step ? `>${p.step.toFixed(2)}` : res.embed.toFixed(2)}m step=${p.step.toFixed(2)}m`,
+            `embed=${fmtEmbed(res.embed, p.step)}m step=${p.step.toFixed(2)}m`,
         );
       } else {
         console.info(
-          `[map] light "${p.name}": ${fmt(p.center)} — ` +
-            (res.status === 'clear'
-              ? `clear of surfaces (embed ≥${p.step.toFixed(2)}m), not nudged`
-              : 'EMBEDDED but no clear exit found — left in place'),
+          `[map] light "${p.name}": ${fmt(p.center)} — EMBEDDED but no clear exit found — left in place`,
         );
       }
     }
