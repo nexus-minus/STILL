@@ -122,6 +122,27 @@ export function buildTestRoom(): TestRoom {
   const ramp = box(3.4, 0.3, 3, -6.825, 0.59, 4, pillarMat);
   ramp.rotation.z = -Math.PI / 6; // top normal (0.5, 0.866, 0) → descends +x
 
+  // --- steep walkable ramp for scripts/steptest.mjs: 50° (= the limit) ----
+  // Walk-up test: spawn at the toe (1.7, 0, -4) facing +x, hold W — must
+  // reach the platform with no jump. Surface line y = (x - 2.3)·tan50 runs
+  // z in [-5.5,-2.5]; toe at (2.3, 0) emerges smoothly from the floor, the
+  // buried end tucks under it. Descends -x (normal (-sin50, cos50, 0) =
+  // (-0.766, 0.643, 0) — 0.643 is exactly the walkable limit, so this ramp
+  // doubles as the boundary case for the slope gate); the platform sits on
+  // the high (east) side and the long west run-out gives the momentum test
+  // flat ground to bleed speed off on.
+  const steep = box(2.71, 0.3, 3, 3.093, 0.712, -4, pillarMat);
+  steep.rotation.z = (50 * Math.PI) / 180;
+  // platform the steep ramp lands on (top y=1.85): left face x=3.85 meets
+  // the ramp surface (y≈1.85 there), so the transition has no seam gap
+  box(2.1, 1.95, 3, 4.9, 0.875, -4, pillarMat);
+
+  // --- wall corner + 0.3 step for the no-tunnel test ----------------------
+  // Pressing diagonally into the NE room corner while standing on this
+  // block drives repeated step-up trials into both walls at once — the
+  // scenario that used to resolve the trial destination through the wall.
+  box(1.4, 0.3, 1.4, 7.0, 0.15, -7.0, pillarMat);
+
   // --- ceiling light panels (visual only, no collision) ------------------
   const panel = (x: number, z: number): void => {
     box(1.4, 0.06, 1.4, x, WALL_H - 0.05, z, panelMat, false);

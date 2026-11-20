@@ -13,6 +13,13 @@ export interface CapsuleResolveResult {
    * uses it to reject climbing steep surfaces and to stop pressing into walls.
    */
   push: THREE.Vector3;
+  /**
+   * smallest oriented normal.y among the triangles that pushed this call
+   * (1 when none). The averaged `push` can hide a steep face inside a mostly
+   * walkable mix (ledge riser + its top edge, wall + floor) — the controller
+   * needs the STEEPEST contributing face to classify wall vs slope.
+   */
+  minNy: number;
 }
 
 /**
@@ -72,6 +79,7 @@ export class WorldCollision {
     const half = height / 2 - radius; // segment half length
     let grounded = false;
     let used = 0;
+    let minNy = 1;
     this.pushSum.set(0, 0, 0);
 
     for (let iter = 0; iter < maxIterations; iter++) {
@@ -79,6 +87,7 @@ export class WorldCollision {
 
       segment.start.copy(center).addScaledVector(UP, -half);
       segment.end.copy(center).addScaledVector(UP, half);
+      segment.getCenter(segMid);
       box
         .makeEmpty()
         .expandByPoint(segment.start)
@@ -94,19 +103,23 @@ export class WorldCollision {
           const distance = tri.closestPointToSegment(segment, triPoint, capPoint);
           if (distance >= radius) return false;
 
-          dir.subVectors(capPoint, triPoint);
-          if (dir.lengthSq() < 1e-10) {
-            // capsule center lies exactly on the triangle: use its normal,
-            // flipped toward the capsule if needed
-            tri.getNormal(dir);
-            segment.getCenter(segMid);
-            toMid.subVectors(segMid, triPoint);
-            if (dir.dot(toMid) < 0) dir.negate();
-          } else {
-            dir.normalize();
-          }
+          // Push along the triangle's ORIENTED NORMAL, not the radial
+          // capPoint−triPoint vector. A box face is two triangles: the
+          // capsule sphere can hit one ON its face (radial ≈ normal) and the
+          // other on their shared DIAGONAL (radial tilts off-plane, even
+          // sideways) — summing those leaned the contact normal away from
+          // the true surface, enough to dip an exactly-50° ramp below the
+          // walkable slope limit so the step-up misfired mid-climb. Coplanar
+          // triangles agree on the normal, so the sum stays honest; only
+          // edge/vertex contacts change, and there the two adjacent face
+          // normals together still eject the capsule.
+          tri.getNormal(dir);
+          toMid.subVectors(capPoint, triPoint);
+          if (toMid.lengthSq() < 1e-12) toMid.subVectors(segMid, triPoint);
+          if (dir.dot(toMid) < 0) dir.negate();
 
           push.addScaledVector(dir, radius - distance);
+          if (dir.y < minNy) minNy = dir.y;
           if (dir.y > 0.5) grounded = true;
           hit = true;
           return false;
@@ -119,6 +132,6 @@ export class WorldCollision {
       used = iter + 1;
     }
 
-    return { grounded, iterations: used, push: this.pushSum };
+    return { grounded, iterations: used, push: this.pushSum, minNy };
   }
 }
