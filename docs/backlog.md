@@ -91,3 +91,57 @@ needs a world reaction instead. No UI prompts, no toast dependency.
   per-chunk light lists via the existing `setLights()` hook. Until then a
   single BVH at load is fine (build time + memory are the only costs that
   grow; rays are short-range and raster is frustum-culled already).
+
+## 9. Hybrid lighting: bake pipeline (advisor-reviewed 2026-11-20, planned)
+
+Promotes item 4 to the full production split: **Cycles-baked static
+lightmaps for all static fixtures + the realtime mesh-light layer for
+anything dynamic** — static lighting becomes noise-free at 60 fps on any
+laptop; dynamic lights keep interaction. The pipeline must stay automatic
+for the author: lightmap UVs generated at export time (no manual UV
+work), re-runnable whenever the map changes (same philosophy as `--weld`
+and auto-chunking). Sequence: **after materials + fog** (a bake must
+sample the final material response; rebake is cheap and re-runs on any
+map change). The external advice to REPLACE the realtime loop entirely
+was partially rejected: realtime stays for dynamic lights and as the
+medium+ tier quality path; SSGI rejected for the main path (screen-space
+cannot see light through doorways you can't see) — SSR tracked as
+item 12.
+
+## 10. Rapier physics — evaluation trigger (2026-11-20, deferred)
+
+External advice: swap the custom capsule controller for Rapier
+(`@dimforge/rapier3d-compat`). DEFERRED with reason: the custom
+controller just reached user-approved "feels quite good" behind 23 green
+e2e checks (50° slopes, instant validated step-up, momentum model,
+anti-tunnel destination validation) — an engine swap now risks
+regressing exactly that, and the review's complaints ("floaty", "stuck
+on corners") describe the PRE-fix state. **Trigger to revisit:** a
+jump/collision bug (item 6) that cannot be fixed inside our controller,
+or collision edge cases multiplying. If triggered: keep the e2e suite as
+the behavior spec (it drives keys and asserts world positions, so it
+ports), and re-tune slope/step/momentum on Rapier's
+KinematicCharacterController.
+
+## 11. Multiplayer later: PeerJS (or PartyKit) (2026-11-20, deferred)
+
+GitHub Pages hosts static files only — no game server, so multiplayer
+needs a free external relay when it's built. Plan: **PeerJS** (WebRTC
+peer-to-peer, free, static-hosting friendly — players connect directly)
+as the default; **PartyKit** only if we later need server state
+(persistence, matchmaking, voice infrastructure). `playermodels`
+collection already exports; requirement already established: players go
+through the SAME lighting path as everything else so they read correctly
+from every viewer's perspective (potato = bake + dynamic lights). No code
+now — engine-ready first.
+
+## 12. SSR wet-floor option (pending user call, 2026-11-20)
+
+External advice + the reference images (`reference/vibe.png` shows a wet
+reflective floor) suggest screen-space reflections for glossy surfaces.
+The user previously chose "color + gloss only, no reflections". If
+revisited: SSR reads the per-material roughness introduced by the
+materials batch (zero rework — it slots in after), gated to low-roughness
+materials only; screen-space limits (only on-screen geometry appears in
+the reflection) are acceptable for floors. One word from the user → it
+joins the materials batch.

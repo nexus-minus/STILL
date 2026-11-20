@@ -161,9 +161,12 @@ a different engine.
 ## 10. Roadmap to "engine ready"
 
 - **In flight**: edge-aware denoiser → materials (per-object color +
-  Principled roughness gloss) → volumetrics/fog (phase 1b).
-- **Queued**: light-distance culling; jump-bug pass (awaiting repros);
-  automatic chunk streaming (engine-side, never manual); GitHub Pages
-  deploy script; baked GI for the potato tier (production plan).
+  Principled roughness gloss) → volumetrics/fog (phase 1b); in parallel:
+  coyote time + jump input buffering.
+- **Queued**: light-distance culling; bake pipeline (hybrid: Cycles-baked
+  static lightmaps + realtime dynamic layer — backlog #9); jump-bug pass
+  (awaiting repros, #6); automatic chunk streaming (#8); GitHub Pages
+  deploy script. Deferred with recorded triggers: Rapier physics swap
+  (#10), multiplayer via PeerJS (#11), SSR wet floors (#12).
 - **Yours**: build the level (export audit guards you), author materials
   with Principled emission/roughness, small optimizations.
