@@ -106,6 +106,20 @@ needs a world reaction instead. No UI prompts, no toast dependency.
 
 ## 9. Hybrid lighting: bake pipeline (advisor-reviewed 2026-11-20, planned)
 
+**Status 2026-11-20: Blender-side SHIPPED** — `tools/bake_map.sh` runs one
+headless Blender process: automatic UV2 (lightmap pack, all meshes into one
+shared atlas, ≥32 px island gaps) → Cycles Combined bake (emissive panels
+bake white) → `lightmap.png` + re-exported `objects.glb` with
+`TEXCOORD_1` + additive manifest `lightmap` block. ~7 s total (5 s bake at
+2048²/64 spp on GPU). Self-audits every run: UV1 untouched, zero overlapping
+texels, TEXCOORD_1 verified, black bake = exit 1. `export_map.sh --bake`
+flag added (default path byte-identical); stats/UV checkers in
+`scripts/bake-stats.mjs` / `scripts/bake-glb-uv.mjs`; docs in
+blender-conventions.md → "Baking". **Remaining: renderer consumption**
+(NEED map-loader: load the PNG as `SRGBColorSpace`, sample `TEXCOORD_1`,
+blend the baked static lighting under the realtime layer) — sequenced after
+materials per the plan below.
+
 Promotes item 4 to the full production split: **Cycles-baked static
 lightmaps for all static fixtures + the realtime mesh-light layer for
 anything dynamic** — static lighting becomes noise-free at 60 fps on any

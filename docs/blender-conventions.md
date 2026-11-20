@@ -9,6 +9,7 @@ tools/export_map.sh path/to/map.blend
 #    manifest.json (bounds + checkpoints[] + sound[] + skipped[]
 #                   + emissive{} + skippedEmissive[])
 tools/export_map.sh --weld path/to/map.blend   # merge seam vertices first — see "Seams" below
+tools/bake_map.sh path/to/map.blend            # export + bake the lightmap — see "Baking" below
 ```
 
 ## Collections (exact names)
@@ -118,6 +119,66 @@ tools/export_map.sh --weld path/to/map.blend
   cp /tmp/map-weld/objects.glb assets/map/objects.glb                        # try it
   ```
 
+## Baking — the automatic lightmap (same philosophy as `--weld`)
+
+`tools/bake_map.sh` is the export **plus** a Cycles bake of the scene's
+static lighting, in one headless Blender run — you never open Blender for
+it, and (like every export here) the `.blend` is never saved:
+
+```sh
+tools/bake_map.sh path/to/map.blend
+# -> everything tools/export_map.sh writes, plus:
+#    lightmap.png        Cycles Combined bake of the static lighting
+#    objects.glb         re-exported with a second UV set (glTF TEXCOORD_1)
+#    manifest.json       + additive "lightmap" {file, resolution, uv}
+tools/bake_map.sh --samples 128 --resolution 4096 path/to/map.blend   # tune
+tools/export_map.sh --bake path/to/map.blend    # same thing (export + bake)
+```
+
+**Re-run it after ANY map/light/material change** — a moved wall, a new
+fixture, a tweaked emission strength, a changed base color. The bake is cheap
+(~6 s GPU at the default 2048²/64 samples on this machine), fully automatic,
+and always consistent with the `.blend`, exactly like `--weld`: when in doubt,
+re-bake. Never hand-edit `lightmap.png` or the lightmap UVs — the `.blend`
+is the only source of truth.
+
+What one run does:
+
+1. **Second UV layer, generated for you.** Every exported mesh gets a
+   `LightMap` UV layer packed by Blender's *lightmap pack* — all meshes share
+   one atlas (smart UV project packs per object, which would make the meshes
+   overwrite each other in the single shared image). Islands are spaced
+   ≥32 px apart (2× the bake margin) so filtering can't bleed across them.
+   **UV1 is never touched** — the run verifies it byte-for-byte and refuses
+   to ship if packing ever changes it.
+2. **Cycles Combined bake** of the scene's static lighting onto that layer.
+   Combined (not Diffuse) is deliberate: emissive fixtures bake bright, so a
+   glowing panel is white in the lightmap — which is what the renderer wants.
+   Default 64 samples, 16 px margin, resolution 2048 (override with
+   `--samples` / `--resolution`).
+3. **`lightmap.png`** written next to the other outputs — sRGB-encoded 8-bit.
+4. **`objects.glb` re-exported** so glTF carries the second UV set as
+   **`TEXCOORD_1`**, and **`manifest.json`** gains the additive block:
+
+   ```json
+   "lightmap": { "file": "lightmap.png", "resolution": 2048, "uv": "TEXCOORD_1" }
+   ```
+
+   Additive key — the loader ignores unknown manifest fields today.
+
+### TEXCOORD_1 contract (for the renderer)
+
+- `objects.glb` primitives now carry **two** UV sets: `TEXCOORD_0` is your
+  original `UVMap` (byte-identical to a plain export — the bake proves it),
+  `TEXCOORD_1` is the lightmap atlas.
+- `manifest.json → lightmap` is the pointer: which PNG, its square
+  resolution, and which TEXCOORD indexes it. Load the PNG as an **sRGB color
+  texture** and sample it with `TEXCOORD_1`.
+- The bake only covers static `objects` geometry (the lightmap's consumer);
+  animated/playermodels keep a single UV set — they move, so baked static
+  lighting doesn't apply to them (backlog #9: static for static, realtime
+  for dynamic).
+
 ## Collection specifics
 
 ### checkpoints (client-side clickables)
@@ -203,5 +264,7 @@ assets/map/playermodels.glb     avatars
 assets/map/manifest.json        per-collection counts + world bounds,
                                 checkpoints[], sound[], skipped[],
                                 emissive{} (exported fixtures + counts),
-                                skippedEmissive[] (glows that exported nothing)
+                                skippedEmissive[] (glows that exported nothing),
+                                lightmap{} (from tools/bake_map.sh only)
+assets/map/lightmap.png         baked static lightmap (tools/bake_map.sh only)
 ```
