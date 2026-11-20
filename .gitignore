@@ -4,3 +4,6 @@ dist/
 .DS_Store
 *.blend1
 screenshots/
+
+# local-only reference art (removed from the public repo 2026-11-20)
+reference/
