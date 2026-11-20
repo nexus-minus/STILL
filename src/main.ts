@@ -12,7 +12,7 @@ import { AnchorRegistry } from './gameplay/anchors.js';
 import { MapDevice } from './gameplay/map-device.js';
 import { LoreSystem } from './gameplay/lore.js';
 import { createTransport } from './core/transport.js';
-import { hud } from './ui/hud.js';
+import { hud, type OverlayPrefs } from './ui/hud.js';
 import { loadSettings, initSettings } from './ui/settings.js';
 import { requestPointerLockSafe } from './ui/pointer-lock.js';
 import { Bindings, loadBinds } from './gameplay/bindings.js';
@@ -44,7 +44,11 @@ async function main(): Promise<void> {
   // An explicit rtdebug request always retries the GPU path — a compat flag
   // parked by an earlier auto-recovery would boot WebGL2 and make the debug
   // modes silently inert ("looks the same as normal").
-  const rtDebugParam = Number(new URLSearchParams(location.search).get('rtdebug') ?? 0);
+  const urlParams = new URLSearchParams(location.search);
+  const rtDebugParam = Number(urlParams.get('rtdebug') ?? 0);
+  // ?dev=1 reveals the developer readouts (coords/fps + driver line). They are
+  // never offered in player settings — normal play stays clean.
+  const devMode = urlParams.get('dev') === '1';
   if (rtDebugParam > 0) {
     try {
       sessionStorage.removeItem('liminal.forcegl');
@@ -232,7 +236,7 @@ async function main(): Promise<void> {
           `[rt] debug mode ${rtDebug} (1=uv gradient, 2=red=miss/green=hit) — ` +
             'black-frame detector paused, raytraced lighting forced on',
         );
-        hud.message(
+        hud.alert(
           rtDebug === 2
             ? 'RT DEBUG — bright green: lit · dark green: SHADOW · red: miss'
             : rtDebug === 3
@@ -249,7 +253,7 @@ async function main(): Promise<void> {
         rtErrorShown = true;
         pipeline.setAdvanced(undefined);
         console.error('[rt] raytraced path disabled after a WebGPU error (see message above)');
-        hud.message('raytracing disabled after a GPU error — standard renderer (details in console)', 9000);
+        hud.alert('raytracing disabled after a GPU error — standard renderer (details in console)', 9000);
       });
       console.info('[rt] raytraced lighting armed (medium+ tiers)');
     } catch (err) {
@@ -349,6 +353,18 @@ async function main(): Promise<void> {
   // persisted glow preference (the software-rasterizer auto-detect below can
   // still force it off afterwards — that ordering is intentional)
   if (persisted.glow !== undefined) pipeline.setGlowEnabled(persisted.glow);
+
+  // ---- HUD overlays (Settings → Overlays) ---------------------------------
+  // Default screen = game + crosshair dot only; every other player overlay is
+  // opt-in and persisted. Dev readouts stay behind ?dev=1 alone.
+  const overlayPrefs: OverlayPrefs = {
+    crosshair: persisted.crosshair ?? true,
+    keyHints: persisted.keyHints ?? false,
+    toasts: persisted.toasts ?? false,
+  };
+  hud.setOverlays(overlayPrefs);
+  hud.setDevVisible(devMode);
+
   const settings = initSettings({
     quality,
     bindings,
@@ -360,6 +376,11 @@ async function main(): Promise<void> {
     },
     getGlow: () => pipeline.glowOn,
     setGlow: (value) => pipeline.setGlowEnabled(value),
+    getOverlays: () => overlayPrefs,
+    setOverlays: (next) => {
+      Object.assign(overlayPrefs, next);
+      hud.setOverlays(overlayPrefs);
+    },
     onResume: () => {
       // Chrome forbids immediate relock after an Esc-exit (SecurityError) —
       // show the click-to-enter overlay as the guaranteed path, and retry
@@ -409,7 +430,7 @@ async function main(): Promise<void> {
         url.searchParams.delete('forcegl');
         history.replaceState(null, '', url);
       }
-      hud.message('retrying WebGPU…', 1500);
+      hud.alert('retrying WebGPU…', 1500);
       window.setTimeout(() => location.reload(), 500);
     }
     // dev view: N = wireframe, so the exact collision/render mesh is visible
@@ -493,7 +514,7 @@ async function main(): Promise<void> {
     canvas.addEventListener('webglcontextlost', (e) => {
       e.preventDefault();
       console.error('[liminal] WebGL context LOST — display driver problem. GL:', glRendererInfo);
-      hud.message('graphics context lost — reload the page (details in console)', 10000);
+      hud.alert('graphics context lost — reload the page (details in console)', 10000);
     });
   } else if (driverEl) {
     driverEl.textContent = 'WebGPU device';
@@ -679,7 +700,7 @@ async function main(): Promise<void> {
                 'If the scene appears now, the glow chain is the problem on this driver.\n' +
                 'GL renderer: ' + glRendererInfo,
             );
-            hud.message('black frames — glow off (B re-enables)', 3500);
+            hud.alert('black frames — glow off (B re-enables)', 3500);
           } else if (backend === 'webgpu') {
             recoveryScheduled = true;
             try {
@@ -690,7 +711,7 @@ async function main(): Promise<void> {
             console.error(
               '[liminal] WebGPU renders black frames on this device — reloading into compatibility mode (WebGL2).',
             );
-            hud.message("WebGPU isn't working on this device — switching to compatibility renderer…", 3000);
+            hud.alert("WebGPU isn't working on this device — switching to compatibility renderer…", 3000);
             window.setTimeout(() => location.reload(), 2000);
           } else {
             console.error(
@@ -699,7 +720,7 @@ async function main(): Promise<void> {
                 glRendererInfo +
                 '\nAlso check about:support (Firefox) or chrome://gpu (Chromium) for the WebGL renderer line.',
             );
-            hud.message('still black — GPU/driver problem, paste the console output (F12)', 10000);
+            hud.alert('still black — GPU/driver problem, paste the console output (F12)', 10000);
           }
         }
       } else {
@@ -725,12 +746,13 @@ async function main(): Promise<void> {
     }
   });
 
-  hud.message(
-    sessionForced
-      ? `compatibility mode — WebGPU off (from an earlier error) — press G to retry`
-      : `${backend} · ${quality.tier} — click to enter`,
-    sessionForced ? 12000 : 4000,
-  );
+  // the start screen already says "click to enter" — the normal boot line is
+  // just a toast (off by default); the compat-mode warning must always show
+  if (sessionForced) {
+    hud.alert('compatibility mode — WebGPU off (from an earlier error) — press G to retry', 12000);
+  } else {
+    hud.message(`${backend} · ${quality.tier} — click to enter`, 4000);
+  }
   console.info(
     `[liminal] up — backend=${backend} tier=${quality.tier} ` +
       `navigator.gpu=${'gpu' in navigator} glow=${pipeline.postActive} gl="${glRendererInfo}" ` +

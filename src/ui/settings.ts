@@ -1,6 +1,7 @@
 import { TIER_ORDER, TIER_PRESETS, type OverrideKey, type QualityManager, type Tier } from '../render/quality.js';
-import { ACTION_LABELS, keyLabel, type Action, type Bindings } from '../gameplay/bindings.js';
+import { ACTION_LABELS, keyLabel, PLAYER_ACTIONS, ALL_ACTIONS, type Action, type Bindings } from '../gameplay/bindings.js';
 import type { PlayerController } from '../gameplay/controller.js';
+import type { OverlayPrefs } from './hud.js';
 
 const STORAGE_KEY = 'liminal.settings.v1';
 
@@ -19,6 +20,10 @@ export interface PersistedSettings {
   lightGain?: number;
   glow?: boolean;
   exposure?: number;
+  /** Settings → Overlays — default screen is crosshair-only (crosshair ?? true) */
+  crosshair?: boolean;
+  keyHints?: boolean;
+  toasts?: boolean;
 }
 
 export function loadSettings(): PersistedSettings {
@@ -44,25 +49,11 @@ export interface SettingsHandle {
   close(): void;
 }
 
-const BIND_ACTIONS: Action[] = [
-  'forward',
-  'back',
-  'left',
-  'right',
-  'jump',
-  'run',
-  'interact',
-  'glow',
-  'map',
-  'respawn',
-  'quality',
-];
-
 /**
- * Settings menu — presets + manual fine-tuning + keybinds + mouse feel.
- * DOM overlay opened when pointer lock is released (Esc). Every change applies
- * live AND persists; picking a preset clears manual overrides (that's what a
- * preset is), touching a slider makes it "custom".
+ * Settings menu — presets + manual fine-tuning + overlays + keybinds + mouse
+ * feel. DOM overlay opened when pointer lock is released (Esc). Every change
+ * applies live AND persists; picking a preset clears manual overrides (that's
+ * what a preset is), touching a slider makes it "custom".
  */
 export function initSettings(opts: {
   quality: QualityManager;
@@ -74,6 +65,8 @@ export function initSettings(opts: {
   setExposure: (value: number) => void;
   getGlow: () => boolean;
   setGlow: (value: boolean) => void;
+  getOverlays: () => OverlayPrefs;
+  setOverlays: (next: OverlayPrefs) => void;
 }): SettingsHandle {
   const { quality, bindings, controller } = opts;
 
@@ -84,40 +77,57 @@ export function initSettings(opts: {
     <div class="panel">
       <h2>Settings</h2>
       <div class="cols">
-        <section>
-          <h3>Graphics</h3>
-          <label class="row">
-            <span>Preset</span>
-            <select id="set-preset">
-              ${TIER_ORDER.map((t) => `<option value="${t}">${t}</option>`).join('')}
-              <option value="__custom">custom</option>
-            </select>
-          </label>
-          <label class="row">
-            <span>Render scale <em id="set-scale-val"></em></span>
-            <input type="range" id="set-scale" min="0.5" max="1" step="0.05" />
-          </label>
-          <label class="row">
-            <span>Exposure <em id="set-exp-val"></em></span>
-            <input type="range" id="set-exp" min="0.5" max="4" step="0.1" />
-          </label>
-          <label class="row">
-            <span>Light intensity <em id="set-gain-val"></em></span>
-            <input type="range" id="set-gain" min="0.2" max="3" step="0.1" />
-          </label>
-          <label class="row check">
-            <input type="checkbox" id="set-glow" />
-            <span>Glow (bloom)</span>
-          </label>
-          <label class="row check">
-            <input type="checkbox" id="set-rt" ${opts.hasRaytracing ? '' : 'disabled'} />
-            <span>Raytraced shadows + GI${opts.hasRaytracing ? '' : ' — unavailable (no WebGPU)'}</span>
-          </label>
-          <label class="row check disabled">
-            <input type="checkbox" disabled />
-            <span>Volumetrics — arrives with phase 1b</span>
-          </label>
-        </section>
+        <div class="stack">
+          <section>
+            <h3>Graphics</h3>
+            <label class="row">
+              <span>Preset</span>
+              <select id="set-preset">
+                ${TIER_ORDER.map((t) => `<option value="${t}">${t}</option>`).join('')}
+                <option value="__custom">custom</option>
+              </select>
+            </label>
+            <label class="row">
+              <span>Render scale <em id="set-scale-val"></em></span>
+              <input type="range" id="set-scale" min="0.5" max="1" step="0.05" />
+            </label>
+            <label class="row">
+              <span>Exposure <em id="set-exp-val"></em></span>
+              <input type="range" id="set-exp" min="0.5" max="4" step="0.1" />
+            </label>
+            <label class="row">
+              <span>Light intensity <em id="set-gain-val"></em></span>
+              <input type="range" id="set-gain" min="0.2" max="3" step="0.1" />
+            </label>
+            <label class="row check">
+              <input type="checkbox" id="set-glow" />
+              <span>Glow (bloom)</span>
+            </label>
+            <label class="row check">
+              <input type="checkbox" id="set-rt" ${opts.hasRaytracing ? '' : 'disabled'} />
+              <span>Raytraced shadows + GI${opts.hasRaytracing ? '' : ' — unavailable (no WebGPU)'}</span>
+            </label>
+            <label class="row check disabled">
+              <input type="checkbox" disabled />
+              <span>Volumetrics — arrives with phase 1b</span>
+            </label>
+          </section>
+          <section>
+            <h3>Overlays</h3>
+            <label class="row check">
+              <input type="checkbox" id="set-ov-crosshair" />
+              <span>Crosshair</span>
+            </label>
+            <label class="row check">
+              <input type="checkbox" id="set-ov-hints" />
+              <span>Key hints</span>
+            </label>
+            <label class="row check">
+              <input type="checkbox" id="set-ov-toasts" />
+              <span>Toasts</span>
+            </label>
+          </section>
+        </div>
         <section>
           <h3>Controls</h3>
           <label class="row">
@@ -149,6 +159,8 @@ export function initSettings(opts: {
       border-radius: 2px; padding: 0 4px; opacity: 1;
     }
     #settings .note.warn { color: #ffb07a; bottom: 46px; }
+    /* Graphics + Overlays share the left column so both columns stay balanced */
+    #settings .stack { display: flex; flex-direction: column; gap: 22px; }
   `;
   document.head.appendChild(style);
 
@@ -169,6 +181,9 @@ export function initSettings(opts: {
     raytracedLighting: quality.override('raytracedLighting'),
     lightGain: quality.override('lightGain'),
     exposure: opts.getExposure(),
+    crosshair: opts.getOverlays().crosshair,
+    keyHints: opts.getOverlays().keyHints,
+    toasts: opts.getOverlays().toasts,
   };
   const persist = (): void => {
     persisted.tier = quality.tier;
@@ -179,13 +194,18 @@ export function initSettings(opts: {
     persisted.exposure = opts.getExposure();
     persisted.lightGain = quality.override('lightGain');
     persisted.glow = opts.getGlow();
+    persisted.crosshair = opts.getOverlays().crosshair;
+    persisted.keyHints = opts.getOverlays().keyHints;
+    persisted.toasts = opts.getOverlays().toasts;
     saveSettings(persisted);
   };
 
   // ---- keybind rows ---------------------------------------------------------
+  // only PLAYER_ACTIONS get rows — dev tools (glow/respawn/quality) keep their
+  // fixed keys and stay out of the player-facing list.
   const bindsRoot = $('#set-binds');
   const bindButtons = new Map<Action, HTMLButtonElement>();
-  for (const action of BIND_ACTIONS) {
+  for (const action of PLAYER_ACTIONS) {
     const row = document.createElement('div');
     row.className = 'bind-row';
     const label = document.createElement('span');
@@ -215,8 +235,10 @@ export function initSettings(opts: {
     finishCapture();
     // find the current holder BEFORE set(): Bindings.set swaps keys (it never
     // double-binds), so afterwards the old holder no longer reports this code.
+    // Search ALL actions (not just rows): a dev tool's key can be stolen too,
+    // and that swap must be named in the warning, not happen silently.
     const conflict = code
-      ? BIND_ACTIONS.find((a) => a !== action && bindings.get(a) === code)
+      ? ALL_ACTIONS.find((a) => a !== action && bindings.get(a) === code)
       : undefined;
     bindings.set(action, code);
     // a swap may have changed other rows — refresh everything
@@ -235,7 +257,7 @@ export function initSettings(opts: {
   bindsRoot.addEventListener('click', (e) => {
     const button = (e.target as HTMLElement).closest('button');
     if (!button) return;
-    const action = BIND_ACTIONS.find((a) => bindButtons.get(a) === button);
+    const action = PLAYER_ACTIONS.find((a) => bindButtons.get(a) === button);
     if (!action) return;
     // the click that concludes the press we just bound — ignore it
     if (performance.now() - inputConsumedAt < 400) return;
@@ -303,6 +325,9 @@ export function initSettings(opts: {
   const sens = $<HTMLInputElement>('set-sens');
   const sensVal = $<HTMLElement>('set-sens-val');
   const invert = $<HTMLInputElement>('set-invert');
+  const ovCrosshair = $<HTMLInputElement>('set-ov-crosshair');
+  const ovHints = $<HTMLInputElement>('set-ov-hints');
+  const ovToasts = $<HTMLInputElement>('set-ov-toasts');
 
   /** badge = "this row no longer shows the selected preset's value" — a small
    *  marker parked at the end of the row label, shown/hidden on every sync. */
@@ -335,6 +360,10 @@ export function initSettings(opts: {
     sens.value = String(controller.sensitivityMultiplier);
     sensVal.textContent = `${controller.sensitivityMultiplier.toFixed(2)}×`;
     invert.checked = controller.invertY;
+    const ov = opts.getOverlays();
+    ovCrosshair.checked = ov.crosshair;
+    ovHints.checked = ov.keyHints;
+    ovToasts.checked = ov.toasts;
     // per-row deviation markers against the selected tier's preset values.
     // glow stays unmarked: it's a runtime preference (B key, auto-disabled on
     // broken drivers) gated by a preset field (bloom) that is constantly true —
@@ -396,6 +425,15 @@ export function initSettings(opts: {
     controller.invertY = invert.checked;
     persist();
   });
+  // overlay toggles: apply live (main.ts owns the prefs object + hud wiring)
+  // and persist, exactly like every other row in this menu.
+  const setOverlay = (key: keyof OverlayPrefs, value: boolean): void => {
+    opts.setOverlays({ ...opts.getOverlays(), [key]: value });
+    persist();
+  };
+  ovCrosshair.addEventListener('change', () => setOverlay('crosshair', ovCrosshair.checked));
+  ovHints.addEventListener('change', () => setOverlay('keyHints', ovHints.checked));
+  ovToasts.addEventListener('change', () => setOverlay('toasts', ovToasts.checked));
   $('#set-reset').addEventListener('click', () => {
     bindings.reset();
     for (const [a, btn] of bindButtons) btn.textContent = keyLabel(bindings.get(a));

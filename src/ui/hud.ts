@@ -5,19 +5,61 @@ const $ = <T extends HTMLElement>(id: string): T => {
 };
 
 let messageTimer: number | undefined;
+/** Toasts default OFF: a fresh load shows game + crosshair only — every other
+ *  player overlay is opt-in via Settings → Overlays (persisted in main.ts). */
+let toastsOn = false;
+
+/** Settings → Overlays. crosshair is the one default-on overlay. */
+export interface OverlayPrefs {
+  crosshair: boolean;
+  keyHints: boolean;
+  toasts: boolean;
+}
+
+function showMessage(text: string, ms: number): void {
+  const el = $('message');
+  el.textContent = text;
+  el.classList.add('visible');
+  window.clearTimeout(messageTimer);
+  messageTimer = window.setTimeout(() => el.classList.remove('visible'), ms);
+}
 
 /**
  * Tiny DOM HUD. Phase 3 replaces #message/#map with the in-world device UI;
  * the API stays so gameplay code doesn't care.
  */
 export const hud = {
-  /** transient center message (lore, anchor confirmations, hints) */
+  /** transient center message (lore, anchor confirmations, hints) — a toast:
+   *  suppressed unless the Toasts overlay is enabled */
   message(text: string, ms = 2800): void {
-    const el = $('message');
-    el.textContent = text;
-    el.classList.add('visible');
-    window.clearTimeout(messageTimer);
-    messageTimer = window.setTimeout(() => el.classList.remove('visible'), ms);
+    if (!toastsOn) return;
+    showMessage(text, ms);
+  },
+
+  /** same visual as message(), but ignores the toasts toggle — for things the
+   *  player must see regardless of overlay prefs (critical errors, ?rtdebug
+   *  legend) */
+  alert(text: string, ms = 2800): void {
+    showMessage(text, ms);
+  },
+
+  /** apply Settings → Overlays (restored from persistence in main.ts) */
+  setOverlays(prefs: OverlayPrefs): void {
+    toastsOn = prefs.toasts;
+    $('crosshair').classList.toggle('hidden', !prefs.crosshair);
+    $('hint').classList.toggle('hidden', !prefs.keyHints);
+    if (!toastsOn) {
+      // an active toast must not linger after the toggle turns toasts off
+      window.clearTimeout(messageTimer);
+      $('message').classList.remove('visible');
+    }
+  },
+
+  /** ?dev=1 readouts (coords/fps + driver line) — developer tools, never
+   *  offered in player settings */
+  setDevVisible(on: boolean): void {
+    $('stats').classList.toggle('hidden', !on);
+    $('driver').classList.toggle('hidden', !on);
   },
 
   /** persistent top-left line: backend / tier / fps */

@@ -59,10 +59,38 @@ try {
     scale: !!document.getElementById('set-scale'),
     rtDisabled: document.getElementById('set-rt')?.disabled ?? false,
   }));
-  check(`11 keybind rows (got ${counts.binds})`, counts.binds === 11);
+  check(`8 keybind rows — player binds only (got ${counts.binds})`, counts.binds === 8);
   check('preset selector present', counts.preset);
   check('render scale slider present', counts.scale);
   check('RT checkbox disabled on firefox (no webgpu)', counts.rtDisabled === true);
+
+  // rows must be exactly the actions the game is played with (dev tools like
+  // glow/respawn/quality keep working but get no row), and the default screen
+  // must be crosshair-only with dev readouts hidden (no ?dev=1 on this load)
+  const defaults = await page.evaluate(() => ({
+    labels: [...document.querySelectorAll('#set-binds .bind-row > span')].map((s) => s.textContent),
+    crosshair: !document.getElementById('crosshair').classList.contains('hidden'),
+    hintHidden: document.getElementById('hint').classList.contains('hidden'),
+    statsHidden: document.getElementById('stats').classList.contains('hidden'),
+    driverHidden: document.getElementById('driver').classList.contains('hidden'),
+    ovCrosshair: document.getElementById('set-ov-crosshair')?.checked ?? null,
+    ovHints: document.getElementById('set-ov-hints')?.checked ?? null,
+    ovToasts: document.getElementById('set-ov-toasts')?.checked ?? null,
+    overlaysSection: [...document.querySelectorAll('#settings h3')].some((h) => /overlays/i.test(h.textContent ?? '')),
+  }));
+  check(
+    'bind rows are the 8 player actions',
+    JSON.stringify(defaults.labels) ===
+      JSON.stringify(['Move forward', 'Move back', 'Move left', 'Move right', 'Jump', 'Run', 'Interact', 'Map']),
+  );
+  check('Overlays section present', defaults.overlaysSection);
+  check('crosshair visible by default', defaults.crosshair === true);
+  check('key-hints line hidden by default', defaults.hintHidden === true);
+  check('dev readouts hidden without ?dev=1', defaults.statsHidden === true && defaults.driverHidden === true);
+  check(
+    'overlay toggle defaults: crosshair on, hints/toasts off',
+    defaults.ovCrosshair === true && defaults.ovHints === false && defaults.ovToasts === false,
+  );
 
   await page.screenshot({ path: 'screenshots/settings.png' });
 
@@ -222,6 +250,30 @@ try {
   check(`exposure persisted (got ${exp.saved})`, exp.saved === 2);
   check('exposure row marked custom', exp.badgeExists && exp.badgeShown);
 
+  // overlay toggles: apply live and persist (crosshair off, hints+toasts on)
+  await page.evaluate(() => {
+    const flip = (id, checked) => {
+      const el = document.getElementById(id);
+      el.checked = checked;
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    };
+    flip('set-ov-crosshair', false);
+    flip('set-ov-hints', true);
+    flip('set-ov-toasts', true);
+  });
+  await sleep(150);
+  const ovLive = await page.evaluate(() => ({
+    crosshairHidden: document.getElementById('crosshair').classList.contains('hidden'),
+    hintHidden: document.getElementById('hint').classList.contains('hidden'),
+    saved: JSON.parse(localStorage.getItem('liminal.settings.v1') ?? '{}'),
+  }));
+  check('crosshair toggle hides the dot live', ovLive.crosshairHidden === true);
+  check('key-hints toggle shows the line live', ovLive.hintHidden === false);
+  check(
+    'overlay prefs persisted',
+    ovLive.saved.crosshair === false && ovLive.saved.keyHints === true && ovLive.saved.toasts === true,
+  );
+
   // reload: main.ts must restore exposure from storage
   await page.reload({ waitUntil: 'domcontentloaded', timeout: 20000 });
   for (let i = 0; i < 60 && !(await page.evaluate(() => window.__liminalReady === true)); i++) {
@@ -229,6 +281,23 @@ try {
   }
   const restored = await page.evaluate(() => window.__liminal.renderer.toneMappingExposure);
   check(`exposure restored after reload (got ${restored})`, restored === 2);
+
+  // ...and the overlay prefs (checkboxes + actual HUD visibility)
+  const ovRestored = await page.evaluate(() => ({
+    crosshairHidden: document.getElementById('crosshair').classList.contains('hidden'),
+    hintHidden: document.getElementById('hint').classList.contains('hidden'),
+    ovCrosshair: document.getElementById('set-ov-crosshair')?.checked ?? null,
+    ovHints: document.getElementById('set-ov-hints')?.checked ?? null,
+    ovToasts: document.getElementById('set-ov-toasts')?.checked ?? null,
+  }));
+  check(
+    'overlay prefs restored after reload (dot hidden, hints line + toggles on)',
+    ovRestored.crosshairHidden === true &&
+      ovRestored.hintHidden === false &&
+      ovRestored.ovCrosshair === false &&
+      ovRestored.ovHints === true &&
+      ovRestored.ovToasts === true,
+  );
 
   // reopened menu still marks the restored value; preset re-select resets it
   const reopened = await page.evaluate(() => {
@@ -261,6 +330,24 @@ try {
     return !window.__liminal.settings.isOpen;
   });
   check('menu closes', closed);
+
+  // dev readouts: gated on ?dev=1 — absent on the plain load (checked in the
+  // structure block above), present once the flag is in the URL.
+  // NB: this file's `URL` const is the base-url string — use globalThis.URL.
+  const devUrl = new globalThis.URL(URL);
+  devUrl.search = 'dev=1';
+  await page.goto(devUrl.href, { waitUntil: 'domcontentloaded', timeout: 20000 });
+  for (let i = 0; i < 60 && !(await page.evaluate(() => window.__liminalReady === true)); i++) {
+    await sleep(200);
+  }
+  await sleep(1200); // stats refresh twice a second
+  const dev = await page.evaluate(() => ({
+    statsHidden: document.getElementById('stats').classList.contains('hidden'),
+    driverHidden: document.getElementById('driver').classList.contains('hidden'),
+    text: document.getElementById('stats').textContent ?? '',
+  }));
+  check('dev readouts visible with ?dev=1', dev.statsHidden === false && dev.driverHidden === false);
+  check(`dev readout shows coords/fps (got "${dev.text.split('\n')[0]}")`, /fps/.test(dev.text) && /x /.test(dev.text));
 
   const errors = logs.filter((l) => l.startsWith('PAGEERROR'));
   if (errors.length) console.log('errors:\n' + errors.join('\n'));

@@ -29,6 +29,8 @@
       #overlay.hidden { display: none; }
 
       #hud { position: absolute; inset: 0; z-index: 5; pointer-events: none; }
+      /* opt-in overlays (Settings → Overlays / ?dev=1) start hidden */
+      #hud .hidden { display: none; }
       #crosshair {
         position: absolute; left: 50%; top: 50%; width: 4px; height: 4px;
         margin: -2px 0 0 -2px; border-radius: 50%;
@@ -139,11 +141,11 @@
 
     <div id="hud">
       <div id="crosshair"></div>
-      <div id="stats"></div>
-      <div id="driver"></div>
+      <div id="stats" class="hidden"></div>
+      <div id="driver" class="hidden"></div>
       <div id="message"></div>
       <canvas id="map" width="200" height="200"></canvas>
-      <div id="hint">Esc — settings · F — freecam · F2 — screenshot · T — quality · M — map · B — glow · E — interact</div>
+      <div id="hint" class="hidden">Esc — settings · F — freecam · F2 — screenshot · T — quality · M — map · B — glow · E — interact</div>
     </div>
 
     <div id="overlay">

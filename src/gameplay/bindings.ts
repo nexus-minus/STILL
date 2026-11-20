@@ -32,6 +32,25 @@ export const DEFAULT_BINDS: Binds = {
   quality: 'KeyT',
 };
 
+/** actions the settings menu offers for rebinding — the keys the game is
+ *  actually played with. Dev tools (glow/respawn/quality cycle) keep working
+ *  on fixed keys but get no row: they're not player controls. */
+export const PLAYER_ACTIONS: Action[] = [
+  'forward',
+  'back',
+  'left',
+  'right',
+  'jump',
+  'run',
+  'interact',
+  'map',
+];
+
+/** every action, including the dev tools — conflict detection must see all of
+ *  them so stealing a dev key still warns and swaps instead of silently
+ *  remapping a tool behind the player's back. */
+export const ALL_ACTIONS: Action[] = Object.keys(DEFAULT_BINDS) as Action[];
+
 export const ACTION_LABELS: Record<Action, string> = {
   forward: 'Move forward',
   back: 'Move back',
