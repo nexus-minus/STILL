@@ -124,6 +124,20 @@ export class WorldCollision {
           // normals together still eject the capsule.
           tri.getNormal(dir);
           toMid.subVectors(capPoint, triPoint);
+          // signed distance of the capsule point behind this face's plane
+          // (<0 = inner side — the flip below ejects it that way)
+          const perp = dir.dot(toMid);
+          // Phantom edge contact: the centre is INSIDE this face's slab but
+          // the closest point is the triangle's BOUNDARY, not the
+          // perpendicular foot (distance > |perp|) — the sphere only reaches
+          // the face's edge from behind. E.g. a capsule pressed into a steep
+          // ramp's buried toe touches the ramp's side face near its shared
+          // top edge while sitting ABOVE the box; pushing along that face's
+          // normal is sideways-wrong — it tilts the wall normal (+z) and the
+          // wall projection then flips the slide velocity every frame (the
+          // stuck crawl at ramp toes). The real constraint (the top face)
+          // already pushes correctly, so skipping this one loses nothing.
+          if (perp < 0 && distance > -perp + 1e-6) return false;
           if (toMid.lengthSq() < 1e-12) toMid.subVectors(segMid, triPoint);
           if (dir.dot(toMid) < 0) dir.negate();
 

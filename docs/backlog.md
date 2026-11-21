@@ -4,14 +4,24 @@ _(surfaced during the raytracing bring-up; fixed after the shadow issue)_
 
 ## 1. Step-up feels like a teleport
 
-The step-up works (see `scripts/steptest.mjs`: approach → climb to exactly the
-ledge height → ride → walk off) but it snaps the full height instantly —
-lift/advance/drop reads as a pop, not a smooth walk-up.
+**Vertical: DONE** (commit e621684) — physics snaps, the camera eases
+over ~150 ms (τ 50 ms; steptest asserts 0.300 m lag at the climb frame
+and < 0.01 m eye error 150 ms after). The user approved the animation
+itself ("the animation itself is okay").
 
-**Directions to explore:** animate the vertical correction over ~100–150 ms
-(camera-damped), or split the climb into two smaller corrections across
-frames, or ease the camera Y toward the capsule Y with a short lerp so the
-*view* smooths even if the physics snaps.
+**Remaining — horizontal advance (measured 2026-11-21):** every accept
+still advances ≥ radius+0.08 = **0.43 m in ONE frame** (measured
+**+0.54 m** at walk speed 0.94 m/s at the 50°→platform junction) — the
+body visibly hops forward even though the height is eased. Directions:
+ease the horizontal component the same way (camera-damped offset along
+the advance), or shorten the advance by measuring the obstacle width
+first (the same measure-first approach the proportional-lift work used
+for height). **User's call on feel.**
+
+Original note (superseded by the above): the step-up works (see
+`scripts/steptest.mjs`: approach → climb to exactly the ledge height →
+ride → walk off) but it snapped the full height instantly —
+lift/advance/drop read as a pop, not a smooth walk-up.
 
 ## 2. Sliding on walkable slopes (<50°)
 
@@ -84,12 +94,30 @@ jump height feel inconsistent on slopes and may be part of the user's
 perceived jump bugs. NOT changed (would alter approved feel) — needs the
 user's call: cap the carried vy, or keep it.
 
-Test-robustness note (4 sightings, 2026-11-20): `steptest`'s
-`step-lips` case 4 (the 0.1-deep nub) occasionally lands at the
-feature's true top (climb ≈ 0.102 vs the window ≤ h+0.005) under
-frame-timing variance — both outcomes are correct climbs (no pop, no
-slide-down) and it passes on clean re-runs. Widen that window to the
-feature's real height when next touching steptest.
+**QA pass 2026-11-21** (`scripts/controlprobe.mjs`, 33 checks): no
+further jump bugs found across ledge-lip jumps, jump spam (40 presses),
+mid-slope transitions, corner step-ups, freecam switches, respawns and
+height transitions. Two REAL bugs found & fixed: (1) **phantom edge
+contact at steep-ramp toes** → stuck-crawl limit-cycle (collision.ts:
+reject contacts where the capsule centre is behind the face plane and
+only the triangle boundary is reachable; regression `toe-slide`, zEnd
+−1.44 → −4.58), (2) **jump buffer survived `respawnAt`** — stale intent
+fired a jump at the fresh spawn (buffer now cleared there; regression
+`respawn-buffer`). Additive-impulse numbers **updated post-retune**:
+flat **0.467 m** / 50°-climb walk **0.783 m** / 50°-climb run **1.58 m**
+(3.4× flat; pre-jump vy 3.245 m/s) — the earlier 1.12/0.78 predate the
+jump-height change. Ceiling probes: N/A by design (ceilings excluded
+from the collision BVH). Still the user's call: cap carried vy, or keep.
+
+**Flaky step-lips assertion: RESOLVED (2026-11-21)** — root-caused
+frame-by-frame (run-speed landing on the nub's leading edge → transient
+edge-catch 0.09–0.103 before settling). The window now derives `h` from
+a live BVH raycast and the pop limit from the live `stepUp`; the nub
+face was corrected 5.5 → 5.55 (the old value sampled 5 cm early,
+dragging the contact frame into the pre-landing tumble); and the new
+window now **rejects** a full-step pop (the old `h+0.05` accidentally
+admitted one on the 0.25 lip). Proof: probe 28/28 + 5 consecutive
+steptest runs × 38 green.
 
 ## 7. Interaction feedback = world reacts only (design contract, 2026-11-20)
 

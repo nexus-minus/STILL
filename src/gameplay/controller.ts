@@ -281,6 +281,8 @@ export class PlayerController {
     this.wallSleep = 0; // contact normal belongs to the old spot
     this.wallLikeHold = 0; // so does the wall-like classification
     this.coyote = 0; // jump grace belongs to the OLD ground, not here
+    this.jumpBuffer = 0; // likewise: a press made before the teleport must
+    // not fire on the (fresh) landing — same rule toggleFreecam applies
     this.stepDebugCount = 0; // fresh spawn → fresh [stepup] debug budget
     this.syncFeet();
   }

@@ -770,9 +770,13 @@ try {
 
   // --- 17/18. T5: run across the four lips — first-contact climbs at the
   //  TRUE heights (no full-stepUp pop, no slide-down) -----------------------
+  // face/depth = the real box x-spans in test-room.ts (the nub is 0.1 deep
+  // at x∈[5.55,5.65] — its leading face is 5.55, not 5.5); h is re-measured
+  // off the room's own BVH below so the acceptance window can never drift
+  // from the geometry it judges.
   const lipDefs = [
     { face: 1.8, h: 0.05, depth: 0.4 }, { face: 3.0, h: 0.1, depth: 0.4 },
-    { face: 4.2, h: 0.25, depth: 0.4 }, { face: 5.5, h: 0.05, depth: 0.1 },
+    { face: 4.2, h: 0.25, depth: 0.4 }, { face: 5.55, h: 0.05, depth: 0.1 },
   ].map((l) => ({
     ...l,
     // physical first-touch: where the capsule sphere reaches the lip's top
@@ -820,15 +824,51 @@ try {
     lipRes.every((r) => r.contactT >= 0 && r.lag >= 0 && r.lag <= 2),
     lipRes.map((r) => `${r.lip}@${r.contactT}ms lag=${r.lag}`).join(' '),
   );
+  // The window derives from the FEATURES' real geometry — no magic numbers:
+  // h raycast off the room's own BVH (down-ray at each lip's mid-x) and the
+  // pop height = the LIVE controller's stepUp. A correct climb lands at h —
+  // both observed outcomes: the settled true top, and the one-frame
+  // edge-catch the capsule makes when it lands on a lip's leading edge at
+  // run speed (measured up to 0.103 on the 0.1-deep nub under frame-timing
+  // variance; backlog #6) — so the band is [h/2 … midpoint(h, stepUp)]:
+  // every correct reading fits with margin, while a full-step pop at stepUp
+  // fails for EVERY lip (the old fixed h+0.05 window admitted one on the
+  // 0.25 lip, where h+0.05 === stepUp exactly).
+  const lipGeom = await page.evaluate(() => {
+    const g = window.__liminal;
+    const down = new g.THREE.Vector3(0, -1, 0);
+    return {
+      heights: [2.0, 3.2, 4.4, 5.6].map((x) => {
+        const hit = g.collision.raycast(new g.THREE.Vector3(x, 0.6, 5), down, 1.2);
+        return hit ? +hit.point.y.toFixed(4) : NaN;
+      }),
+      stepUp: g.controller.opts?.stepUp ?? NaN,
+    };
+  });
+  const lipWin = lipGeom.heights.map((h, i) => [
+    h / 2,
+    h + (lipGeom.stepUp - h) / 2,
+    // minOnTop lower bound: when a TALLER predecessor's descent bleeds into
+    // this lip's band (the nub is climbed right after falling off the 0.25
+    // lip), the capsule rides the leading edge through the tumble and the
+    // geometry allows a correct ride as low as the floor — height alone
+    // cannot separate tumble from slide there, so the bound is 0 (honest
+    // no-op for that one lip; the pop catch above still guards it). The
+    // other lips approach from below their own band → h/2 stays strict.
+    i > 0 && lipGeom.heights[i - 1] > h ? 0 : h / 2,
+  ]);
   check(
     'step-lips: climbs land at the true height — no full-step pop, no slide-down',
-    lipRes.every((r) =>
+    lipRes.every((r, i) =>
       r.climbY != null &&
-      r.climbY >= r.lip - 0.02 && r.climbY <= r.lip + 0.05 &&
-      r.peak <= r.lip + 0.05 &&
-      (r.minOnTop == null || r.minOnTop >= r.lip - 0.03),
+      r.climbY >= lipWin[i][0] && r.climbY <= lipWin[i][1] &&
+      r.peak <= lipWin[i][1] &&
+      (r.minOnTop == null || r.minOnTop >= lipWin[i][2]),
     ),
-    lipRes.map((r) => `${r.lip}: climb=${r.climbY} peak=${r.peak} onTop≥${r.minOnTop}`).join(' '),
+    lipRes.map((r, i) =>
+      `${r.lip}: climb=${r.climbY} peak=${r.peak} onTop≥${r.minOnTop} ` +
+      `win=[${lipWin[i][0].toFixed(3)},${lipWin[i][1].toFixed(3)}] min≥${lipWin[i][2]}`,
+    ).join(' '),
   );
 
   // --- 19. T6: 50° ramp walk-up is smooth (mid-climb only: excludes the toe
@@ -887,6 +927,75 @@ try {
     'slide: idle on a 60° face slides off — pin/sleep never hold unwalkable',
     slRun[0][2] > 0.5 && slEnd[2] < 0.25 && slEnd[1] < 6.5,
     `y ${slRun[0][2].toFixed(3)} -> ${slEnd[2].toFixed(3)}, xEnd=${slEnd[1].toFixed(3)}`,
+  );
+
+  // --- 22. T7c: pressing diagonally into the 60° ramp's buried toe must
+  // SLIDE past it. A phantom contact (capsule above the box touching the
+  // ramp's side face only near its shared top edge) tilted the wall normal
+  // +z, and the wall projection then flipped the slide velocity every frame —
+  // the player wedged at the toe (crawling ±0.1 m/s, grounded flickering).
+  // collision.ts now skips that edge-only contact; vz must survive the wall
+  // response so the press slides the full 0.9 m past the ramp's z-side.
+  const toeRun = await traceRun(['ShiftLeft', 'KeyW'], {
+    spawn: [5.6, 0, -1.0], yaw: -1.27, ms: 2200,
+  });
+  const toeEnd = toeRun[toeRun.length - 1];
+  const toeNaN = toeRun.some((f) => f.slice(1, 4).some((v) => !Number.isFinite(v)));
+  const toeMinY = Math.min(...toeRun.map((f) => f[2]));
+  console.log('toe-slide:', JSON.stringify({
+    zEnd: +toeEnd[3].toFixed(3), xEnd: +toeEnd[1].toFixed(3),
+    minY: +toeMinY.toFixed(3), nan: toeNaN,
+  }));
+  check(
+    'toe-slide: pressing into the 60° ramp toe slides past it (no wedge stall)',
+    toeEnd[3] <= -1.9 && toeEnd[1] <= 8.6 && toeMinY > -0.05 && !toeNaN,
+    `zEnd=${toeEnd[3].toFixed(3)} (spawn -1.0, ramp side at -1.5) xEnd=${toeEnd[1].toFixed(3)} minY=${toeMinY.toFixed(3)}`,
+  );
+
+  // --- 23. jump intent must not survive a teleport: a press made before a
+  // respawn belongs to the OLD spot — respawnAt clears the buffer exactly as
+  // it clears coyote (and as toggleFreecam always did), otherwise the
+  // buffered press fires on the fresh spawn's first grounded frame.
+  const rsBuf = await page.evaluate(
+    () =>
+      new Promise((resolve) => {
+        const g = window.__liminal;
+        const c = g.controller;
+        c.respawnAt(new g.THREE.Vector3(0, 8, 0)); // mid-air fall start
+        const out = [];
+        const t0 = performance.now();
+        let phase = 0;
+        const tick = () => {
+          const t = performance.now() - t0;
+          out.push([+t.toFixed(1), +c.feet.y.toFixed(3), c.grounded ? 1 : 0, +c.velocity.y.toFixed(3)]);
+          if (phase === 0 && t >= 300) {
+            phase = 1;
+            document.dispatchEvent(new KeyboardEvent('keydown', { code: 'Space' }));
+            document.dispatchEvent(new KeyboardEvent('keyup', { code: 'Space' }));
+          } else if (phase === 1 && t >= 340) {
+            phase = 2; // teleport while the press is still inside the buffer
+            c.respawnAt(new g.THREE.Vector3(0, 0, 2));
+          } else if (phase === 2 && t > 900) {
+            resolve(out);
+            return;
+          }
+          if (t < 6000) requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+      }),
+  );
+  // impulse = vy gains >3 m/s in one frame AND ends >2 (a jump adds ~4;
+  // the respawn's own vy zeroing ends at ≤0, so it never counts)
+  const rsImp = [];
+  for (let i = 1; i < rsBuf.length; i++) {
+    if (rsBuf[i][3] - rsBuf[i - 1][3] > 3 && rsBuf[i][3] > 2) rsImp.push(+rsBuf[i][0].toFixed(0));
+  }
+  const rsEnd = rsBuf[rsBuf.length - 1];
+  console.log('respawn-buffer:', JSON.stringify({ impulses: rsImp, endY: rsEnd[1], endG: rsEnd[2] }));
+  check(
+    'respawn: jump press buffered across a respawn does not fire on the fresh spawn',
+    rsImp.length === 0 && rsEnd[2] === 1 && rsEnd[1] > -0.05 && rsEnd[1] < 0.1,
+    `impulses=${JSON.stringify(rsImp)} endY=${rsEnd[1]} endG=${rsEnd[2]}`,
   );
 
   if (failed) {
