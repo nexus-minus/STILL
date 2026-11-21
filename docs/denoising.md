@@ -9,6 +9,11 @@ spend a fixed, tiny sample budget per frame and spend the rest of the
 pipeline — temporal reprojection, a neural denoiser, upscaling, light reuse,
 and baked static GI — hiding the noise that budget leaves behind.
 
+The wider survey of *which* techniques shipped games actually use (baked
+workflows, Lumen's radiance caches, ReSTIR/RTXGI, Quake II RTX and Minecraft
+RTX, upscalers, light culling) — and the per-technique adoption verdicts for
+this repo — live in [realtime-rt-techniques.md](realtime-rt-techniques.md).
+
 ## 1. Why "just run more samples" doesn't work in a game
 
 Monte Carlo path tracing converges as `1/√N`: halving the noise costs 4x the
@@ -296,6 +301,16 @@ point-light fallback plus bloom.
   scale)
 - [backlog.md](backlog.md) — item 4 (baked lighting for potato mode), item
   5 (noise, leaks, shadow cut-offs)
+- [realtime-rt-techniques.md](realtime-rt-techniques.md) — the survey this
+  recipe was drawn from: how shipped games (baked GI, Lumen, ReSTIR/RTXGI,
+  Quake II RTX, Minecraft RTX) buy quality cheaply, what still separates us
+  from a Cycles look, and the ordered adoption table (which rows are "next
+  session" vs "never"). New findings that landed there rather than here:
+  AMD's measured FSR 3.1 upscale costs (0.3–2.0 ms), Minecraft RTX's
+  ~40% trace / ~45% denoise frame split and its per-triangle irradiance
+  cache, Quake II RTX's 3.5 ms @1440p A-SVGF denoiser and 1 spp / 1 bounce /
+  2 shadow-ray budget, WGSL ports of the AMD FidelityFX shadow and reflection
+  denoisers (pmndrs/denoiser), and COD MW4's per-pixel fractional ray rate.
 - `node_modules/three-gpu-pathtracer/src/webgpu/API.md` —
   `WebGPUPathTracer`, `OIDNDenoiser`, `FSRUpscaler`
 - `node_modules/oidn-webgpu/README.md` — weight selection table (which `.tza`
