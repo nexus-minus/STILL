@@ -320,37 +320,173 @@ def run_bake(meshes, samples, resolution):
 
 
 def buffer_stats(img):
-    """(mean, max, non-black fraction) of the linear bake buffer, RGB only."""
+    """(mean, max, non-black fraction, rgb array) of the linear bake buffer."""
     buf = np.empty(len(img.pixels), dtype=np.float32)
     img.pixels.foreach_get(buf)
     rgb = buf.reshape(-1, 4)[:, :3]
-    return float(rgb.mean()), float(rgb.max()), float((rgb.max(axis=1) > 0.001).mean())
+    return float(rgb.mean()), float(rgb.max()), float((rgb.max(axis=1) > 0.001).mean()), rgb
+
+
+# ---- AgX display reference (measurement only) -----------------------------
+# Ported from three.js ToneMappingFunctions.js `agxToneMapping` — the same
+# constants Blender's default AgX view transform uses (the game tonemaps with
+# AgX, docs/backlog.md #9 rule 2). Lets the bake PRINT what the 8-bit encode
+# costs in display terms instead of guessing. mat3(c0,c1,c2) is column-major:
+# v @ C.T with rows [c0,c1,c2] reproduces M*v.
+_SRGB_TO_REC2020 = np.array([
+    [0.6274, 0.0691, 0.0164],
+    [0.3293, 0.9195, 0.0880],
+    [0.0433, 0.0113, 0.8956],
+])
+_REC2020_TO_SRGB = np.array([
+    [1.6605, -0.1246, -0.0182],
+    [-0.5876, 1.1329, -0.1006],
+    [-0.0728, -0.0083, 1.1187],
+])
+_AGX_INSET = np.array([
+    [0.856627153315983, 0.137318972929847, 0.11189821299995],
+    [0.0951212405381588, 0.761241990602591, 0.0767994186031903],
+    [0.0482516061458583, 0.101439036467562, 0.811302368396859],
+])
+_AGX_OUTSET = np.array([
+    [1.1271005818144368, -0.1413297634984383, -0.14132976349843826],
+    [-0.11060664309660323, 1.157823702216272, -0.11060664309660294],
+    [-0.016493938717834573, -0.016493938717834257, 1.2519364065950405],
+])
+
+
+def agx_display(linear_rgb):
+    """AgX-tonemapped + sRGB-encoded display values in [0,1] (exposure 1)."""
+    x = np.maximum(np.asarray(linear_rgb, dtype=np.float64), 0.0) @ _SRGB_TO_REC2020.T
+    x = np.maximum(x @ _AGX_INSET.T, 1e-10)
+    x = np.log2(x)
+    x = np.clip((x - (-12.47393)) / (4.026069 - (-12.47393)), 0.0, 1.0)
+    x2, x4 = x * x, (x * x) * (x * x)
+    x = (15.5 * x4 * x2 - 40.14 * x4 * x + 31.96 * x4 - 6.868 * x2 * x
+         + 0.4298 * x2 + 0.1191 * x - 0.00232)
+    x = np.maximum(x, 0.0) ** 2.2 @ _REC2020_TO_SRGB.T
+    x = np.clip(x, 0.0, 1.0)
+    return np.where(x <= 0.0031308, x * 12.92, 1.055 * np.power(x, 1 / 2.4) - 0.055)
+
+
+def clipping_report(rgb):
+    """What the plain sRGB-8 encode loses (backlog #9 rule 2), printed every run.
+
+    A linear value > 1.0 cannot survive an 8-bit [0,1] encode: it stores as
+    pure white and the falloff around it flattens. The numbers: how many texels
+    clip, how far above 1 they sit, and — the question the rule actually asks —
+    whether AgX shows a difference between the clipped and the true value.
+    """
+    peak = rgb.max(axis=1)
+    over = peak > 1.0
+    n = int(over.sum())
+    if n == 0:
+        print("bake_map: clipping — 0 texels above linear 1.0, sRGB-8 loses nothing")
+        return
+    stops = float(np.log2(max(peak.max(), 1.0)))
+    true_disp = agx_display(rgb[over])
+    clip_disp = agx_display(np.clip(rgb[over], 0.0, 1.0))
+    delta = np.abs(true_disp - clip_disp)
+    print(
+        f"bake_map: clipping — {n} texels ({100.0 * n / len(peak):.2f}%) above linear 1.0, "
+        f"max {peak.max():.2f} ({stops:.1f} stops over) · under AgX the clipped value differs "
+        f"from the true one by mean {delta.mean():.4f} / max {delta.max():.4f} display "
+        f"(true {true_disp.mean():.3f} vs clipped {clip_disp.mean():.3f})"
+    )
 
 
 def save_lightmap_png(img, path):
-    """Write the linear bake buffer as an sRGB-encoded 8-bit PNG.
+    """RGBM + sRGB encode: the linear bake's full HDR range in one 8-bit PNG.
 
-    image.save() on a float image writes 16-bit (measured: 12.8 MB at 2048²)
-    and browsers decode PNG down to 8-bit for WebGL anyway — so encode to
-    sRGB here (the same transfer function Blender's own save() applies,
-    verified against known values) and save a byte image raw. Emission above
-    1.0 clamps to white, which is the wanted look for glowing panels.
-    Returns the file size in bytes.
+    WHY (backlog #9 rule 2): plain sRGB-8 hard-clips every linear value above
+    1.0 to white — the clipping_report above prints exactly how much this bake
+    would lose (fixture pools flatten precisely where they are brightest).
+    RGBM keeps the whole range at the same file size:
+
+        rgb = srgb_encode( clamp(rgb_linear / m) )   per texel hue, in [0,1]
+        a   = srgb_encode( m / RANGE )               per-texel max, SRGB-ENCODED
+        decode: rgb_linear = srgb_decode(rgb) * srgb_decode(a) * RANGE
+
+    WHY sRGB on BOTH channels: linear M quantizes to RANGE/255 = 0.026 here,
+    which zeroes every wall/floor texel under that (this bake's rooms live at
+    0.005-0.05 — measured: a linear-M first cut decoded 29.7 % of the texels
+    the bake reported lit at 57.6 %). sRGB M bottoms out at RANGE*srgb(1/255)
+    ≈ 0.002 with ~0.4 % relative error everywhere — shadows keep their step,
+    highlights keep their falloff.
+
+    Written by hand (zlib + struct): Blender's PNG save DROPS a fully-opaque
+    alpha channel (measured — a byte image saves as color type 2), which would
+    throw the M channel away. Row order matches Blender's own save, measured
+    with the 2x2 probe: pixels[0] is bottom-left, so the file's first row is
+    the TOP = Blender v=1 = glTF v0 — the game samples flipY=false (v=0 = top).
+
+    Returns (file_size_bytes, range).
     """
+    import struct
+    import zlib
+
     buf = np.empty(len(img.pixels), dtype=np.float32)
     img.pixels.foreach_get(buf)
-    rgb = np.clip(buf.reshape(-1, 4)[:, :3], 0.0, 1.0)
-    enc = np.where(rgb <= 0.0031308, rgb * 12.92, 1.055 * np.power(rgb, 1 / 2.4) - 0.055)
-    out = bpy.data.images.new("lightmap_srgb", img.size[0], img.size[1])
-    rgba = np.empty((enc.shape[0], 4), dtype=np.float32)
-    rgba[:, :3] = enc
-    rgba[:, 3] = 1.0
-    out.pixels.foreach_set(np.ascontiguousarray(rgba).ravel())
-    out.file_format = "PNG"
-    out.save(filepath=path)
-    size = os.path.getsize(path)
-    bpy.data.images.remove(out)
-    return size
+    w, h = img.size[0], img.size[1]
+    rgb = np.clip(buf.reshape(-1, 4)[:, :3], 0.0, None)
+    peak = rgb.max(axis=1)
+    range_v = float(peak.max())
+    if range_v <= 0.0:
+        raise SystemExit("bake_map: bake produced a black image — nothing to encode")
+    ratio = rgb / np.maximum(peak, 1e-20)[:, None]
+    ratio[peak <= 0.0] = 0.0
+    ratio = np.clip(ratio, 0.0, 1.0)
+    srgb = lambda c: np.where(c <= 0.0031308, c * 12.92, 1.055 * np.power(c, 1 / 2.4) - 0.055)
+    enc = srgb(ratio)
+    out = np.empty((h, w, 4), dtype=np.uint8)
+    out[..., :3] = (np.round(np.clip(enc, 0.0, 1.0) * 255.0)
+                    .astype(np.uint8).reshape(h, w, 3))
+    # M channel sRGB-encoded too (see docstring: linear M floors dark texels
+    # at RANGE/255 and blacks out the room)
+    out[..., 3] = (np.round(np.clip(srgb(np.clip(peak / range_v, 0.0, 1.0)), 0.0, 1.0) * 255.0)
+                   .astype(np.uint8).reshape(h, w))
+    out = out[::-1]  # pixels[] is bottom-up, PNG rows are top-down (probe-measured)
+
+    # filter 0 (None) per row — trivially re-readable by the self-audit below;
+    # zlib still compresses the smooth lightmap well
+    raw = b"".join(b"\x00" + out[y].tobytes() for y in range(h))
+
+    def chunk(typ, data):
+        return (struct.pack(">I", len(data)) + typ + data
+                + struct.pack(">I", zlib.crc32(typ + data) & 0xFFFFFFFF))
+
+    png = (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(raw, 9))
+        + chunk(b"IEND", b"")
+    )
+    with open(path, "wb") as fh:
+        fh.write(png)
+
+    # self-audit: decode the FILE back (not the buffer) and prove the >1.0
+    # range the plain encode clipped survives round-trip within 8-bit error
+    ihdr_end = 8 + 4 + 4 + 13 + 4
+    idat_len = struct.unpack(">I", png[ihdr_end:ihdr_end + 4])[0]
+    rows = np.frombuffer(
+        zlib.decompress(png[ihdr_end + 8:ihdr_end + 8 + idat_len]), dtype=np.uint8
+    )
+    rows = rows.reshape(h, 1 + w * 4)[:, 1:].reshape(h, w, 4)[::-1]  # file top-down -> pixels bottom-up
+    dec = rows[..., :3].astype(np.float64) / 255.0
+    dec = np.where(dec <= 0.04045, dec / 12.92, ((dec + 0.055) / 1.055) ** 2.4)
+    ma = rows[..., 3:4].astype(np.float64) / 255.0
+    ma = np.where(ma <= 0.04045, ma / 12.92, ((ma + 0.055) / 1.055) ** 2.4)
+    decoded = (dec * ma * range_v).reshape(-1, 3)
+    err = float(np.abs(decoded - rgb).max())
+    print(
+        f"bake_map: RGBM self-audit — decoded max {decoded.max():.3f} vs linear {range_v:.3f}, "
+        f"worst round-trip error {err:.4f} ({100 * err / range_v:.2f}% of range)"
+    )
+    if range_v > 1.0 and decoded.max() <= 1.0:
+        raise SystemExit("bake_map: RGBM round-trip lost the >1.0 range — not shipping")
+    if err > 0.05 * range_v:
+        raise SystemExit(f"bake_map: RGBM round-trip error {err:.4f} too large — not shipping")
+    return len(png), range_v
 
 
 def glb_json(path):
@@ -425,10 +561,13 @@ def verify_texcoord1(path):
     print(f"bake_map: objects.glb verified — TEXCOORD_1 on all {len(prims)} primitive(s)")
 
 
-def patch_manifest(out_dir, resolution):
+def patch_manifest(out_dir, resolution, lm_range):
     """Add the additive lightmap entry — the loader ignores unknown manifest
     fields today, so this is safe for every existing consumer (same JSON
-    formatting as export_map.py so the diff is only the new block)."""
+    formatting as export_map.py so the diff is only the new block).
+
+    `range` + `encoding` are the RGBM decode contract: the loader reconstructs
+    linear radiance as srgbDecode(rgb) * a * range (see save_lightmap_png)."""
     path = os.path.join(out_dir, "manifest.json")
     with open(path, encoding="utf-8") as fh:
         manifest = json.load(fh)
@@ -436,10 +575,13 @@ def patch_manifest(out_dir, resolution):
         "file": "lightmap.png",
         "resolution": resolution,
         "uv": "TEXCOORD_1",
+        "encoding": "rgbm",
+        "range": round(lm_range, 6),
     }
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, indent=2)
-    print(f"bake_map: manifest.json += lightmap (lightmap.png, {resolution}px, TEXCOORD_1)")
+    print(f"bake_map: manifest.json += lightmap (lightmap.png, {resolution}px, TEXCOORD_1, "
+          f"RGBM range {lm_range:.3f})")
 
 
 def run():
@@ -495,15 +637,16 @@ def run():
     print(f"bake_map: wired {len(added_nodes)} material(s), {len(temp_mats)} temporary material(s)")
 
     duration = run_bake(meshes, samples, resolution)
-    mean, max_v, nonzero = buffer_stats(img)
+    mean, max_v, nonzero, linear_rgb = buffer_stats(img)
     print(f"bake_map: baked in {duration:.1f}s — linear buffer mean {mean:.4f}, "
           f"max {max_v:.4f}, non-black {nonzero * 100:.1f}%")
+    clipping_report(linear_rgb)
     if max_v <= 0.0:
         raise SystemExit("bake_map: bake produced a black image — no light reached the baker")
 
     png_path = os.path.join(out_dir, "lightmap.png")
-    size = save_lightmap_png(img, png_path)
-    print(f"bake_map: wrote {png_path} ({size // 1024} KB, sRGB-encoded 8-bit)")
+    size, lm_range = save_lightmap_png(img, png_path)
+    print(f"bake_map: wrote {png_path} ({size // 1024} KB, RGBM sRGB 8-bit RGBA, range {lm_range:.3f})")
 
     unwire(added_nodes, temp_mats)
     bpy.data.images.remove(img)
@@ -511,7 +654,7 @@ def run():
     if not export_objects_glb(out_dir):
         raise SystemExit("bake_map: objects.glb re-export failed — not patching the manifest")
     verify_texcoord1(os.path.join(out_dir, "objects.glb"))
-    patch_manifest(out_dir, resolution)
+    patch_manifest(out_dir, resolution, lm_range)
     print("bake_map: done")
 
 

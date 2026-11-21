@@ -174,8 +174,13 @@ path (see `test-room.ts`).
   `maxColorAttachments` slot stayed free — per-material specular lives in
   its own rgba16float buffer set because the composite multiplies the
   lighting buffer by albedo, which would tint a highlight by the wall).
-- **composite**: `diffuse × lighting + emissive` selected against the beauty
-  pass by a uniform flag (tier changes never rebuild the graph), then bloom.
+- **composite**: `diffuse × lighting + emissive + specular + baked` selected
+  against the beauty pass by a uniform flag (tier changes never rebuild
+  the graph), then fog (`beauty·T + S`), then bloom. The baked lightmap
+  term lives in its own buffer and is added *after* the albedo multiply
+  (RGBM decoded once at load with the K=π scale, so static and dynamic
+  share one brightness); debug: `?rtdebug=3` = realtime-dynamic-only,
+  `?rtdebug=4` = the baked buffer, `?nolightmap` A/Bs the split.
 - **lights**: emissive meshes in Blender → one mesh-light entry each
   (center, local half-extents + orientation quaternion, linear color, power,
   cone) in an **uncapped storage buffer** (5 vec4 slots/light, runtime
@@ -204,6 +209,8 @@ appears on screen and in the console.
   produce NaN in TSL) — precompute the value.
 - `target` is a WGSL reserved keyword: `var target` fails Tint validation.
   Name locals `lightPt` or similar.
+- This Tint build rejects WGSL ternary `?:` ("invalid character found" at
+  the `?`, probe-verified) — use `select(cond, a, b)`.
 
 ## Perf targets
 

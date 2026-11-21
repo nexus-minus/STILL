@@ -64,6 +64,15 @@ export interface RtLight {
    */
   direction?: [number, number, number];
   coneCos?: number;
+  /**
+   * true when a lightmap bake covers this light (backlog #9 rule 1): its
+   * light already reaches STATIC pixels through lightmap.png, so the
+   * surface-lighting kernel skips it there (no double-lighting) — while fog
+   * shafts and DYNAMIC pixels (no lightmap coverage: players, anything
+   * without TEXCOORD_1) keep using it from the same buffer. Rides the light
+   * struct's free `le.w` slot (every existing reader uses le.xyz only).
+   */
+  baked?: boolean;
 }
 
 export interface AdvancedRenderer {
@@ -108,10 +117,13 @@ export interface AdvancedRenderer {
  *        (passes/volumetrics.ts) — OFF = release() + the plain composite,
  *        which carries no fog code at all
  *   2. raster pass -> MRT { output(beauty), diffuse(albedo), emissive }
- *   3. composite: diffuse * lighting + emissive + specular (gloss masked on
- *      emissive pixels — their primary ray passes through the fixture),
- *      selected vs beauty by flag, fog-composited (beauty·T + S) when
- *      volumetrics ran -> bloom -> tone mapping (outputColorTransform)
+ *   3. composite: baked lightmap + diffuse * lighting + emissive + specular
+ *      (gloss and the baked term masked on emissive pixels — their primary
+ *      ray passes through the fixture), selected vs beauty by flag,
+ *      fog-composited (beauty·T + S) when volumetrics ran -> bloom ->
+ *      tone mapping (outputColorTransform). With a lightmap present the NEE
+ *      loop skips baked lights on lightmap-covered pixels (rule: no
+ *      double-lighting) and ?rtdebug=3 shows realtime-dynamic-only.
  *
  * Safety rules (this machine cannot run WebGPU locally):
  *  - mirrors the official three-mesh-bvh webgpu example APIs exactly — every
@@ -130,6 +142,12 @@ export function createAdvancedRenderer(
   /** SHADOW/tracing geometry — must EXCLUDE emissive fixtures (see WorldDef) */
   bvhMeshes: THREE.Mesh[],
   lights: RtLight[],
+  /** decoded static bake — when present, static pixels get it from here and
+   *  the NEE loop skips `baked` lights on them (backlog #9 rule 1) */
+  lightmap?: { texture: THREE.Texture },
+  /** playable-floor anchor (world Y) for the fog height falloff — the
+   *  spawn probe's ground; see VolDeps.floorY */
+  fogFloorY?: number,
 ): AdvancedRenderer {
   // ---- BVH first: kernel deps reference its fns ------------------------------
   // Per-hit MATERIAL data. The lighting compute runs BEFORE the raster pass
@@ -140,6 +158,14 @@ export function createAdvancedRenderer(
   // material's gloss with zero extra rays and zero extra texture reads
   // (multi-material meshes fill per geometry group; a geometry shared with a
   // mesh of a different material gets its own clone).
+  // uv1 (glTF TEXCOORD_1, the lightmap atlas) rides the SAME mechanism for
+  // the same reason: the compute pass runs before the raster pass, so the
+  // lightmap lookup must come from the primary hit's interpolated vertex
+  // data, not from a G-buffer. Declared vec4f (UV in .xy) because the GPU
+  // packer writes each struct member at memberIndex*4 floats — only 16-byte
+  // members line up (position, normal are vec4f; roughness lands at float 8;
+  // uv1 at 12). Geometries without TEXCOORD_1 get the -1 sentinel from
+  // getDefaultAttributeValue = "no lightmap coverage" = dynamic surface.
   const roughnessOf = (m: THREE.Material): number => {
     const r = (m as THREE.MeshStandardMaterial).roughness;
     return typeof r === 'number' && Number.isFinite(r) ? Math.min(1, Math.max(0, r)) : 1;
@@ -170,16 +196,24 @@ export function createAdvancedRenderer(
   for (const mesh of bvhMeshes) prepareRoughness(mesh);
 
   const bvhData = new BVHComputeData(bvhMeshes, {
-    attributes: { position: 'vec4f', normal: 'vec4f', roughness: 'float' },
+    attributes: { position: 'vec4f', normal: 'vec4f', roughness: 'float', uv1: 'vec4f' },
   });
   // Safety net for the attribute above: a geometry missing `roughness` packs
   // the library default (0 = perfect mirror) — override it to 1 (fully
   // diffuse) so any packing gap degrades to today's look, never to a mirror.
+  // `uv1` missing (no TEXCOORD_1 = not covered by the bake) packs the
+  // dynamic-surface sentinel (-1) so the kernel never samples the atlas at a
+  // surface the bake does not cover.
   const defaultAttr = (
     bvhData as unknown as { getDefaultAttributeValue: (k: string, t: THREE.Vector4) => THREE.Vector4 }
   ).getDefaultAttributeValue.bind(bvhData);
   (bvhData as unknown as { getDefaultAttributeValue: (k: string, t: THREE.Vector4) => THREE.Vector4 }).getDefaultAttributeValue =
-    (key, target) => (key === 'roughness' ? target.set(1, 0, 0, 0) : defaultAttr(key, target));
+    (key, target) =>
+      key === 'roughness'
+        ? target.set(1, 0, 0, 0)
+        : key === 'uv1'
+          ? target.set(-1, -1, 0, 0)
+          : defaultAttr(key, target);
   let ready = false;
   void bvhData.updateAsync().then(() => {
     ready = true;
@@ -262,6 +296,30 @@ export function createAdvancedRenderer(
   specDenoiseB.minFilter = THREE.LinearFilter;
   specDenoiseB.magFilter = THREE.LinearFilter;
 
+  // ---- BAKED LIGHTMAP (backlog #9) ------------------------------------------
+  // The Cycles bake's outgoing radiance per primary hit — stored in its OWN
+  // buffer, never in lightingTex: it is noise-free (no history, no à-trous)
+  // and ?rtdebug=3 must stay honestly "realtime-dynamic-only". The composite
+  // adds it AFTER the albedo multiply (the bake already contains albedo —
+  // receipt: a black-diffuse plane bakes to 0).
+  const bakedTex = new THREE.StorageTexture(1, 1);
+  bakedTex.type = THREE.HalfFloatType;
+  bakedTex.format = THREE.RGBAFormat;
+  bakedTex.minFilter = THREE.LinearFilter;
+  bakedTex.magFilter = THREE.LinearFilter;
+  // placeholder keeps the binding valid on lightmap-less worlds (test room):
+  // the kernel gates every read on hasLightmap, it is never sampled
+  const lmTexture: THREE.Texture =
+    lightmap?.texture ??
+    new THREE.DataTexture(new Uint8Array([0, 0, 0, 255]), 1, 1, THREE.RGBAFormat, THREE.UnsignedByteType);
+  if (!lightmap) lmTexture.needsUpdate = true;
+  const lmImage = lmTexture.image as { width?: number; height?: number } | undefined;
+  console.info(
+    `[rt] lightmap ${lightmap ? `${lmImage?.width ?? '?'}x${lmImage?.height ?? '?'} half-float` : 'NONE (placeholder 1x1)'}` +
+      ` — ${lights.filter((l) => l.baked).length}/${lights.length} baked lights, ` +
+      `${lights.filter((l) => !l.baked).length} dynamic`,
+  );
+
   // ---- uniforms -----------------------------------------------------------------
   const invViewProj = uniform(new THREE.Matrix4());
   /** same matrix invViewProj is built from — turns a primary hit into a
@@ -269,6 +327,14 @@ export function createAdvancedRenderer(
   const viewMat = uniform(new THREE.Matrix4());
   const frameIndex = uniform(0);
   const lightCount = uniform(lights.length);
+  /** count of NON-baked lights — a baked pixel's bounce ray only ever sees
+   *  these (static GI lives in the lightmap), so with none the ray itself is
+   *  pure waste and the kernel skips it. Dynamic pixels still need the full
+   *  set, hence a separate count from lightCount (which fog also shares). */
+  const dynLightCount = uniform(lights.filter((l) => !l.baked).length);
+  /** 1 = this world shipped a lightmap → sample it per hit, skip baked lights
+   *  on lightmap-covered pixels */
+  const hasLightmap = uniform(lightmap ? 1 : 0);
   const bounceCount = uniform(0);
   const debugMode = uniform(0);
   /** area-jittered surface samples on / legacy single-tap off — ?rtsoft=0 = A/B */
@@ -336,7 +402,11 @@ export function createAdvancedRenderer(
       arr[o + 8] = l.extents?.[0] ?? 0;
       arr[o + 9] = l.extents?.[1] ?? 0;
       arr[o + 10] = l.extents?.[2] ?? 0;
-      arr[o + 11] = 0;
+      // le.w = BAKED flag (slot was padding). Every existing reader of `le`
+      // uses .xyz only — faceWeight, shadowVis, fogLightPoint — so the flag
+      // reaches only the surface kernel's skip test, fog keeps iterating the
+      // full list (light shafts from static fixtures must survive #9 rule 1)
+      arr[o + 11] = l.baked ? 1 : 0;
       arr[o + 12] = l.direction?.[0] ?? 0;
       arr[o + 13] = l.direction?.[1] ?? 0;
       arr[o + 14] = l.direction?.[2] ?? 0;
@@ -389,6 +459,7 @@ export function createAdvancedRenderer(
   const volPass = new VolumetricPass({
     bvhData,
     geomTex,
+    floorY: fogFloorY,
     lightsNode: () => lightsNode,
     invViewProj,
     viewMat,
@@ -414,6 +485,7 @@ export function createAdvancedRenderer(
       lightingTex: texture_storage_2d<rgba16float, write>,
       geomTex: texture_storage_2d<rgba16float, write>,
       specTex: texture_storage_2d<rgba16float, write>,
+      bakedTex: texture_storage_2d<rgba16float, write>,
       historyTex: texture_2d<f32>,
       specHistory: texture_2d<f32>,
       blendAlpha: f32,
@@ -426,6 +498,9 @@ export function createAdvancedRenderer(
       softShadow: f32,
       lightGain: f32,
       specOn: f32,
+      hasLightmap: f32,
+      lightmapTex: texture_2d<f32>,
+      dynLightCount: f32,
       workgroupSize: vec3u,
       workgroupId: vec3u,
       localId: vec3u,
@@ -450,6 +525,7 @@ export function createAdvancedRenderer(
         textureStore(geomTex, indexUV, vec4f(0.0, 0.0, 0.0, -1.0));
         textureStore(lightingTex, indexUV, vec4f(uv, 0.3, 1.0));
         textureStore(specTex, indexUV, vec4f(0.0, 0.0, 0.0, 1.0));
+        textureStore(bakedTex, indexUV, vec4f(0.0, 0.0, 0.0, 1.0));
         return vec4f(0.0);
       }
 
@@ -464,6 +540,8 @@ export function createAdvancedRenderer(
         // geometry into the void or the void into geometry — that is exactly
         // the silhouette bleed this guide exists to stop
         textureStore(geomTex, indexUV, vec4f(0.0, 0.0, 0.0, -1.0));
+        // void has no surface to light — baked term is zero here too
+        textureStore(bakedTex, indexUV, vec4f(0.0, 0.0, 0.0, 1.0));
         // debug2 promises "red = miss" (HUD + comment below) — paint it so
         // void/seam pixels are unmistakable instead of blending to black
         if (debugMode > 1.5 && debugMode < 2.5) {
@@ -513,6 +591,23 @@ export function createAdvancedRenderer(
       var spec = vec3f(0.0);
       let nLights = u32(lightCount + 0.5);
 
+      // BAKED static lighting (backlog #9): the hit's TEXCOORD_1 (uv1 —
+      // -1 sentinel = not covered by the bake) samples the decoded Cycles
+      // lightmap. Outgoing radiance with albedo already inside, so the
+      // composite adds it un-multiplied and NEVER through this buffer —
+      // ?rtdebug=3 stays honestly "realtime-dynamic-only".
+      // skipBaked: this pixel DISPLAYS its lightmap, so its realtime loops
+      // must skip every baked light — that is the whole no-double-lighting
+      // rule. A -1 hit (dynamic surface: players, animated) gets NO baked
+      // term and the FULL light set instead.
+      var baked = vec3f(0.0);
+      var skipBaked = 0.0;
+      if (hasLightmap > 0.5 && spt.uv1.x >= 0.0) {
+        baked = sampleLightmap(lightmapTex, spt.uv1.xy);
+        skipBaked = 1.0;
+      }
+      textureStore(bakedTex, indexUV, vec4f(baked, 1.0));
+
       if (debugMode > 1.5 && debugMode < 2.5) {
         // debug2: hit/miss colour SHADED by real shadow-ray visibility —
         // bright green = hit & lit · dark green = hit & IN SHADOW · red = miss.
@@ -521,6 +616,9 @@ export function createAdvancedRenderer(
         // one jittered sample per frame is noisy alone, a static camera
         // converges it (the old early-return skipped history, so the promised
         // accumulation never actually happened).
+        // Iterates the FULL light set on purpose: this view diagnoses shadow
+        // VISIBILITY of the world's lights, not the baked/realtime split
+        // (the split's proof is ?rtdebug=3, which shows realtime-only).
         var vis = 0.0;
         for (var li = 0u; li < nLights; li++) {
           let lseed = jseed + vec2f(f32(li) * 17.31, f32(li) * 9.17);
@@ -544,17 +642,26 @@ export function createAdvancedRenderer(
 
         // direct lighting: next-event estimation — ONE surface sample per light
         // per frame (jseed + light index decorrelate the jitter; temporal
-        // accumulation converges it into a continuous penumbra)
+        // accumulation converges it into a continuous penumbra). Baked lights
+        // are skipped inside directLight when this pixel displays its lightmap.
         let V = -ray.direction; // surface → camera (primary ray), normalised
         for (var li = 0u; li < nLights; li++) {
           let lseed = jseed + vec2f(f32(li) * 17.31, f32(li) * 9.17);
-          let dl = directLight(li, P, N, V, hitRough, 1.0, specOn, lseed, softShadow, lightGain);
+          let dl = directLight(li, P, N, V, hitRough, 1.0, specOn, lseed, softShadow, lightGain, skipBaked);
           acc += dl.diffuse;
           spec += dl.specular;
         }
 
-        // one bounce: cosine hemisphere ray, shade at the hit point
-        if (bounceCount > 0.5) {
+        // one bounce: cosine hemisphere ray, shade at the hit point.
+        // The ray itself is skipped when its light loop would contribute
+        // nothing: a baked pixel's bounce only ever sees DYNAMIC lights
+        // (static GI is already in the lightmap), a dynamic pixel needs the
+        // full set — its bounce may land on a static surface and must still
+        // receive static light (nothing at THIS pixel is baked to double).
+        // select(), not ?: — this Tint build rejects the ternary operator
+        // ("invalid character found" at the '?', probe-verified).
+        let bounceLights = select(nLights > 0u, dynLightCount > 0.5, skipBaked > 0.5);
+        if (bounceCount > 0.5 && bounceLights) {
           let seed = uv * vec2f(311.7, 271.9) + vec2f(frameIndex * 0.618, frameIndex * 0.271);
           let r1 = hash12(seed);
           let r2 = hash12(seed + vec2f(17.13, 3.71));
@@ -579,7 +686,7 @@ export function createAdvancedRenderer(
               // specScale = 0: the bounce is shaded as DIFFUSE radiance
               // (bacc/π below) — a specular lobe leaving the bounce point is
               // directional and would leak the wrong way through this term
-              bacc += directLight(li, BP, BN, -dir, 1.0, 0.72, 0.0, lseed, softShadow, lightGain).diffuse;
+              bacc += directLight(li, BP, BN, -dir, 1.0, 0.72, 0.0, lseed, softShadow, lightGain, skipBaked).diffuse;
             }
             // FIREFLY CLAMP: a bounce landing next to a light spikes 1/d² into
             // single white pixels — the "particles" in screenshots. Cap the
@@ -779,6 +886,7 @@ export function createAdvancedRenderer(
       seed: vec2f,
       soft: f32,
       gain: f32,
+      skipBaked: f32,
     ) -> DirectLight {
       let b = li * 5u;
       let lp = rt_lights.value[b];
@@ -786,6 +894,12 @@ export function createAdvancedRenderer(
       let le = rt_lights.value[b + 2u];
       let ld = rt_lights.value[b + 3u];
       let lq = rt_lights.value[b + 4u];
+      // NO DOUBLE-LIGHTING (backlog #9 rule 1): a baked light must not light
+      // a pixel that is displaying its lightmap contribution. Skipped BEFORE
+      // any ray work — the lightmap makes every static pixel cost 0 shadow
+      // rays for the 4 baked fixtures (this is where "realtime renders only
+      // the small dynamic pieces" becomes literal). le.w is the baked flag.
+      if (skipBaked > 0.5 && le.w > 0.5) { return DirectLight(vec3f(0.0), vec3f(0.0)); }
       if (lp.w <= 0.0) { return DirectLight(vec3f(0.0), vec3f(0.0)); }
       // one-way cone: lights only the region the fixture POINTS at (Blender
       // prop cone_deg) — a clipped-through fixture stops lighting its outside
@@ -828,6 +942,25 @@ export function createAdvancedRenderer(
       return DirectLight(diffuse, specular);
     }
 
+    // Bilinear sample of the decoded lightmap (CPU RGBM → linear half-float).
+    // textureLoad with manual filtering, NOT textureSample: a sampler would
+    // have to be plumbed through wgslFn's param binding, and the data is
+    // already linear (no colorspace transfer to reason about). Four taps cost
+    // less than the rays the baked split removed. Clamped at the atlas border.
+    fn sampleLightmap(tex: texture_2d<f32>, uv: vec2f) -> vec3f {
+      let dims = vec2f(textureDimensions(tex));
+      let p = uv * dims - 0.5;
+      let i0 = vec2i(floor(p));
+      let f = p - vec2f(i0);
+      let maxI = max(vec2i(dims) - vec2i(1), vec2i(0));
+      let lo = vec2i(0);
+      let a = textureLoad(tex, clamp(i0, lo, maxI), 0).rgb;
+      let b = textureLoad(tex, clamp(i0 + vec2i(1, 0), lo, maxI), 0).rgb;
+      let c = textureLoad(tex, clamp(i0 + vec2i(0, 1), lo, maxI), 0).rgb;
+      let d = textureLoad(tex, clamp(i0 + vec2i(1, 1), lo, maxI), 0).rgb;
+      return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+    }
+
     // pure visibility term for debug mode: 1 = lit by this light, 0 = shadowed
     // (a face turned away from the receiver counts as shadowed — it emits
     // nothing toward it; temporal accumulation smooths the per-frame jitter)
@@ -857,6 +990,7 @@ export function createAdvancedRenderer(
     lightingTex: textureStore(lightingTex),
     geomTex: textureStore(geomTex),
     specTex: textureStore(specTex),
+    bakedTex: textureStore(bakedTex),
     historyTex: texture(historyTex),
     specHistory: texture(specHistoryTex),
     blendAlpha,
@@ -869,6 +1003,9 @@ export function createAdvancedRenderer(
     softShadow,
     lightGain,
     specOn,
+    hasLightmap,
+    lightmapTex: texture(lmTexture),
+    dynLightCount,
     workgroupSize,
     workgroupId,
     localId,
@@ -1095,14 +1232,23 @@ export function createAdvancedRenderer(
       const specRawN = texture(specTex, lightingUv);
       const specDenN = texture(specOut, lightingUv);
       const specN = mix(specDenN, specRawN, step(2.5, rtFlag));
+      // BAKED lightmap, its own buffer (noise-free, no history): added AFTER
+      // the albedo multiply because the Cycles Combined bake stores OUTGOING
+      // radiance — albedo is already inside (receipt: black diffuse bakes 0).
+      // Scaled by lightGain so the slider keeps meaning "brightness of all
+      // light". Never in lightingTex — hence ?rtdebug=3 = realtime-dynamic-only.
+      const bakedN = texture(bakedTex, lightingUv);
       const lit = diffuseN.mul(denN).add(emissiveN);
       // Gloss is added UN-multiplied by albedo (a highlight is tinted by the
       // light, not the wall) — but masked on EMISSIVE pixels: the primary ray
       // passes straight through a fixture (fixtures are excluded from the
       // BVH), so the spec computed there belongs to the hidden wall behind it
-      // and must not glow on top of the fixture's own emission.
+      // and must not glow on top of the fixture's own emission. The baked
+      // term gets the same mask for the same reason.
       const emMask = vec3(1.0, 1.0, 1.0).sub(emissiveN.rgb.clamp(0.0, 1.0));
-      const beautyRgb = lit.rgb.add(specN.rgb.mul(emMask));
+      const beautyRgb = bakedN.rgb.mul(lightGain).mul(emMask)
+        .add(lit.rgb)
+        .add(specN.rgb.mul(emMask));
       // Volumetrics composites over the FINAL image (denoised lighting ×
       // albedo + emissive + gloss) so fixtures get hazed too (reference/
       // vibe.png): premultiplied fog — final = beauty·T + S, rgb only, beauty
@@ -1120,6 +1266,8 @@ export function createAdvancedRenderer(
       const rtColor = mix(beauty, traced, step(0.5, rtFlag));
       const bufferShown = vec4(bufferN.rgb.add(specN.rgb), 1.0);
       const shown = mix(rtColor, bufferShown, step(1.5, rtFlag));
+      // ?rtdebug=4 — the baked lightmap buffer raw (bake consumption check)
+      const shownBaked = mix(shown, vec4(bakedN.rgb, 1.0), step(3.5, rtFlag));
       // ?rtmat=1|2 — material inspection views: EXACT buffer values (albedo /
       // specular), no bloom, no fog — the grid readbacks in rt-mat-smoke.mjs
       // measure these directly
@@ -1128,7 +1276,7 @@ export function createAdvancedRenderer(
         vec4(specN.rgb, 1.0),
         step(1.5, matView),
       );
-      const viewShown = mix(shown, matShown, step(0.5, matView));
+      const viewShown = mix(shownBaked, matShown, step(0.5, matView));
       const bloomed = viewShown.add(bloom(viewShown, 0.5, 0.5, 0.75));
       return mix(bloomed, viewShown, step(0.5, matView));
     })();
@@ -1176,6 +1324,7 @@ export function createAdvancedRenderer(
       lightingTex.setSize(w, h, 1);
       historyTex.setSize(w, h, 1);
       geomTex.setSize(w, h, 1);
+      bakedTex.setSize(w, h, 1);
       denoiseTexA.setSize(w, h, 1);
       denoiseTexB.setSize(w, h, 1);
       specTex.setSize(w, h, 1);
@@ -1292,14 +1441,21 @@ export function createAdvancedRenderer(
         volActive = true;
       }
       ranThisFrame = true;
-      // rtFlag: 0 = beauty · 1 = traced (albedo × DENOISED lighting + emissive)
+      // rtFlag: 0 = beauty · 1 = traced (albedo × DENOISED lighting + baked lightmap + emissive)
       //         · 2 = buffer view (?rtdebug=1|2) · 3 = RAW buffer view
-      //         (?rtdebug=3 — the raw-lighting diagnostic must stay undenoised).
+      //         (?rtdebug=3 — REALTIME-DYNAMIC-ONLY: the raw temporal lighting
+      //         buffer, undenoised, and (with a lightmap) deliberately without
+      //         the baked static light — that lives in its own buffer and is
+      //         added only in the traced composite).
+      //         · 4 = the BAKED lightmap buffer (?rtdebug=4 — bake-consumption
+      //         diagnostic: what the lightmap term contributes, pre-gain,
+      //         no albedo/emissive/gloss applied on top)
       // Buffer view rather than traced, because the traced path multiplies by
       // the gbuffer diffuse — and void/seam pixels have zero diffuse (MRT
       // clear), which multiplied the debug "red = miss" to black, hiding
       // exactly the holes it exists to show.
-      rtFlag.value = debugMode.value > 2.5 ? 3 : debugMode.value > 0.5 ? 2 : 1;
+      rtFlag.value =
+        debugMode.value > 3.5 ? 4 : debugMode.value > 2.5 ? 3 : debugMode.value > 0.5 ? 2 : 1;
     },
     render(): void {
       if (!ranThisFrame) rtFlag.value = 0;
@@ -1329,10 +1485,12 @@ export function createAdvancedRenderer(
         fillLightArray(next, lightsAttr.array as Float32Array);
         lightsAttr.needsUpdate = true;
         lightCount.value = next.length;
+        dynLightCount.value = next.filter((l) => !l.baked).length;
         return;
       }
       lightsNode = makeLightsNode(next);
       lightCount.value = next.length;
+      dynLightCount.value = next.filter((l) => !l.baked).length;
       kernelNode = undefined; // rebuilt lazily on the next dispatch
       volPass.invalidate(); // the fog kernel indexes rt_lights at module scope
     },
@@ -1344,6 +1502,7 @@ export function createAdvancedRenderer(
       lightingTex.dispose();
       historyTex.dispose();
       geomTex.dispose();
+      bakedTex.dispose();
       denoiseTexA.dispose();
       denoiseTexB.dispose();
       specTex.dispose();

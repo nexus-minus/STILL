@@ -168,6 +168,36 @@ materials per the plan below.
    within a frame via the realtime dynamic layer; permanent changes fold
    back into the bake offline (no runtime baking).
 
+**Status 2026-11-21: consumption SHIPPED** — all three requirements
+verified by `scripts/rt-bake-smoke.mjs` (16 asserts): (1) per-light
+`baked` flag rides `le.w` and static pixels skip baked lights *before any
+ray work* (baked×50 → 0/255 delta over 278 points; raw ambient < half of
+realtime-static) — static pixels now cost **0 shadow rays** for the
+fixtures; (2) clipping measured (max radiance 6.6, 1.59 % of texels over
+1.0, AgX display error ≤0.177) → **RGBM re-encode** with both channels
+sRGB-encoded (sRGB-M floor 0.002 vs linear-M's 0.026, which blacked out
+whole rooms in the first attempt; round-trip worst error 0.77 %);
+(3) runtime light change visible **within 3 frames** (raw Δ+62.7/255,
+beauty Δ+116.2). Also shipped: **uv1-sentinel classification** for
+dynamic geometry (no TEXCOORD_1 → full realtime light set + ambient;
+covered → lightmap + dynamic lights only — players/animated
+auto-classify when they land in the BVH); baked term in its **own buffer
+added after the albedo multiply** (a Cycles Combined bake stores outgoing
+radiance *with* albedo inside — never through `diffuse × lighting`);
+potato receives it through the forward **emissive slot** (NOT
+`material.lightMap`, which double-applies albedo and adds a 1/π error);
+K=π applied once at decode (static+dynamic share one scale, calibrated
++10 % under AgX vs legacy); `?rtdebug=3` = realtime-dynamic-only,
+`?rtdebug=4` = the baked buffer, `?nolightmap` A/Bs the split.
+
+**Interactive/lever lights (design, not yet implemented):** a light
+toggled at runtime cannot remove its own baked pool — the bake must
+exclude it: Blender prop `dynamic=1` → `bake_map.py` zeroes that
+fixture's emission during the Cycles bake (restores before re-export),
+lists it in `manifest.lightmap.dynamic[]` → loader marks it
+`baked:false` (full realtime layer + potato PointLight). Until then:
+permanent changes fold into the offline rebake (~6 s).
+
 Promotes item 4 to the full production split: **Cycles-baked static
 lightmaps for all static fixtures + the realtime mesh-light layer for
 anything dynamic** — static lighting becomes noise-free at 60 fps on any

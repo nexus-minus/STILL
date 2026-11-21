@@ -35,6 +35,16 @@ export class FramePipeline {
     return this.advanced !== undefined;
   }
 
+  /**
+   * true only when the advanced renderer can actually PRODUCE a frame this
+   * tick (BVH uploaded). dispatch() no-ops until then and render() falls back
+   * to the beauty pass — main.ts syncs the forward baked layer against this
+   * so those pre-ready frames show baked light instead of a dark scene.
+   */
+  get rtReady(): boolean {
+    return this.advanced?.ready ?? false;
+  }
+
   get postActive(): boolean {
     return this.glowEnabled && (this.post?.ok ?? false);
   }

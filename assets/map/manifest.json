@@ -2,15 +2,15 @@
   "collections": {
     "objects": {
       "file": "objects.glb",
-      "count": 5,
+      "count": 7,
       "bounds": [
         [
           -13.447529792785645,
           -13.447529792785645,
-          -9.223642349243164
+          -28.417766571044922
         ],
         [
-          34.066131591796875,
+          149.7810821533203,
           74.80451202392578,
           6.977813720703125
         ]
@@ -36,5 +36,83 @@
   "sound": [],
   "skipped": [
     "reference"
-  ]
+  ],
+  "emissive": {
+    "exported": [
+      {
+        "name": "light",
+        "collection": "objects",
+        "file": "objects.glb",
+        "dimensions": [
+          0.44,
+          0.44,
+          0.44
+        ],
+        "strength": 5.0,
+        "color": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      {
+        "name": "light.001",
+        "collection": "objects",
+        "file": "objects.glb",
+        "dimensions": [
+          0.767,
+          4.785,
+          1.995
+        ],
+        "strength": 5.0,
+        "color": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      {
+        "name": "light.002",
+        "collection": "objects",
+        "file": "objects.glb",
+        "dimensions": [
+          0.901,
+          4.845,
+          0.759
+        ],
+        "strength": 5.0,
+        "color": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      {
+        "name": "light.003",
+        "collection": "objects",
+        "file": "objects.glb",
+        "dimensions": [
+          0.44,
+          0.44,
+          0.44
+        ],
+        "strength": 5.0,
+        "color": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      }
+    ],
+    "objectsGlb": 4,
+    "objectsGlbVerified": 4
+  },
+  "skippedEmissive": [],
+  "lightmap": {
+    "file": "lightmap.png",
+    "resolution": 2048,
+    "uv": "TEXCOORD_1",
+    "encoding": "rgbm",
+    "range": 6.598049
+  }
 }

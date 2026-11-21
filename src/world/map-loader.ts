@@ -12,6 +12,21 @@ export interface WorldCheckpoint {
   radius: number;
 }
 
+/** Decoded static-light bake (manifest → lightmap.png → linear half-float). */
+export interface WorldLightmap {
+  /**
+   * Linear RGB as an RGBA half-float texture, row 0 = TOP = glTF v0 (the
+   * game's flipY=false convention — glTF UV (0,0) is the image's top-left).
+   * RGBM is decoded ONCE on the CPU at load (see loadLightmap) so both
+   * consumers — the WebGPU lighting kernel (textureLoad) and the forward
+   * path's emissiveMap — read plain linear values with zero shader decode.
+   */
+  texture: THREE.DataTexture;
+  /** RGBM decode range (manifest lightmap.range) — already folded into `texture` */
+  range: number;
+  resolution: number;
+}
+
 export interface WorldDef {
   group: THREE.Group;
   collisionMeshes: THREE.Mesh[];
@@ -30,6 +45,22 @@ export interface WorldDef {
   bounds: THREE.Box3;
   /** 'test' keeps the demo anchor/lore wiring in main */
   source: 'map' | 'test';
+  /** present when manifest.lightmap loaded — the static bake for this map */
+  lightmap?: WorldLightmap;
+  /**
+   * Forward-path baked layer toggle (potato/WebGL2, RT-off, pre-BVH frames).
+   * Cycles' Combined bake stores OUTGOING radiance — albedo already inside —
+   * so it must be ADDED un-multiplied: `material.lightMap` would apply albedo
+   * a second time (receipt: a black-diffuse plane bakes to 0, i.e. the bake
+   * carries the surface colour) AND three treats lightMap as irradiance with
+   * a 1/π BRDF — wrong on both counts. Instead the lightmap rides the
+   * emissive slot (emissive = white × emissiveMap = lightmap): three adds
+   * totalEmissiveRadiance after lighting, exactly the composite the WebGPU
+   * path uses. Only legal while the FORWARD renderer draws (the RT path's
+   * MRT emissive attachment must stay pristine — it masks gloss there), so
+   * main.ts re-syncs this every frame; no-op when there is no lightmap.
+   */
+  setForwardBaked(on: boolean): void;
   /** demo-room extras (only present for the test fallback) */
   demo?: {
     anchorInteract: THREE.Vector3;
@@ -48,6 +79,15 @@ interface Manifest {
     radius?: number;
   }>;
   skipped?: string[];
+  /** additive block written by tools/bake_map.sh (unknown to plain exports) */
+  lightmap?: {
+    file?: string;
+    resolution?: number;
+    uv?: string;
+    /** 'rgbm' = rgb is the sRGB-encoded ratio, alpha the sRGB-encoded m/RANGE (see loadLightmap) */
+    encoding?: string;
+    range?: number;
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -274,6 +314,94 @@ export function fixtureExposed(
 }
 
 /**
+ * Load + decode manifest.lightmap into a linear half-float texture.
+ *
+ * ENCODING (tools/bake_map.py → manifest.lightmap.encoding = "rgbm"):
+ *   rgb = srgb_encode(rgb_linear / m),  alpha = srgb_encode(m / RANGE)
+ * so decode is `srgbDecode(rgb) * srgbDecode(alpha) * RANGE` — full HDR (this
+ * bake's range 6.598 = 2.7 stops over 1.0, where plain sRGB-8 would have
+ * clipped 1.59 % of texels to white; see the bake's own clipping_report).
+ * RGBM's per-texel M is what keeps dark-region precision: a global scale
+ * would multiply 8-bit sRGB's near-black step by RANGE and band the shadows,
+ * and a LINEAR M channel floors dark texels at RANGE/255 (0.026 here — that
+ * zeroed whole rooms on the first cut), hence sRGB on the M channel too.
+ *
+ * Orientation: PNG row 0 is the TOP of the image (probe-measured — Blender's
+ * pixels[] is bottom-up and flips on save), glTF UV (0,0) is the image's
+ * top-left, and the game samples flipY=false (texture v=0 = row 0) — so the
+ * canvas rows go into the DataTexture unflipped and every consumer shares one
+ * convention: row 0 = glTF v0.
+ *
+ * A legacy manifest (no `encoding` field) decodes as plain sRGB — the clip is
+ * baked in already, nothing to undo.
+ */
+async function loadLightmap(info: NonNullable<Manifest['lightmap']>): Promise<WorldLightmap> {
+  const res = await fetch(`map/${info.file}`);
+  if (!res.ok) throw new Error(`HTTP ${res.status} for map/${info.file}`);
+  const url = URL.createObjectURL(await res.blob());
+  try {
+    const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const el = new Image();
+      el.onload = () => resolve(el);
+      el.onerror = () => reject(new Error(`could not decode map/${info.file}`));
+      el.src = url;
+    });
+    const w = image.naturalWidth;
+    const h = image.naturalHeight;
+    if (!w || !h) throw new Error(`empty image map/${info.file}`);
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) throw new Error('no 2d context for lightmap decode');
+    ctx.drawImage(image, 0, 0);
+    const src = ctx.getImageData(0, 0, w, h).data;
+
+    // sRGB8 → linear LUT (256 entries; a per-texel Math.pow over 16.7M
+    // channels is seconds of startup, the LUT is microseconds)
+    const lut = new Float32Array(256);
+    for (let i = 0; i < 256; i++) {
+      const c = i / 255;
+      lut[i] = c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+    }
+    const rgbm = info.encoding === 'rgbm';
+    const range = rgbm ? (info.range ?? 1) : 1;
+    if (rgbm && !(range > 0)) throw new Error('rgbm lightmap without a positive manifest range');
+
+    const out = new Uint16Array(w * h * 4);
+    const toHalf = THREE.DataUtils.toHalfFloat;
+    // SCALE: the bake is PHYSICAL Cycles radiance, the realtime layer runs the
+    // renderer's tuned light-power heuristic which omits the Lambert 1/π
+    // (docs/render-pipeline.md: "the composite does albedo × buffer — Lambert
+    // WITHOUT 1/π — the light-power heuristic was tuned that way"). Multiplying
+    // the bake by π lands static and dynamic light on ONE scale — without it a
+    // dynamic light reads ~3x stronger than the static light beside it, i.e.
+    // inconsistent (backlog #9's whole point). Applied here so the RT kernel
+    // and the potato emissiveMap path consume the SAME scaled values.
+    const SCALE = Math.PI;
+    for (let i = 0, o = 0; i < src.length; i += 4, o += 4) {
+      // both channels sRGB-encoded (see header) — the same LUT decodes either
+      const m = rgbm ? lut[src[i + 3]] * range : 1;
+      out[o] = toHalf(lut[src[i]] * m * SCALE);
+      out[o + 1] = toHalf(lut[src[i + 1]] * m * SCALE);
+      out[o + 2] = toHalf(lut[src[i + 2]] * m * SCALE);
+      out[o + 3] = toHalf(1);
+    }
+    const texture = new THREE.DataTexture(out, w, h, THREE.RGBAFormat, THREE.HalfFloatType);
+    texture.minFilter = THREE.LinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    texture.colorSpace = THREE.NoColorSpace; // already linear — no transfer fn
+    texture.needsUpdate = true;
+    console.info(
+      `[world] lightmap ${info.file} — ${w}x${h} ${rgbm ? `RGBM range ${range.toFixed(3)}` : 'sRGB (legacy)'} → linear half-float`,
+    );
+    return { texture, range, resolution: info.resolution ?? w };
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+/**
  * PHASE 2 entry: assets/map/manifest.json + objects.glb (your Blender export)
  * become the world. Falls back to the procedural test room when the map isn't
  * exported yet. Emissive meshes (L_*) are extracted as raytracing lights —
@@ -307,8 +435,34 @@ export async function loadWorld(opts: { forceTest?: boolean } = {}): Promise<Wor
   draco.setDecoderPath('draco/');
   loader.setDRACOLoader(draco);
 
+  // static bake (absent on plain exports — everything below is a no-op then).
+  // ?nolightmap ignores a present one — the A/B scripts/rt-bake-smoke.mjs uses
+  // to prove the potato/forward path is lit BY the lightmap (lit vs not).
+  const ignoreLightmap = new URLSearchParams(location.search).has('nolightmap');
+  if (ignoreLightmap && manifest.lightmap) {
+    console.info('[world] ?nolightmap — ignoring the manifest lightmap (realtime-only A/B)');
+  }
+  const lmInfo =
+    ignoreLightmap || !manifest.lightmap?.file
+      ? undefined
+      : manifest.lightmap.uv === 'TEXCOORD_1'
+        ? manifest.lightmap
+        : (() => {
+            console.warn(
+              `[world] manifest.lightmap.uv is "${manifest.lightmap.uv}" — the renderer contract is TEXCOORD_1, ignoring the lightmap`,
+            );
+            return undefined;
+          })();
+  const lightmapPromise: Promise<WorldLightmap | undefined> = lmInfo
+    ? loadLightmap(lmInfo).catch((err) => {
+        console.warn('[world] lightmap load failed — realtime-only lighting', err);
+        return undefined;
+      })
+    : Promise.resolve(undefined);
+
   const gltf = await loader.loadAsync(`map/${objectsFile}`);
   draco.dispose();
+  const lightmap = await lightmapPromise;
 
   const group = gltf.scene;
   group.updateMatrixWorld(true);
@@ -317,6 +471,8 @@ export async function loadWorld(opts: { forceTest?: boolean } = {}): Promise<Wor
   const emissiveMeshes = new Set<THREE.Mesh>();
   const rtLights: RtLight[] = [];
   const bounds = new THREE.Box3();
+  // materials the FORWARD baked layer swaps (non-fixture, TEXCOORD_1 present)
+  const forwardTargets = new Set<THREE.MeshStandardMaterial>();
   // fixtures whose boxes may still need the embed-nudge — collected here (the
   // shadow geometry isn't known until the traverse finished)
   const pendingLights: Array<{
@@ -327,7 +483,7 @@ export async function loadWorld(opts: { forceTest?: boolean } = {}): Promise<Wor
     extents: [number, number, number];
     orientation?: [number, number, number, number];
     authoredDir?: [number, number, number];
-    pointLight: THREE.PointLight;
+    pointLight?: THREE.PointLight;
   }> = [];
 
   group.traverse((obj) => {
@@ -337,13 +493,23 @@ export async function loadWorld(opts: { forceTest?: boolean } = {}): Promise<Wor
     bounds.expandByObject(mesh);
 
     const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    // TEXCOORD_1 contract (docs/blender-conventions.md → Baking): a mesh
+    // without the second UV set cannot sample the atlas, so it never joins
+    // the baked layer — it stays a DYNAMIC surface (full realtime light set,
+    // no baked term). That single sentinel is the whole static/dynamic
+    // classification: it can never desync from what the bake actually covers.
+    const hasUv1 = mesh.geometry.getAttribute('uv1') !== undefined;
     for (const material of materials) {
       const std = material as THREE.MeshStandardMaterial;
       const emissive = std.emissive;
       const strength = std.emissiveIntensity ?? 1;
-      if (!emissive || strength <= 0) continue;
-      const luma = Math.max(emissive.r, emissive.g, emissive.b);
-      if (luma < 0.001) continue;
+      const luma = emissive ? Math.max(emissive.r, emissive.g, emissive.b) : 0;
+      const isFixture = strength > 0 && luma >= 0.001;
+      if (lightmap && !isFixture && hasUv1 && std.isMeshStandardMaterial) {
+        forwardTargets.add(std);
+      }
+      if (!isFixture) continue;
+      const baked = lightmap !== undefined;
 
       const meshBox = new THREE.Box3().setFromObject(mesh);
       const size = meshBox.getSize(new THREE.Vector3());
@@ -407,20 +573,32 @@ export async function loadWorld(opts: { forceTest?: boolean } = {}): Promise<Wor
         orientation,
         direction,
         coneCos,
+        // static bake covers this fixture (backlog #9 rule 1): the realtime
+        // layer must skip it on pixels that display their lightmap, while fog
+        // shafts and DYNAMIC pixels (no lightmap coverage) keep using it —
+        // so the light stays in the buffer, flagged, not removed
+        baked,
       });
 
       // Fallback illumination: the WebGL2/potato/compat paths have no traced
       // lighting — without this the imported map is pitch black there (the
       // test room had fake point lights; imported maps need the same).
       // Their test material is dim emission, so the floor is deliberately high.
-      const pointLight = new THREE.PointLight(
-        new THREE.Color(emissive.r, emissive.g, emissive.b),
-        Math.max(power * 8, 25),
-        Math.max(10, Math.sqrt(power) * 10),
-        2,
-      );
-      pointLight.position.copy(center);
-      group.add(pointLight);
+      // A BAKED fixture gets NO point light: its light already reaches the
+      // forward path through lightmap.png (adding this would double-light
+      // every static surface on potato — exactly what rule 1 forbids). Only
+      // dynamic fixtures (not covered by the bake) keep a fallback light.
+      let pointLight: THREE.PointLight | undefined;
+      if (!baked) {
+        pointLight = new THREE.PointLight(
+          new THREE.Color(emissive.r, emissive.g, emissive.b),
+          Math.max(power * 8, 25),
+          Math.max(10, Math.sqrt(power) * 10),
+          2,
+        );
+        pointLight.position.copy(center);
+        group.add(pointLight);
+      }
       emissiveMeshes.add(mesh);
       // remember the fixture so the nudge can move the single light entry AND
       // the GL fallback together (both must stay on the same side of the wall)
@@ -520,7 +698,7 @@ export async function loadWorld(opts: { forceTest?: boolean } = {}): Promise<Wor
         light.position[0] += res.offset.x;
         light.position[1] += res.offset.y;
         light.position[2] += res.offset.z;
-        p.pointLight.position.add(res.offset); // GL fallback follows the RT light
+        p.pointLight?.position.add(res.offset); // GL fallback follows the RT light
         console.info(
           `[map] light "${p.name}": ${fmt(p.center)} -> ${fmt(after)} ` +
             `outward (${res.dir.x.toFixed(2)}, ${res.dir.y.toFixed(2)}, ${res.dir.z.toFixed(2)}) ` +
@@ -534,6 +712,38 @@ export async function loadWorld(opts: { forceTest?: boolean } = {}): Promise<Wor
     }
   }
 
+  // ---- forward-path baked layer (potato / WebGL2 / RT-off frames) ----------
+  // See WorldDef.setForwardBaked for WHY the emissive slot instead of
+  // material.lightMap. State is material-level (shared materials swap once)
+  // and idempotent — main.ts calls it every frame, mutating only on change
+  // (three recompiles a program when emissiveMap appears/disappears, so a
+  // stable path must be a stable no-op).
+  let forwardBakedOn = false;
+  const forwardSaved = new Map<THREE.MeshStandardMaterial, { emissive: THREE.Color; intensity: number }>();
+  const setForwardBaked = (on: boolean): void => {
+    if (!lightmap || on === forwardBakedOn) return;
+    forwardBakedOn = on;
+    for (const mat of forwardTargets) {
+      if (on) {
+        if (!forwardSaved.has(mat)) {
+          forwardSaved.set(mat, { emissive: mat.emissive.clone(), intensity: mat.emissiveIntensity });
+        }
+        mat.emissive.setRGB(1, 1, 1);
+        mat.emissiveIntensity = 1;
+        mat.emissiveMap = lightmap.texture;
+        mat.emissiveMap.channel = 1; // sample TEXCOORD_1 (uv1) — the atlas
+      } else {
+        const saved = forwardSaved.get(mat);
+        if (!saved) continue;
+        mat.emissive.copy(saved.emissive);
+        mat.emissiveIntensity = saved.intensity;
+        mat.emissiveMap = null;
+      }
+      mat.needsUpdate = true;
+    }
+    console.info(`[world] forward baked layer ${on ? 'ON' : 'OFF'} (${forwardTargets.size} materials)`);
+  };
+
   return {
     group,
     collisionMeshes,
@@ -543,6 +753,8 @@ export async function loadWorld(opts: { forceTest?: boolean } = {}): Promise<Wor
     checkpoints,
     bounds,
     source: 'map',
+    lightmap,
+    setForwardBaked,
   };
 }
 
@@ -660,6 +872,8 @@ function testWorld(matroom = false): WorldDef {
     ],
     source: 'test',
     bounds,
+    // no lightmap on the procedural room — the forward baked layer is a no-op
+    setForwardBaked: () => {},
     demo: {
       anchorInteract: room.anchor.interact,
       anchorFeet: room.anchor.feet,

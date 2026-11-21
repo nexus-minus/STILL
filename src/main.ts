@@ -242,7 +242,10 @@ async function main(): Promise<void> {
       // identity matrices would park all geometry at local origins
       scene.updateMatrixWorld(true);
       camera.updateMatrixWorld(true);
-      advanced = createAdvancedRenderer(renderer, scene, camera, world.shadowMeshes, world.rtLights);
+      advanced = createAdvancedRenderer(
+        renderer, scene, camera, world.shadowMeshes, world.rtLights, world.lightmap,
+        spawnFeet.y,
+      );
       advanced.setLogicalSize(window.innerWidth, window.innerHeight);
       if (rtDebug > 0) {
         advanced.setDebugMode(rtDebug);
@@ -257,8 +260,10 @@ async function main(): Promise<void> {
           rtDebug === 2
             ? 'RT DEBUG — bright green: lit · dark green: SHADOW · red: miss'
             : rtDebug === 3
-              ? 'RT DEBUG 3 — raw lighting buffer (no albedo, no emissive)'
-              : 'RT DEBUG 1 — uv gradient',
+              ? 'RT DEBUG 3 — raw REALTIME lighting buffer (dynamic lights only — baked lightmap is not in it)'
+              : rtDebug === 4
+                ? 'RT DEBUG 4 — baked lightmap buffer (the static Cycles bake)'
+                : 'RT DEBUG 1 — uv gradient',
           9000,
         );
       }
@@ -683,6 +688,14 @@ async function main(): Promise<void> {
     map.markVisited(controller.feet.x, controller.feet.z);
     lore.check(controller.feet);
 
+    // Forward baked layer follows the path THIS frame draws (idempotent —
+    // materials only mutate on change): legal only while the forward renderer
+    // draws, because the RT path's MRT emissive attachment must stay pristine
+    // (it masks gloss and shows the fixture glow there); ON for the pre-BVH
+    // frames too (dispatch no-ops → beauty), so startup never shows an
+    // unlit scene while the GPU BVH uploads.
+    world.setForwardBaked(!pipeline.rtReady || !quality.settings.raytracedLighting);
+
     pipeline.render({
       scene,
       camera,
@@ -795,6 +808,12 @@ async function main(): Promise<void> {
     // fog-march counters (phase 1b) — undefined until the RT path exists;
     // scripts/rt-vol-smoke.mjs asserts dispatches === 0 while the toggle is off
     volStats: advanced?.volStats,
+    // test hooks (scripts/rt-bake-smoke.mjs): the world def carries rtLights
+    // (with their baked flags) + the decoded lightmap; setRtLights re-uploads a
+    // mutated/extended list so a test can prove the realtime layer reacts to a
+    // light change within frames (backlog #9 rule 3)
+    world,
+    setRtLights: (next: typeof world.rtLights) => advanced?.setLights(next),
   };
   (window as unknown as Record<string, unknown>).__liminalReady = true;
 }

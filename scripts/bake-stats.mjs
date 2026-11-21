@@ -10,6 +10,7 @@
  * Exits 1 if the image is essentially black (nothing baked).
  */
 import { readFileSync, statSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { inflateSync } from 'node:zlib';
 
 const file = process.argv[2] ?? 'assets/map/lightmap.png';
@@ -99,11 +100,37 @@ const sample = (base) => {
   if (ihdr.depth === 8) return out[base] / 255;
   return out.readUInt16BE(base) / 65535;
 };
+// RGBM lightmaps (encoding:"rgbm" in the sibling manifest) store
+// rgb = srgb(linear/m), alpha = srgb(m/range). Decode to linear, then
+// re-encode to sRGB so the reported numbers keep their pre-RGBM meaning
+// (display brightness — directly comparable to the old plain-sRGB stats).
+// Without a manifest range m is unrecoverable: fall back to the raw ratio
+// channels and SAY SO (verdict still works, magnitudes don't).
+const srgb2lin = (v) => (v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4));
+const lin2srgb = (v) => (v <= 0.0031308 ? v * 12.92 : 1.055 * Math.pow(v, 1 / 2.4) - 0.055);
+let rgbmRange = null;
+try {
+  const manifest = JSON.parse(readFileSync(join(dirname(file), 'manifest.json'), 'utf8'));
+  if (manifest?.lightmap?.encoding === 'rgbm' && Number.isFinite(manifest.lightmap.range)) {
+    rgbmRange = manifest.lightmap.range;
+  }
+} catch { /* no manifest next to the PNG → legacy mode */ }
+const rgbm = rgbmRange !== null && ihdr.color === 6 && channels >= 4;
+console.log(rgbm
+  ? `  decode: RGBM (range ${rgbmRange}, from manifest.json)`
+  : (ihdr.color === 6 && channels >= 4
+    ? '  decode: legacy ratio mode (no manifest range — magnitudes are ratios, not brightness)'
+    : '  decode: plain (non-RGBM)'));
 const lum = new Float64Array(ihdr.w * ihdr.h);
 for (let i = 0; i < lum.length; i++) {
   const base = i * bpp;
   if (ihdr.color === 0 || ihdr.color === 4) {
     lum[i] = sample(base); // grayscale
+  } else if (rgbm) {
+    const m = srgb2lin(sample(base + 3 * step)) * rgbmRange;
+    lum[i] = (lin2srgb(srgb2lin(sample(base)) * m)
+      + lin2srgb(srgb2lin(sample(base + step)) * m)
+      + lin2srgb(srgb2lin(sample(base + 2 * step)) * m)) / 3;
   } else {
     // RGB(A): average the colour channels, ignore alpha
     lum[i] = (sample(base) + sample(base + step) + sample(base + 2 * step)) / 3;

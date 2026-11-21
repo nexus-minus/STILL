@@ -91,6 +91,10 @@ interface VolDeps {
   lightCount: Node;
   softShadow: Node;
   lightGain: Node;
+  /** playable-floor anchor for the height falloff (world Y) — main.ts
+   *  passes the spawn probe's ground. Absent → constructor falls back to
+   *  the shadow geometry's bbox min-y. */
+  floorY?: number;
   workgroupSize: Node;
   workgroupId: Node;
   localId: Node;
@@ -161,11 +165,27 @@ export class VolumetricPass {
     // its constructor received (BVHComputeData.js: `this.objects = objects`);
     // world matrices are fresh because main.ts runs scene.updateMatrixWorld
     // before createAdvancedRenderer builds the BVH.
-    const shadowMeshes = (deps.bvhData as unknown as { objects?: THREE.Object3D[] }).objects ?? [];
-    const bounds = new THREE.Box3();
-    for (const obj of shadowMeshes) bounds.expandByObject(obj);
-    // no meshes / empty bounds → keep the legacy 0 rather than ±Infinity
-    this.floorY = Number.isFinite(bounds.min.y) ? bounds.min.y : 0;
+    //
+    // Anchor priority: SPAWN floor (deps.floorY from main.ts's probe) >
+    // bbox min-y. The bbox is only a fallback because it is volatile: when
+    // the author extended the map downward (min-y −9.2 → −28.4), one deep
+    // feature dragged the whole falloff out of every playable room — the
+    // fixture-halo and fog-delta assertions went to ~0 (fog vanished where
+    // the player stands). Same trap map-loader already documents for spawn
+    // ("min.y is unreliable: a low-hanging light can drag it below the
+    // actual floor"). The spawn floor is where gameplay happens: full
+    // density under the player's feet, exp decay with height, whatever
+    // stray geometry exists below.
+    const spawnFloor = deps.floorY;
+    if (Number.isFinite(spawnFloor)) {
+      this.floorY = spawnFloor as number;
+    } else {
+      const shadowMeshes = (deps.bvhData as unknown as { objects?: THREE.Object3D[] }).objects ?? [];
+      const bounds = new THREE.Box3();
+      for (const obj of shadowMeshes) bounds.expandByObject(obj);
+      // no meshes / empty bounds → keep the legacy 0 rather than ±Infinity
+      this.floorY = Number.isFinite(bounds.min.y) ? bounds.min.y : 0;
+    }
     this.stats.floorY = this.floorY;
     this.fogTexture = new THREE.StorageTexture(1, 1);
     this.fogTexture.type = THREE.HalfFloatType;

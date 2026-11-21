@@ -156,15 +156,20 @@ What one run does:
    glowing panel is white in the lightmap — which is what the renderer wants.
    Default 64 samples, 16 px margin, resolution 2048 (override with
    `--samples` / `--resolution`).
-3. **`lightmap.png`** written next to the other outputs — sRGB-encoded 8-bit.
+3. **`lightmap.png`** written next to the other outputs — **RGBM** (both
+   channels sRGB-encoded: `rgb = srgb(linear/m)`, `alpha = srgb(m/range)`)
+   because a plain 8-bit sRGB bake clipped 1.59 % of texels above 1.0 under
+   AgX (measured: max radiance 6.6, display error up to 0.177) — RGBM keeps
+   the full highlight range with a worst-case round-trip error of 0.77 %.
 4. **`objects.glb` re-exported** so glTF carries the second UV set as
    **`TEXCOORD_1`**, and **`manifest.json`** gains the additive block:
 
    ```json
-   "lightmap": { "file": "lightmap.png", "resolution": 2048, "uv": "TEXCOORD_1" }
+   "lightmap": { "file": "lightmap.png", "resolution": 2048, "uv": "TEXCOORD_1",
+                 "encoding": "rgbm", "range": 6.598 }
    ```
 
-   Additive key — the loader ignores unknown manifest fields today.
+   Additive keys — the loader ignores unknown manifest fields today.
 
 ### TEXCOORD_1 contract (for the renderer)
 
@@ -172,8 +177,12 @@ What one run does:
   original `UVMap` (byte-identical to a plain export — the bake proves it),
   `TEXCOORD_1` is the lightmap atlas.
 - `manifest.json → lightmap` is the pointer: which PNG, its square
-  resolution, and which TEXCOORD indexes it. Load the PNG as an **sRGB color
-  texture** and sample it with `TEXCOORD_1`.
+  resolution, which TEXCOORD indexes it, the `encoding` and the RGBM
+  `range`. Decode **CPU-side once at load** — `m = srgb⁻¹(alpha) × range`,
+  `linear = srgb⁻¹(rgb) × m` → a linear half-float texture — and sample it
+  with `TEXCOORD_1`. The renderer applies its one brightness scale (K=π,
+  matching the game's no-Lambert convention) during that decode, so static
+  and realtime lighting share a single scale.
 - The bake only covers static `objects` geometry (the lightmap's consumer);
   animated/playermodels keep a single UV set — they move, so baked static
   lighting doesn't apply to them (backlog #9: static for static, realtime
