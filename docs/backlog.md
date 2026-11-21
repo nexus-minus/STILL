@@ -135,6 +135,10 @@ materials per the plan below.
 2. If the 8-bit sRGB `lightmap.png` clips bright highlights under AgX,
    **re-encode the bake as RGBM (or half-float HDR)** so fixtures keep
    smooth Cycles falloff instead of clipping white-hot.
+3. **Runtime adaptation (user, 2026-11-21):** changing a light at
+   runtime (lever/toggle, color, intensity, movement) must be visible
+   within a frame via the realtime dynamic layer; permanent changes fold
+   back into the bake offline (no runtime baking).
 
 Promotes item 4 to the full production split: **Cycles-baked static
 lightmaps for all static fixtures + the realtime mesh-light layer for
@@ -208,3 +212,18 @@ roughness). SSR permanently rejected for the main path.
 temporal/à-trous runs in lockstep with the lighting buffer, `?matroom`
 provides the A/B scene (smooth vs matte spheres) and `?rtspec=0` is the
 no-gloss baseline. Reflections consume exactly this roughness.
+
+## 13. Dynamic actors: hand light + player shadows (user, 2026-11-21)
+
+- **Hand-held light** ("the player can theoretically hold a light in
+  his hand"): a dynamic mesh-light entry that follows the player's hand
+  per frame (a cheap position write into the storage light list) plus an
+  emissive mesh visual on the player. It is dynamic by definition, so
+  the realtime layer renders it and casts its shadows — this falls
+  straight out of the bake split in #9. UX undecided: the user's keybind
+  list is fixed (no light key in it), so always-on dim vs tied to
+  interact vs a future toggle needs THEIR call before implementation.
+- **Player shadows** (same message): other players must CAST shadows in
+  the RT path — skinned/dynamic geometry needs a refit or an analytic
+  stand-in in the BVH; combined with #11's rule (players share the
+  lighting path so they read correctly from every viewer's perspective).
