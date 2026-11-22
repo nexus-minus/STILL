@@ -123,6 +123,10 @@ export interface LightGrid {
   visible: number[][];
   metrics: Metric[];
   triangleVertices: number[][];
+  /** what buildLightGrid was actually called with, kept on the grid so the packer and the
+   *  file can write it down — a file without the seed and ray count is not reproducible */
+  seed: number;
+  raysPerCell: number;
 }
 
 const DEFAULTS: Required<LightGridOptions> = {
@@ -207,6 +211,14 @@ export interface PackedLightGrid {
   neighbourMask: Uint32Array;
   slotCount: number;
   cellCount: number;
+  /** metadata the file carries, because a grid is only reproducible if the numbers that
+   *  built it are written down: cell size, bake resolution, ray count and seed. */
+  cellSize: number;
+  resolution: number;
+  seed: number;
+  raysPerCell: number;
+  /** the blend strength the shipped picture uses, stored so a change is visible in the file */
+  blend: number;
 }
 
 export function packLightGrid(grid: LightGrid): PackedLightGrid {
@@ -230,7 +242,127 @@ export function packLightGrid(grid: LightGrid): PackedLightGrid {
       for (let c = 0; c < 3; c++) data[to + c] = grid.sh[ci * 27 + c * SH_TERMS + k];
     }
   }
-  return { data, neighbourMask, slotCount, cellCount: grid.cells.length };
+  return {
+    data, neighbourMask, slotCount, cellCount: grid.cells.length,
+    cellSize: grid.cellSize, resolution: grid.resolution,
+    seed: grid.seed, raysPerCell: grid.raysPerCell, blend: DEFAULT_BLEND,
+  };
+}
+
+/**
+ * Half-float bits, round-to-nearest-even. Node 22 has no DataView.getFloat16, so it is
+ * implemented once here and shared by the reference and the file tool: they cannot
+ * disagree about a texel value if they use the same conversion.
+ */
+export function toHalfBits(value: number): number {
+  if (Number.isNaN(value)) return 0x7e00;
+  const sign = value < 0 ? 0x8000 : 0;
+  const a = Math.abs(value);
+  if (a === 0) return sign;
+  if (a >= 65520) return sign | 0x7c00;
+  if (a < 2 ** -14) {
+    // subnormal: one ulp is 2^-24
+    const ulp = 2 ** -24;
+    let q = Math.floor(a / ulp);
+    const rem = a / ulp - q;
+    if (rem > 0.5 || (rem === 0.5 && (q & 1))) q += 1;
+    return sign | (q & 0x3ff);
+  }
+  let e = Math.floor(Math.log2(a));
+  let q = Math.floor(a / 2 ** e * 1024);
+  const rem = a / 2 ** e * 1024 - q;
+  if (rem > 0.5 || (rem === 0.5 && (q & 1))) {
+    q += 1;
+    if (q === 1024) { q = 0; e += 1; }
+  }
+  if (e > 15) return sign | 0x7c00;
+  if (e < -14) return sign | (q & 0x3ff);
+  return sign | ((e + 15) << 10) | (q & 0x3ff);
+}
+
+export function fromHalfBits(bits: number): number {
+  const sign = (bits & 0x8000) ? -1 : 1;
+  const exp = (bits >> 10) & 0x1f;
+  const frac = bits & 0x3ff;
+  if (exp === 0) return sign * (frac / 1024) * 2 ** -14;
+  if (exp === 0x1f) return frac ? NaN : sign * Infinity;
+  return sign * (1 + frac / 1024) * 2 ** (exp - 15);
+}
+
+/**
+ * The scale the game applies to a bake: physical Cycles radiance x pi, so static baked
+ * light and realtime dynamic light sit on ONE scale (src/world/map-loader.ts). A grid file
+ * must be built with the same scale, otherwise a cell and a texel disagree by pi.
+ */
+export const GRID_SCALE = Math.PI;
+
+/** Raw RGBA16F bake bytes (little-endian, as the bake tool writes them) -> linear values. */
+export function decodeHalfTexels(bytes: Uint8Array, resolution: number, scale = GRID_SCALE): Float64Array {
+  const texels = resolution * resolution;
+  if (bytes.length !== texels * 8) {
+    throw new Error(`half lightmap is ${bytes.length} bytes, expected ${texels * 8} for ${resolution}x${resolution}`);
+  }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const out = new Float64Array(texels * 4);
+  for (let i = 0; i < texels * 4; i++) out[i] = fromHalfBits(view.getUint16(i * 2, true)) * scale;
+  return out;
+}
+
+/**
+ * The offline grid file (assets/map/lightgrid.bin). Header is 40 bytes, so the typed-array
+ * views below stay aligned; magic + version + the numbers that produced the grid, then the
+ * f32 slots and the u32 masks. Written by tools/write_lightgrid.mjs from THIS module, so the
+ * bake run and scripts/light-grid-check.mjs cannot disagree about the numbers.
+ */
+export const GRID_FILE_MAGIC = 'LGSH';
+export const GRID_FILE_VERSION = 1;
+const GRID_FILE_HEADER = 40;
+
+export function encodeLightGrid(packed: PackedLightGrid): Uint8Array {
+  const stride = SH_GRID_STRIDE_VEC4 * 4;
+  const bytes = new Uint8Array(GRID_FILE_HEADER + packed.slotCount * stride * 4 + packed.slotCount * 4);
+  const view = new DataView(bytes.buffer);
+  for (let i = 0; i < 4; i++) bytes[i] = GRID_FILE_MAGIC.charCodeAt(i);
+  view.setUint32(4, GRID_FILE_VERSION, true);
+  view.setFloat64(8, packed.cellSize, true);
+  view.setUint32(16, packed.resolution, true);
+  view.setUint32(20, packed.slotCount, true);
+  view.setUint32(24, packed.cellCount, true);
+  view.setInt32(28, packed.seed, true);
+  view.setUint32(32, packed.raysPerCell, true);
+  view.setFloat32(36, packed.blend, true);
+  new Float32Array(bytes.buffer, GRID_FILE_HEADER, packed.slotCount * stride).set(packed.data);
+  new Uint32Array(bytes.buffer, GRID_FILE_HEADER + packed.slotCount * stride * 4, packed.slotCount)
+    .set(packed.neighbourMask);
+  return bytes;
+}
+
+/** Read the file back. Copying into a fresh buffer keeps the views aligned whatever the
+ *  caller hands in (fetch body, subarray, file read). */
+export function decodeLightGrid(bytes: Uint8Array): PackedLightGrid {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const magic = String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]);
+  if (magic !== GRID_FILE_MAGIC) throw new Error(`lightgrid file starts with "${magic}", expected ${GRID_FILE_MAGIC}`);
+  const version = view.getUint32(4, true);
+  if (version !== GRID_FILE_VERSION) throw new Error(`lightgrid file version ${version}, expected ${GRID_FILE_VERSION}`);
+  const cellSize = view.getFloat64(8, true);
+  const resolution = view.getUint32(16, true);
+  const slotCount = view.getUint32(20, true);
+  const cellCount = view.getUint32(24, true);
+  const seed = view.getInt32(28, true);
+  const raysPerCell = view.getUint32(32, true);
+  const blend = view.getFloat32(36, true);
+  const stride = SH_GRID_STRIDE_VEC4 * 4;
+  const expected = GRID_FILE_HEADER + slotCount * stride * 4 + slotCount * 4;
+  if (bytes.byteLength !== expected) {
+    throw new Error(`lightgrid file is ${bytes.byteLength} bytes, expected ${expected}`);
+  }
+  const buffer = bytes.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength).buffer;
+  return {
+    data: new Float32Array(buffer, GRID_FILE_HEADER, slotCount * stride),
+    neighbourMask: new Uint32Array(buffer, GRID_FILE_HEADER + slotCount * stride * 4, slotCount),
+    slotCount, cellCount, cellSize, resolution, seed, raysPerCell, blend,
+  };
 }
 
 /**
@@ -492,7 +624,7 @@ export function buildLightGrid(tris: GridTriangle[], values: Float64Array, resol
   const grid: LightGrid = {
     cellSize: 0, resolution, cells: [], sh: new Float64Array(0),
     buckets: new Map(), cellOfKey: new Map(), visible: [], metrics: [], triangleVertices: [],
-    neighbourMask: new Uint32Array(0),
+    neighbourMask: new Uint32Array(0), seed: o.seed, raysPerCell: o.raysPerCell,
   };
 
   let texelArea = 0, metreArea = 0;

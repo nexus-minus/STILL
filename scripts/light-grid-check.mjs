@@ -61,12 +61,24 @@
  *       difference is reported.
  *     - the CPU reading path and the GPU mirror must give the same number within f32
  *       rounding (1e-6), because the shader follows the mirror.
+ *   file path (owner decision 2026-11-23: the grid is written ONCE at bake time by
+ *     tools/write_lightgrid.mjs, the game only reads it — measured build cost is 18.9 s
+ *     for this scene, which is a load screen, not a frame):
+ *     - the reference measures the precision the file stores, so the bake values here are
+ *       half-rounded first. Otherwise the tool could never produce the same numbers as the
+ *       reference, and the measured error would be a precision accident.
+ *     - the bytes the tool writes must be IDENTICAL to the reference packer's bytes
+ *       (tolerance 0 differences), the header must carry the same metadata, and reading the
+ *       file back must give the same table and the same lookup results (tolerance 0).
+ *     - the scale the tool applies is the loader's scale (x pi). Asserted exact: a texel
+ *       decoded through the tool equals the stored half value times pi.
  */
 import {
   buildLightGrid, buildNeighbourVisibility, dirtyCellsFor, fillCell, hashCellKey, lastSampleDistance, lastSampleOwn, packLightGrid, projectCoefficients,
   referenceIrradiance, sampleIrradiance, sampleBlendIrradiance, shIrradiance, packedSlot, packedIrradiance, packedBlend, packedBlendIrradiance,
-  DEFAULT_BLEND, SH_GRID_STRIDE_VEC4, neighbourBit, trace,
+  DEFAULT_BLEND, SH_GRID_STRIDE_VEC4, neighbourBit, trace, toHalfBits, fromHalfBits, decodeHalfTexels, encodeLightGrid, decodeLightGrid, GRID_SCALE,
 } from '../src/world/light-grid.ts';
+import { buildGridFile } from '../tools/write_lightgrid.mjs';
 
 const RES = 1024;
 const TARGET = 4096; // texels per square metre = 64 texels per metre
@@ -87,7 +99,9 @@ const ISLANDS = [
   { name: 'wallB', value: 0.12, area: 18 },
   { name: 'doorwallB', value: 0.10, area: 10 },
 ];
-const BRIGHTEST = Math.max(...ISLANDS.map((i) => i.value));
+// the reference measure is a percentage, so the scale cancels out — as long as the
+// denominator is the brightest value ON THE SAME SCALE as the values being compared.
+const BRIGHTEST = Math.max(...ISLANDS.map((i) => i.value)) * GRID_SCALE;
 
 // shelf-packed island rectangles, no overlap, each sized to its target density
 const values = new Float64Array(RES * RES * 4);
@@ -108,6 +122,32 @@ for (const island of ISLANDS) {
   x += side; rowHeight = Math.max(rowHeight, side);
   if (y + rowHeight > RES) throw new Error('island layout exceeds the bake resolution');
 }
+
+// The bake FILE stores half-float, so the reference measures the precision the game reads —
+// otherwise the file tool could never produce the same numbers as the reference. A half texel
+// at these values is about 1e-3 absolute, so the percentages below can only move in the third
+// decimal. Order matters: round to the stored precision FIRST, then apply the loader's scale
+// (radiance x pi), because a scaled value is no longer exactly half-representable.
+let halfShift = 0;
+for (let i = 0; i < values.length; i++) {
+  const h = fromHalfBits(toHalfBits(values[i]));
+  if (h !== values[i]) halfShift++;
+  values[i] = h;
+}
+// what a bake run hands the tool is BYTES, not doubles. Reading those bytes back is what the
+// game uses, so the reference runs on the decoded values and the tool on the same ones.
+const halfBytes = new Uint8Array(values.length * 2);
+const halfView = new DataView(halfBytes.buffer);
+for (let i = 0; i < values.length; i++) halfView.setUint16(i * 2, toHalfBits(values[i]), true);
+const decoded = decodeHalfTexels(halfBytes, RES, GRID_SCALE);
+let decodeDiff = 0;
+for (let i = 0; i < values.length; i++) {
+  if (decoded[i] !== values[i] * GRID_SCALE) decodeDiff++;
+  values[i] = decoded[i];
+}
+console.log(`values stored as half-float: ${halfShift} of ${values.length} texels moved by the rounding ` +
+  `(this is the file precision, not a maths error); decode applies the loader's scale exactly, ` +
+  `${decodeDiff} texels differ (tolerance 0)`);
 
 /** the island rectangle, as four ordered UV corners matching the quad's corner order */
 const uvRect = (name) => {
@@ -163,7 +203,9 @@ const tris = [
 ];
 
 const opts = { seed: 777, raysPerCell: 512 };
+const t0 = performance.now();
 const grid = buildLightGrid(tris, values, RES, opts);
+const buildMs = performance.now() - t0;
 
 if (grid.metrics.length !== grid.triangleVertices.length || grid.metrics.length === 0) {
   throw new Error('valid triangle geometry and lightmap metrics must share indices');
@@ -174,7 +216,12 @@ const spaceCells = grid.cells.filter((c) => c.kind === 'space');
 console.log(`scene: ${tris.length} triangles, ${ISLANDS.length} islands, bake ${RES}x${RES}, target ${TARGET} texels/m²`);
 console.log(`cell size from geometry (nothing authored): ${grid.cellSize.toFixed(3)} m`);
 console.log(`cells: ${surfaceCells.length} surface + ${spaceCells.length} space = ${grid.cells.length}`);
+// the load-time cost, measured (not estimated): this is what a player waits for at load.
+const t1 = performance.now();
 const vis = buildNeighbourVisibility(grid);
+const visMs = performance.now() - t1;
+console.log(`load-time cost on this machine (JS, single thread): cells ${buildMs.toFixed(0)} ms, ` +
+  `neighbour visibility ${visMs.toFixed(0)} ms`);
 console.log(`neighbour visibility (one ray per pair, once at load): ${vis.blocked} of ${(grid.cells.length * 26).toLocaleString()} ` +
   `pairs blocked by geometry, ${vis.absent} positions with no cell (solid material or air that sees nothing)`);
 const packed = packLightGrid(grid);
@@ -344,6 +391,11 @@ console.log(`  shipped path at those points (mild blend ${DEFAULT_BLEND}, gated 
 //    ones whose rays see it; recomputing only those must equal a full rebuild.
 const lampTris = tris.map((t, i) => i).filter((i) => tris[i].island === 'lampA');
 const marked = dirtyCellsFor(grid, lampTris);
+// snapshot before the dirty test mutates anything: the FILE is the base state, because a
+// state change only dirties cells afterwards. So the tool's output has to match the grid as
+// it was built, not the grid after this test.
+const baseBytes = encodeLightGrid(packed);
+const baseValues = Float64Array.from(values);
 const snapshot = Float64Array.from(grid.sh);
 for (let v = rects.lampA[1]; v < rects.lampA[3]; v++) {
   for (let u = rects.lampA[0]; u < rects.lampA[2]; u++) {
@@ -531,6 +583,39 @@ console.log(`  mask vs direct sight at these points (${cornersChecked} corners):
   `mask blocks a corner the point can see: ${maskBlocksVisible} (loses smoothness only), ` +
   `total differ ${maskMismatch}`);
 
+// 5) file path — the tool's core function, called with the same inputs the reference ran on,
+//    must produce exactly the table the check measured. Compared against the BASE state,
+//    because the file is the base state: a state change dirties single cells afterwards, it
+//    does not rewrite the file.
+const scene = { resolution: RES, seed: opts.seed, raysPerCell: opts.raysPerCell, tris };
+const t2 = performance.now();
+const tool = buildGridFile(scene, baseValues);
+const toolMs = performance.now() - t2;
+const t3 = performance.now();
+const readBack = decodeLightGrid(tool.bytes);
+const decodeMs = performance.now() - t3;
+let byteDiff = 0;
+const byteLenOk = tool.bytes.length === baseBytes.length;
+if (byteLenOk) for (let i = 0; i < baseBytes.length; i++) if (tool.bytes[i] !== baseBytes[i]) byteDiff++;
+const META = ['cellSize', 'resolution', 'seed', 'raysPerCell', 'blend', 'slotCount', 'cellCount'];
+const metaDiff = META.filter((k) => readBack[k] !== packed[k]);
+let slotDiff = 0, slotValueDiff = 0;
+const refOut = new Float64Array(3), fileOut = new Float64Array(3);
+for (const c of checkCells) {
+  const [cx, cy, cz] = c.key.split(',').map(Number);
+  const a = packedSlot(packed, cx, cy, cz, PROBE_LIMIT);
+  const b = packedSlot(readBack, cx, cy, cz, PROBE_LIMIT);
+  if (a !== b) { slotDiff++; continue; }
+  packedIrradiance(packed, a, UP, refOut);
+  packedIrradiance(readBack, b, UP, fileOut);
+  for (let ch = 0; ch < 3; ch++) if (fileOut[ch] !== refOut[ch]) slotValueDiff++;
+}
+console.log(`file path (tolerance 0 differences, base state): bytes ${byteLenOk ? `identical length (${tool.bytes.length})` : `LENGTH DIFFERS ${tool.bytes.length} vs ${baseBytes.length}`}, ` +
+  `bytes that differ ${byteDiff}, metadata ${metaDiff.length ? `differs: ${metaDiff.join(',')}` : 'identical'}, ` +
+  `half decode ${decodeDiff} texels differ, lookups ${slotDiff} differ, slot values ${slotValueDiff} differ`);
+console.log(`  what the game pays at load: reading ${tool.bytes.length} bytes ${decodeMs.toFixed(1)} ms, ` +
+  `versus building the same grid ${buildMs.toFixed(0)} ms — the cost moved to the bake run (${toolMs.toFixed(0)} ms there)`);
+
 // asserts, in the order the tolerances were declared
 if (grid.cellSize < 0.25 || grid.cellSize > 4) throw new Error('cell size left its clamp');
 if (warned.length === 0) throw new Error('density warning never fired — the sparse island was not measured');
@@ -557,5 +642,11 @@ if (missedReading > 0) throw new Error(`gated blend left ${missedReading} points
 if (cpuGpuAgree > 1e-6) throw new Error(`CPU reading path and GPU mirror differ by ${cpuGpuAgree.toExponential(1)}, above the f32 rounding tolerance 1e-6`);
 if (vis.blocked === 0) throw new Error('neighbour visibility never blocked a corner — the through-wall rule is not exercised by this scene');
 if (maskAllowsBlocked > 0) throw new Error(`load-time mask allowed ${maskAllowsBlocked} corners the point cannot see — that is light through a wall`);
+if (!byteLenOk) throw new Error(`lightgrid file is ${tool.bytes.length} bytes, the reference packer writes ${baseBytes.length}`);
+if (byteDiff > 0) throw new Error(`the tool wrote ${byteDiff} bytes that differ from the reference packer — the file would not be the thing that was measured`);
+if (metaDiff.length) throw new Error(`lightgrid header lost the numbers that built it: ${metaDiff.join(', ')}`);
+if (decodeDiff > 0) throw new Error(`half decode differs on ${decodeDiff} texels — the tool and the reference would disagree about a stored value`);
+if (slotDiff > 0) throw new Error(`reading the file back lost ${slotDiff} of the checked cells`);
+if (slotValueDiff > 0) throw new Error(`reading the file back changed ${slotValueDiff} slot values — a byte-identical file cannot do that`);
 
-console.log('PASS light-grid CPU reference (cell size from geometry, density warning, SH truncation, air cells, dirty flag, GPU mirror)');
+console.log('PASS light-grid CPU reference (cell size from geometry, density warning, SH truncation, air cells, dirty flag, GPU mirror, file path)');
