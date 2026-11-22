@@ -359,8 +359,13 @@ async function main(): Promise<void> {
   // ---- HUD / hotkeys --------------------------------------------------------
   const statsLine = (fps: number): string => {
     const f = controller.feet;
+    // The idle freeze is invisible unless the HUD says so: "frozen" means no
+    // rays ran this frame because nothing changed, and the picture shown is the
+    // accumulated one. Without this line a frozen frame and a slow frame look
+    // identical on screen — which is exactly what the test checklist needs to
+    // tell apart.
     return (
-      `${backend} · ${quality.tier} · ${fps} fps\n` +
+      `${backend} · ${quality.tier} · ${fps} fps${advanced?.idle ? ' · frozen' : ''}\n` +
       `x ${f.x.toFixed(1)}  y ${f.y.toFixed(1)}  z ${f.z.toFixed(1)}`
     );
   };

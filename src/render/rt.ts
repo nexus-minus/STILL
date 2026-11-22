@@ -9,19 +9,23 @@ import {
   localId,
   screenUV,
   vec2,
+  vec3,
   vec4,
+  float,
+  max,
   mix,
   step,
-  vec3,
   mrt,
   pass,
   output,
   diffuseColor,
   emissive,
+  renderOutput,
   Fn,
 } from 'three/tsl';
 import { bloom } from 'three/addons/tsl/display/BloomNode.js';
 import { BVHComputeData, ndcToCameraRay } from 'three-mesh-bvh/webgpu';
+import { createBlueNoiseTexture, ditherOffset } from './bluenoise.js';
 import { VolumetricPass, type VolStats } from './passes/volumetrics.js';
 import type { QualitySettings } from './quality.js';
 
@@ -86,10 +90,16 @@ export interface AdvancedRenderer {
   setLogicalSize(width: number, height: number): void;
   /** 0 = normal, 1 = uv-gradient (pipeline alive?), 2 = red=miss / green=hit */
   setDebugMode(mode: number): void;
-  /** runtime intensity multiplier for all lights (settings slider) */
+  /** runtime intensity multiplier for all lights (settings slider) — marks the frame dirty */
   setLightGain(value: number): void;
   /** replace the light list (future chunk-streaming) — rebuilds the storage buffer, never truncates */
   setLights(lights: RtLight[]): void;
+  /** true while the frame is FROZEN: nothing has changed and the settle window is
+   *  done, so no rays run and the composite re-shows the accumulated buffers */
+  readonly idle: boolean;
+  /** something outside the tracked state changed (a light moved, a chunk streamed
+   *  in, a material edit) → the next frame is traced even with a still camera */
+  markDirty(): void;
   /** fog-march counters (phase 1b): dispatches must stay 0 while
    *  settings.volumetrics is off — scripts/rt-vol-smoke.mjs asserts this */
   readonly volStats: VolStats;
@@ -256,6 +266,16 @@ export function createAdvancedRenderer(
   geomTex.format = THREE.RGBAFormat;
   geomTex.minFilter = THREE.NearestFilter;
   geomTex.magFilter = THREE.NearestFilter;
+  // the SAME guide as it was LAST frame. Reprojection needs it for the
+  // disocclusion check: a reprojected texel only counts as this surface's
+  // history if last frame it held the same world point. Without that check the
+  // blend reads a texel that belonged to a different wall — which is the
+  // ghosting TAA is known for. Read only via textureLoad, hence Nearest.
+  const geomHistoryTex = new THREE.StorageTexture(1, 1);
+  geomHistoryTex.type = THREE.HalfFloatType;
+  geomHistoryTex.format = THREE.RGBAFormat;
+  geomHistoryTex.minFilter = THREE.NearestFilter;
+  geomHistoryTex.magFilter = THREE.NearestFilter;
   // à-trous ping-pong buffers (only ever read via textureLoad, so Nearest is
   // fine for the passes; the composite samples the final one, hence Linear)
   const denoiseTexA = new THREE.StorageTexture(1, 1);
@@ -363,8 +383,21 @@ export function createAdvancedRenderer(
   }
   /** temporal blend: 1 = live frame (moving), <1 = accumulate */
   const blendAlpha = uniform(1);
+  /** previous frame's camera (kept from the end of the previous dispatch). A
+   *  hit point projected with THESE matrices gives the texel this same world
+   *  point held last frame — that is motion reprojection, and it is what lets
+   *  the accumulation keep converging while the player walks instead of
+   *  resetting to a live frame every step. ?reproj=0 = the old hard reset. */
+  const prevViewMat = uniform(new THREE.Matrix4());
+  const prevViewProj = uniform(new THREE.Matrix4());
+  const reproject = uniform(new URLSearchParams(location.search).get('reproj') === '0' ? 0 : 1);
   /** runtime intensity multiplier (settings slider) — multiplied in-shader */
   const lightGain = uniform(1);
+  /** ?dither=0 — blue-noise ordered dither for the 8-bit display step (ON by
+   *  default; the A/B baseline for scripts/banding-check.mjs on the runtime side).
+   *  Off means off: the composite is built WITHOUT the lookup, so nothing runs. */
+  const ditherOn = new URLSearchParams(location.search).get('dither') !== '0';
+  const ditherTex = ditherOn ? createBlueNoiseTexture() : null;
   /** à-trous stride — mutated before EACH dispatch: three re-reads uniform
    *  values per compute call (objectGroup is NodeUpdateType.OBJECT, so the
    *  binding is re-serialised every time), and all four passes share this one
@@ -488,9 +521,13 @@ export function createAdvancedRenderer(
       bakedTex: texture_storage_2d<rgba16float, write>,
       historyTex: texture_2d<f32>,
       specHistory: texture_2d<f32>,
+      geomHistory: texture_2d<f32>,
       blendAlpha: f32,
       invViewProj: mat4x4f,
       viewMat: mat4x4f,
+      prevViewMat: mat4x4f,
+      prevViewProj: mat4x4f,
+      reproject: f32,
       frameIndex: f32,
       lightCount: f32,
       bounceCount: f32,
@@ -704,13 +741,52 @@ export function createAdvancedRenderer(
 
       // temporal accumulation: blend with the PREVIOUS frame's result, which
       // historyTex holds as a sampled texture (written by the copy kernel
-      // after this pass — one usage per pass, never read+write together)
-      let prev = textureLoad(historyTex, indexUV, 0).rgb;
-      let blended = mix(prev, acc, blendAlpha);
+      // after this pass — one usage per pass, never read+write together).
+      //
+      // WHICH texel of the history? Without reprojection it was the one under
+      // the same screen position — after a camera move that texel belongs to a
+      // different wall, so the code hard-reset instead (blendAlpha = 1 whenever
+      // the camera moved). That is exactly why walking looked noisy while
+      // standing still converged. Reprojection projects THIS hit point with the
+      // PREVIOUS camera and reads the texel that point held last frame: the same
+      // surface's history, so accumulation keeps converging while the player
+      // walks. That is the biggest noise win available, and it costs one matrix
+      // multiply plus one texture read per pixel.
+      var histUV = indexUV;
+      var histOk = true;
+      if (reproject > 0.5) {
+        let clipPrev = prevViewProj * vec4f(hitP, 1.0);
+        if (clipPrev.w > 0.0) {
+          let ndcPrev = clipPrev.xyz / clipPrev.w;
+          let pxPrev = (ndcPrev.xy * 0.5 + 0.5) * vec2f(dimensions);
+          if (all(pxPrev >= vec2f(0.0)) && all(pxPrev < vec2f(dimensions))) {
+            histUV = vec2u(floor(pxPrev));
+            // Disocclusion check — this is what keeps reprojection from turning
+            // into TAA ghosting. The projected texel only counts as THIS
+            // surface's history if last frame it held the same world point.
+            // geomHistory is that texel's geometry guide from last frame, so the
+            // depth it stored is compared against the depth this point would
+            // have had from last frame's camera. A mismatch (or the void
+            // sentinel) means a different surface was there: this pixel starts
+            // fresh instead of blending a wall that is no longer visible.
+            let dPrev = 0.0 - (prevViewMat * vec4f(hitP, 1.0)).z;
+            let hGeom = textureLoad(geomHistory, histUV, 0);
+            if (hGeom.w < 0.0) { histOk = false; }
+            else if (abs(hGeom.w - dPrev) > 0.15 + dPrev * 0.05) { histOk = false; }
+          } else { histOk = false; }
+        } else { histOk = false; }
+      }
+      // histOk false = this pixel has no trustworthy history → full reset, the
+      // same decision the old code made for the whole frame on any movement.
+      var aBlend = 1.0;
+      if (histOk) { aBlend = blendAlpha; }
+      let prev = textureLoad(historyTex, histUV, 0).rgb;
+      let blended = mix(prev, acc, aBlend);
       textureStore(lightingTex, indexUV, vec4f(blended, 1.0));
-      // specular history in lockstep (same rule: still = converge, move = live)
-      let prevS = textureLoad(specHistory, indexUV, 0).rgb;
-      textureStore(specTex, indexUV, vec4f(mix(prevS, spec, blendAlpha), 1.0));
+      // specular history in lockstep (same rule, same texel — gloss and the
+      // lighting around it must always be the same iteration's output)
+      let prevS = textureLoad(specHistory, histUV, 0).rgb;
+      textureStore(specTex, indexUV, vec4f(mix(prevS, spec, aBlend), 1.0));
       return vec4f(0.0);
     }
 
@@ -993,9 +1069,13 @@ export function createAdvancedRenderer(
     bakedTex: textureStore(bakedTex),
     historyTex: texture(historyTex),
     specHistory: texture(specHistoryTex),
+    geomHistory: texture(geomHistoryTex),
     blendAlpha,
     invViewProj,
     viewMat,
+    prevViewMat,
+    prevViewProj,
+    reproject,
     frameIndex,
     lightCount,
     bounceCount,
@@ -1042,6 +1122,8 @@ export function createAdvancedRenderer(
       dst: texture_storage_2d<rgba16float, write>,
       srcSpec: texture_2d<f32>,
       dstSpec: texture_storage_2d<rgba16float, write>,
+      srcGeom: texture_2d<f32>,
+      dstGeom: texture_storage_2d<rgba16float, write>,
       workgroupSize: vec3u,
       workgroupId: vec3u,
       localId: vec3u,
@@ -1053,6 +1135,9 @@ export function createAdvancedRenderer(
       // specular history follows the diffuse one in the SAME dispatch —
       // gloss must converge (still camera) and reset (motion) identically
       textureStore(dstSpec, indexUV, textureLoad(srcSpec, indexUV, 0));
+      // the geometry guide too, so next frame can check which world point this
+      // texel actually held (see the disocclusion test in compute)
+      textureStore(dstGeom, indexUV, textureLoad(srcGeom, indexUV, 0));
       return vec4f(0.0);
     }
   `;
@@ -1062,6 +1147,8 @@ export function createAdvancedRenderer(
     dst: textureStore(historyTex),
     srcSpec: texture(specTex),
     dstSpec: textureStore(specHistoryTex),
+    srcGeom: texture(geomTex),
+    dstGeom: textureStore(geomHistoryTex),
     workgroupSize,
     workgroupId,
     localId,
@@ -1278,7 +1365,20 @@ export function createAdvancedRenderer(
       );
       const viewShown = mix(shownBaked, matShown, step(0.5, matView));
       const bloomed = viewShown.add(bloom(viewShown, 0.5, 0.5, 0.75));
-      return mix(bloomed, viewShown, step(0.5, matView));
+      const normalView = mix(bloomed, viewShown, step(0.5, matView));
+      // Tone mapping + sRGB happen HERE (buildPost sets outputColorTransform =
+      // false) because the dither must be applied at the moment the value becomes
+      // 8-bit. On linear radiance a 1/255 offset is the wrong size, and darks —
+      // precisely where banding shows — are where the curve stretches values.
+      const disp = renderOutput(normalView);
+      if (!ditherTex) return disp;
+      // Debug (2/3/4) and material views stay EXACT: scripts/*-smoke.mjs compare
+      // canvas readbacks against expected buffer values, so no offset there.
+      // rtFlag 0 (beauty) and 1 (traced beauty) ARE the normal picture and DO
+      // get the dither — that is the whole point of it.
+      const gate = float(1.0).sub(max(step(1.5, rtFlag), step(0.5, matView)));
+      const off = ditherOffset(ditherTex);
+      return vec4(disp.rgb.add(vec3(gate.mul(off))), disp.a);
     })();
 
   // TWO composites built once at construction: the plain graph carries the
@@ -1290,6 +1390,10 @@ export function createAdvancedRenderer(
     const p = new THREE.RenderPipeline(renderer);
     // each build includes bloom over the normal branches (the ?rtmat
     // inspection views mix it out — they show exact buffer values)
+    // tone mapping + sRGB now happen INSIDE the graph (makeFinalColor calls
+    // renderOutput) so the dither can be applied at the 8-bit step — this flag
+    // is what three requires for that, see RenderOutputNode's docstring.
+    p.outputColorTransform = false;
     p.outputNode = makeFinalColor(fog);
     return p;
   };
@@ -1315,6 +1419,44 @@ export function createAdvancedRenderer(
   let lastDebug = 0;
   let historyReset = true;
 
+  // ---- dirty-flag scheduler (why a settled frame needs no rays) --------------
+  // Everything the lighting kernel reads is either static (BVH, lightmap, light
+  // list) or per-frame (camera pose, jitter seed). When nothing changed AND the
+  // settle window is done, the buffers already hold the converged picture: the
+  // same rays would return the same answer, so the dispatch is skipped and the
+  // composite re-shows the frozen buffers. That is where the frame budget comes
+  // back for a laptop — and the picture is not worse, because the frozen frame
+  // IS the accumulated one, not a single-sample frame.
+  // The composite still runs every frame: the canvas is not guaranteed to keep
+  // its content, and the screenshot + black-frame paths read it back.
+  /** ?settle=N — frames allowed after a change before the frame freezes.
+   *  Default 6 (the window the eye still sees settle); 0 = never freeze, which
+   *  is the always-dispatch A/B baseline. */
+  const settleRaw = Number(new URLSearchParams(location.search).get('settle'));
+  const SETTLE_FRAMES = Number.isFinite(settleRaw) && settleRaw >= 0 ? settleRaw : 6;
+  /** ?idle=0 — never freeze (dispatch every frame), for the A/B comparison */
+  const idleFreeze = new URLSearchParams(location.search).get('idle') !== '0';
+  let settleLeft = SETTLE_FRAMES;
+  let dirty = true;
+  let lastSettingsKey = '';
+  /** true once a dispatch has produced buffers. An idle frame re-shows them, so
+   *  rtFlag must NOT be forced to 0 — 0 means "show the raster beauty pass",
+   *  which would replace the accumulated frame with an unlit one. */
+  let buffersValid = false;
+
+  /** settings the shader path depends on, as a comparable key. Compared per
+   *  frame: a change is a dirty event, everything else costs nothing. */
+  const settingsKey = (s: QualitySettings): string =>
+    [
+      s.renderScale,
+      s.lightingScale,
+      s.volumetricScale,
+      s.rtBounces,
+      s.bloom ? 1 : 0,
+      s.raytracedLighting ? 1 : 0,
+      s.volumetrics ? 1 : 0,
+    ].join('|');
+
   const resizeTex = (scale: number): void => {
     const w = Math.max(1, Math.ceil(logicalW * scale));
     const h = Math.max(1, Math.ceil(logicalH * scale));
@@ -1324,6 +1466,7 @@ export function createAdvancedRenderer(
       lightingTex.setSize(w, h, 1);
       historyTex.setSize(w, h, 1);
       geomTex.setSize(w, h, 1);
+      geomHistoryTex.setSize(w, h, 1);
       bakedTex.setSize(w, h, 1);
       denoiseTexA.setSize(w, h, 1);
       denoiseTexB.setSize(w, h, 1);
@@ -1331,7 +1474,9 @@ export function createAdvancedRenderer(
       specHistoryTex.setSize(w, h, 1);
       specDenoiseA.setSize(w, h, 1);
       specDenoiseB.setSize(w, h, 1);
+      // a resize invalidates every buffer, so this frame is always dispatched
       historyReset = true;
+      dirty = true;
     }
   };
 
@@ -1341,17 +1486,20 @@ export function createAdvancedRenderer(
     },
     dispatch(cam: THREE.PerspectiveCamera, settings: QualitySettings, pixelRatio: number): void {
       ranThisFrame = false;
-      volActive = false;
       if (!ready || !settings.raytracedLighting) {
         rtFlag.value = 0;
+        volActive = false;
         return;
       }
-      resizeTex(settings.lightingScale * pixelRatio);
 
-      // ---- temporal accumulation control ------------------------------------
-      // moving camera or debug view = live frame (no smear); standing still
-      // = accumulate (the reliable noise cure: static scenes converge clean)
+      // ---- what would change this frame's picture? ------------------------
+      const key = settingsKey(settings);
+      if (key !== lastSettingsKey) { lastSettingsKey = key; dirty = true; }
+      // history holds the PREVIOUS debug mode's output after a switch — reset
+      // on any change (0<->N and N<->M) so modes never smear into each other
       const debugNow = debugMode.value;
+      if (lastDebug !== debugNow) { historyReset = true; dirty = true; }
+      lastDebug = debugNow;
       const moved =
         !Number.isFinite(lastCamX) ||
         Math.abs(cam.position.x - lastCamX) +
@@ -1364,18 +1512,34 @@ export function createAdvancedRenderer(
       lastCamZ = cam.position.z;
       lastPitch = cam.rotation.x;
       lastYaw = cam.rotation.y;
-      // history holds the PREVIOUS debug mode's output after a switch — reset
-      // on any change (0<->N and N<->M) so modes never smear into each other
-      if (lastDebug !== debugNow) historyReset = true;
-      lastDebug = debugNow;
+      if (moved) dirty = true;
+      resizeTex(settings.lightingScale * pixelRatio);
+
+      if (dirty) {
+        dirty = false;
+        settleLeft = SETTLE_FRAMES;
+      } else if (idleFreeze && settleLeft <= 0) {
+        // Frozen: the buffers already hold the converged frame and nothing can
+        // change it this frame, so no ray work. volActive and rtFlag keep their
+        // last values, which is what makes render() show the SAME picture.
+        return;
+      } else {
+        settleLeft -= 1;
+      }
+
+      // ---- temporal accumulation control ------------------------------------
+      // standing still = accumulate (the reliable noise cure); moving used to
+      // mean a hard reset every frame, which is why walking looked noisy. With
+      // reprojection each pixel's history is matched to the same world point,
+      // so accumulation continues while walking — only the pixels where the
+      // match fails (disocclusion) reset, one at a time.
       if (historyReset) {
         blendAlpha.value = 1;
         historyReset = false;
       } else {
-        // static camera accumulates even in debug modes: the per-frame
-        // surface-sample jitter is what converges into a clean penumbra in
-        // ?rtdebug=2/3 screenshots (motion stays live)
-        blendAlpha.value = moved ? 1 : 0.08;
+        blendAlpha.value = moved
+          ? (reproject.value > 0.5 ? 0.12 : 1)
+          : 0.08;
       }
 
       // lights live in the storage buffer (rebuilt only by setLights) — no
@@ -1383,7 +1547,7 @@ export function createAdvancedRenderer(
       // live without touching the buffer
 
       frame++;
-      // Camera matrices are only refreshed by renderer.render(), which runs
+      volActive = false;   // only a frame that actually ran can show fog      // Camera matrices are only refreshed by renderer.render(), which runs
       // AFTER this dispatch (inside advanced.render()). Reading them here
       // would use LAST frame's pose while the raster G-buffer — drawn a
       // moment later by render() — uses the current one, i.e. RT lighting
@@ -1456,9 +1620,18 @@ export function createAdvancedRenderer(
       // exactly the holes it exists to show.
       rtFlag.value =
         debugMode.value > 3.5 ? 4 : debugMode.value > 2.5 ? 3 : debugMode.value > 0.5 ? 2 : 1;
+      // Next frame's reprojection reference = THIS frame's pose, stored after the
+      // kernel ran (the kernel read last frame's values this frame). geomHistory
+      // is written by the copy pass in the same order, so history texel and the
+      // pose it belongs to always describe the same frame.
+      prevViewMat.value.copy(viewMat.value);
+      prevViewProj.value.copy(invViewProj.value);
+      buffersValid = true;
     },
     render(): void {
-      if (!ranThisFrame) rtFlag.value = 0;
+      // An idle (frozen) frame must keep rtFlag: 0 means "show the raster beauty
+      // pass", which would replace the accumulated frame with an unlit one.
+      if (!ranThisFrame && !buffersValid) rtFlag.value = 0;
       // fog marched this frame → fog composite; otherwise the plain graph,
       // which contains no fog code at all (toggle off / debug / material
       // views cost exactly what no-fog costs)
@@ -1473,8 +1646,10 @@ export function createAdvancedRenderer(
     },
     setLightGain(value: number): void {
       lightGain.value = value;
+      dirty = true;
     },
     setLights(next: RtLight[]): void {
+      dirty = true;
       // rebuild hook for future chunk-streaming — never truncates: an
       // oversized list throws LOUDLY (see makeLightsNode)
       const nextFloats = Math.max(next.length, 1) * LIGHT_STRIDE * 4;
@@ -1494,6 +1669,15 @@ export function createAdvancedRenderer(
       kernelNode = undefined; // rebuilt lazily on the next dispatch
       volPass.invalidate(); // the fog kernel indexes rt_lights at module scope
     },
+    get idle(): boolean {
+      return idleFreeze && buffersValid && settleLeft <= 0 && !dirty;
+    },
+    markDirty(): void {
+      // A change outside the tracked state invalidates the accumulated history
+      // too: what the buffers hold was lit by the PREVIOUS state.
+      dirty = true;
+      historyReset = true;
+    },
     volStats: volPass.stats,
     dispose(): void {
       postPlain.dispose();
@@ -1502,13 +1686,14 @@ export function createAdvancedRenderer(
       lightingTex.dispose();
       historyTex.dispose();
       geomTex.dispose();
+      geomHistoryTex.dispose();
       bakedTex.dispose();
-      denoiseTexA.dispose();
       denoiseTexB.dispose();
       specTex.dispose();
       specHistoryTex.dispose();
       specDenoiseA.dispose();
       specDenoiseB.dispose();
+      ditherTex?.dispose();
       scenePass.dispose();
     },
   };

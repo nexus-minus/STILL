@@ -45,6 +45,14 @@ MARGIN_PX = 16
 ISLAND_GAP_PX = 2 * MARGIN_PX
 SAMPLES_DEFAULT = 64
 RESOLUTION_DEFAULT = 2048
+# Blue-noise ordered dither for the 8-bit encode (docs/backlog.md #9, banding).
+# Quantization is what makes banding: neighbouring texels land on the same
+# value, and the eye reads the jump between two values as a stripe. Dithering
+# spreads that jump over neighbouring texels, so the stripes become a fine,
+# nearly invisible variation instead of a plateau. Blue noise (not white) is
+# used because it has no low-frequency clumping — white noise looks like grain.
+DITHER_SIZE = 64
+DITHER_DEFAULT = True
 
 
 def positive_int(flag, raw):
@@ -61,14 +69,19 @@ def parse_args():
     """Everything after the `--` separator (shared with export_map.py):
     --out <dir>, --samples N, --resolution N.
 
+    --dither / --no-dither  blue-noise ordered dither on the 8-bit encode (on
+    by default; --no-dither exists for the A/B, see scripts/banding-check.mjs).
+
     --weld is export_map.py's: it already welded the meshes earlier in this
     same Blender process, so the bake sees the welded geometry for free.
     Unknown flags are skipped, mirroring export_map.parse_args.
     """
     if "--" not in sys.argv:
-        return {"samples": SAMPLES_DEFAULT, "resolution": RESOLUTION_DEFAULT}
+        return {"samples": SAMPLES_DEFAULT, "resolution": RESOLUTION_DEFAULT,
+                "dither": DITHER_DEFAULT, "dither_ab": False}
     args = sys.argv[sys.argv.index("--") + 1:]
-    out = {"samples": SAMPLES_DEFAULT, "resolution": RESOLUTION_DEFAULT}
+    out = {"samples": SAMPLES_DEFAULT, "resolution": RESOLUTION_DEFAULT,
+           "dither": DITHER_DEFAULT, "dither_ab": False}
     i = 0
     while i < len(args):
         if args[i] == "--out" and i + 1 < len(args):
@@ -80,6 +93,15 @@ def parse_args():
         elif args[i] == "--resolution" and i + 1 < len(args):
             out["resolution"] = positive_int("--resolution", args[i + 1])
             i += 2
+        elif args[i] == "--no-dither":
+            out["dither"] = False
+            i += 1
+        elif args[i] == "--dither":
+            out["dither"] = True
+            i += 1
+        elif args[i] == "--dither-ab":
+            out["dither_ab"] = True
+            i += 1
         else:
             i += 1
     return out
@@ -395,7 +417,76 @@ def clipping_report(rgb):
     )
 
 
-def save_lightmap_png(img, path):
+def blue_noise_mask(n=DITHER_SIZE, seed=1):
+    """Void-and-cluster: an ordered-dither matrix whose thresholds are
+    blue-noise distributed (evenly spaced, no clumping).
+
+    Standard result in graphics: taking the ORDER in which void-and-cluster
+    places pixels gives a matrix that dithers without low-frequency clumping —
+    which is what makes the residual look like a smooth gradient instead of a
+    pattern. Generated once per run (64², ~4k iterations), deterministic with a
+    fixed seed so two runs produce the same PNG.
+    """
+    rng = np.random.default_rng(seed)
+    yy, xx = np.meshgrid(np.arange(n), np.arange(n), indexing="ij")
+    order = np.zeros((n, n), dtype=np.int32)
+    placed = np.zeros((n, n), dtype=bool)
+    dist = np.full((n, n), np.inf)          # distance to the nearest placed pixel (torus)
+    p = (int(rng.integers(n)), int(rng.integers(n)))
+    for count in range(n * n):
+        placed[p] = True
+        order[p] = count
+        dy = np.abs(yy - p[0]); dy = np.minimum(dy, n - dy)
+        dx = np.abs(xx - p[1]); dx = np.minimum(dx, n - dx)
+        dist = np.minimum(dist, np.sqrt(dy * dy + dx * dx))
+        free = np.where(placed, -1.0, dist)
+        p = np.unravel_index(int(np.argmax(free)), (n, n))
+    return order / float(n * n)
+
+
+def plateau_stats(display):
+    """What the eye actually sees in a quantized image: flat plateaus.
+
+    A plateau is a run of identical values in a row; a plateau plus a 1-LSB jump
+    is one visible band. Quantization without dither produces long plateaus
+    (the committed lightmap measured 70.9 % of its area inside runs >= 8 px,
+    longest 1670 px). Dithering breaks the plateaus into short runs, so the same
+    information reads as a smooth gradient.
+    """
+    if display.ndim == 3:
+        luma = np.round(display[..., 0] * 0.2126 + display[..., 1] * 0.7152
+                        + display[..., 2] * 0.0722).astype(np.int64)
+    else:
+        luma = display
+    rows, cols = luma.shape
+    # Only pixels that actually received light are measured: the atlas is ~42 %
+    # black (unused islands + padding), and counting those as plateaus would make
+    # every number look worse than the picture is.
+    measured = luma > 4
+    levels = int(len(np.unique(luma[measured]))) if measured.any() else 0
+    longest = 0
+    in_plateau = 0
+    jumps = 0
+    for y in range(rows):
+        vals = luma[y]
+        valid = measured[y]
+        boundary = np.flatnonzero((vals[:-1] != vals[1:]) & valid[:-1] & valid[1:])
+        edges = [0] + (boundary + 1).tolist() + [cols]
+        for i in range(len(edges) - 1):
+            n = int(valid[edges[i]:edges[i + 1]].sum())
+            if n >= 8:
+                in_plateau += n
+            longest = max(longest, n)
+        jumps += int(boundary.size)
+    return {
+        "levels": levels,
+        "longest": int(longest),
+        "plateau_pct": 100.0 * in_plateau / max(1, int(measured.sum())),
+        "jumps": int(jumps),
+    }
+
+
+def save_lightmap_png(img, path, dither=True, dither_ab=False):
     """RGBM + sRGB encode: the linear bake's full HDR range in one 8-bit PNG.
 
     WHY (backlog #9 rule 2): plain sRGB-8 hard-clips every linear value above
@@ -438,54 +529,114 @@ def save_lightmap_png(img, path):
     ratio = np.clip(ratio, 0.0, 1.0)
     srgb = lambda c: np.where(c <= 0.0031308, c * 12.92, 1.055 * np.power(c, 1 / 2.4) - 0.055)
     enc = srgb(ratio)
-    out = np.empty((h, w, 4), dtype=np.uint8)
-    out[..., :3] = (np.round(np.clip(enc, 0.0, 1.0) * 255.0)
-                    .astype(np.uint8).reshape(h, w, 3))
-    # M channel sRGB-encoded too (see docstring: linear M floors dark texels
-    # at RANGE/255 and blacks out the room)
-    out[..., 3] = (np.round(np.clip(srgb(np.clip(peak / range_v, 0.0, 1.0)), 0.0, 1.0) * 255.0)
-                   .astype(np.uint8).reshape(h, w))
-    out = out[::-1]  # pixels[] is bottom-up, PNG rows are top-down (probe-measured)
+    enc_m = srgb(np.clip(peak / range_v, 0.0, 1.0))
 
-    # filter 0 (None) per row — trivially re-readable by the self-audit below;
-    # zlib still compresses the smooth lightmap well
-    raw = b"".join(b"\x00" + out[y].tobytes() for y in range(h))
+    # ---- quantization (this is where banding is created) ------------------
+    # Plain rounding maps every value inside one 1/256 window to the same byte:
+    # neighbouring texels in a smooth gradient share a byte, and the next byte
+    # boundary becomes a visible stripe. Blue-noise ordered dithering decides the
+    # byte per texel with a spatially even threshold, so the boundary is spread
+    # over the gradient instead of concentrating in one line.
+    def quantize(vals, mask):
+        # Blender's pixel block is flat, so both sides are worked flat and the
+        # image shape is restored at the end.
+        q = np.asarray(vals, dtype=np.float64).ravel() * 255.0
+        q = np.floor(q + mask.ravel()) if mask is not None else np.round(q)
+        return np.clip(q, 0.0, 255.0).astype(np.uint8).reshape(h, w)
+
+    def build(mask):
+        out = np.empty((h, w, 4), dtype=np.uint8)
+        for c in range(3):
+            out[..., c] = quantize(enc.reshape(h, w, 3)[:, :, c], mask)
+        # M channel sRGB-encoded too (see docstring: linear M floors dark texels
+        # at RANGE/255 and blacks out the room)
+        out[..., 3] = quantize(enc_m, mask)
+        return out[::-1]  # pixels[] is bottom-up, PNG rows are top-down (probe-measured)
 
     def chunk(typ, data):
         return (struct.pack(">I", len(data)) + typ + data
                 + struct.pack(">I", zlib.crc32(typ + data) & 0xFFFFFFFF))
 
-    png = (
-        b"\x89PNG\r\n\x1a\n"
-        + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0))
-        + chunk(b"IDAT", zlib.compress(raw, 9))
-        + chunk(b"IEND", b"")
-    )
-    with open(path, "wb") as fh:
-        fh.write(png)
+    def encode_png(out):
+        # filter 0 (None) per row — trivially re-readable by the self-audit below;
+        # zlib still compresses the smooth lightmap well
+        raw = b"".join(b"\x00" + out[y].tobytes() for y in range(h))
+        return (
+            b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw, 9))
+            + chunk(b"IEND", b"")
+        )
 
-    # self-audit: decode the FILE back (not the buffer) and prove the >1.0
-    # range the plain encode clipped survives round-trip within 8-bit error
-    ihdr_end = 8 + 4 + 4 + 13 + 4
-    idat_len = struct.unpack(">I", png[ihdr_end:ihdr_end + 4])[0]
-    rows = np.frombuffer(
-        zlib.decompress(png[ihdr_end + 8:ihdr_end + 8 + idat_len]), dtype=np.uint8
-    )
-    rows = rows.reshape(h, 1 + w * 4)[:, 1:].reshape(h, w, 4)[::-1]  # file top-down -> pixels bottom-up
-    dec = rows[..., :3].astype(np.float64) / 255.0
-    dec = np.where(dec <= 0.04045, dec / 12.92, ((dec + 0.055) / 1.055) ** 2.4)
-    ma = rows[..., 3:4].astype(np.float64) / 255.0
-    ma = np.where(ma <= 0.04045, ma / 12.92, ((ma + 0.055) / 1.055) ** 2.4)
-    decoded = (dec * ma * range_v).reshape(-1, 3)
-    err = float(np.abs(decoded - rgb).max())
+    def decode_png(png):
+        """Decode the FILE back (not the buffer): the self-audit proves what a
+        browser actually gets, including any mistake in the encode above."""
+        ihdr_end = 8 + 4 + 4 + 13 + 4
+        idat_len = struct.unpack(">I", png[ihdr_end:ihdr_end + 4])[0]
+        raw = np.frombuffer(zlib.decompress(png[ihdr_end + 8:ihdr_end + 8 + idat_len]), dtype=np.uint8)
+        rows = raw.reshape(h, 1 + w * 4)[:, 1:].reshape(h, w, 4)[::-1]  # file top-down -> pixels bottom-up
+        lin = lambda b: np.where(b <= 0.04045, b / 12.92, ((b + 0.055) / 1.055) ** 2.4)
+        dec = lin(rows[..., :3].astype(np.float64) / 255.0)
+        m = lin(rows[..., 3:4].astype(np.float64) / 255.0)
+        return rows, (dec * m * range_v).reshape(-1, 3)
+
+    def report(rows, decoded, label):
+        err = float(np.abs(decoded - rgb).max())
+        st = plateau_stats(rows)
+        # Why dithering can raise the per-pixel error and still look better: the
+        # eye integrates over a few texels. If the LOCAL AVERAGE matches the true
+        # value, the gradient reads smooth even though single texels are off.
+        # This is the number that distinguishes "wrong" from "quantized".
+        block = decoded.reshape(h, w, 3)
+        br, bc = h // 8, w // 8
+        blocks = block[:br * 8, :bc * 8].reshape(br, 8, bc, 8, 3).mean(axis=(1, 3))
+        truth = rgb.reshape(h, w, 3)[:br * 8, :bc * 8].reshape(br, 8, bc, 8, 3).mean(axis=(1, 3))
+        lit = truth.max(axis=2) > 1e-4
+        berr = float(np.abs(blocks[lit] - truth[lit]).max()) if lit.any() else 0.0
+        mean_berr = float(np.abs(blocks[lit] - truth[lit]).mean()) if lit.any() else 0.0
+        print(
+            f"bake_map: {label} · {st['levels']} distinct stored levels · "
+            f"longest flat run {st['longest']} px · {st['plateau_pct']:.1f}% of the lit area "
+            f"inside runs >= 8 px · {st['jumps']} value jumps · round-trip error "
+            f"{err:.4f} ({100 * err / range_v:.2f}% of range) · 8x8 block error "
+            f"mean {100 * mean_berr / range_v:.2f}% max {100 * berr / range_v:.2f}%"
+        )
+        if range_v > 1.0 and decoded.max() <= 1.0:
+            raise SystemExit("bake_map: RGBM round-trip lost the >1.0 range — not shipping")
+        if err > 0.05 * range_v:
+            raise SystemExit(f"bake_map: RGBM round-trip error {err:.4f} too large — not shipping")
+
+    def write(out, where):
+        png = encode_png(out)
+        with open(where, "wb") as fh:
+            fh.write(png)
+        return png
+
+    mask = None
+    if dither:
+        m = blue_noise_mask()
+        reps = (int(np.ceil(h / m.shape[0])), int(np.ceil(w / m.shape[1])))
+        mask = np.tile(m, reps)[:h, :w]
+
+    label = f"blue-noise dither {DITHER_SIZE}x{DITHER_SIZE}" if dither else "plain rounding (no dither)"
+    png = write(build(mask), path)
+    rows, decoded = decode_png(png)
     print(
         f"bake_map: RGBM self-audit — decoded max {decoded.max():.3f} vs linear {range_v:.3f}, "
-        f"worst round-trip error {err:.4f} ({100 * err / range_v:.2f}% of range)"
+        f"worst round-trip error {100 * float(np.abs(decoded - rgb).max()) / range_v:.2f}% of range"
     )
-    if range_v > 1.0 and decoded.max() <= 1.0:
-        raise SystemExit("bake_map: RGBM round-trip lost the >1.0 range — not shipping")
-    if err > 0.05 * range_v:
-        raise SystemExit(f"bake_map: RGBM round-trip error {err:.4f} too large — not shipping")
+    report(rows, decoded, label)
+
+    # --dither-ab: the SAME linear bake values quantized both ways, so the two
+    # numbers describe only the quantization (a bake would differ run to run by
+    # its own noise, which would make the comparison dishonest).
+    if dither_ab:
+        alt = path[:-4] + ("_plain.png" if dither else "_dither.png")
+        png2 = write(build(None if dither else mask), alt)
+        rows2, decoded2 = decode_png(png2)
+        report(rows2, decoded2, "plain rounding (no dither)" if dither else f"blue-noise dither {DITHER_SIZE}x{DITHER_SIZE}")
+        print(f"bake_map: A/B written — {path} vs {alt}")
+
     return len(png), range_v
 
 
@@ -645,7 +796,7 @@ def run():
         raise SystemExit("bake_map: bake produced a black image — no light reached the baker")
 
     png_path = os.path.join(out_dir, "lightmap.png")
-    size, lm_range = save_lightmap_png(img, png_path)
+    size, lm_range = save_lightmap_png(img, png_path, args["dither"], args["dither_ab"])
     print(f"bake_map: wrote {png_path} ({size // 1024} KB, RGBM sRGB 8-bit RGBA, range {lm_range:.3f})")
 
     unwire(added_nodes, temp_mats)

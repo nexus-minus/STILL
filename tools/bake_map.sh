@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Export a liminal .blend AND bake its static lighting into a lightmap PNG.
 #
-#   tools/bake_map.sh [--weld] [--samples N] [--resolution N] path/to/map.blend
+#   tools/bake_map.sh [--weld] [--samples N] [--resolution N] [--dither|--no-dither] path/to/map.blend
 #
 # One headless Blender run does both steps: export_map.py writes the .glbs +
 # manifest.json, then bake_map.py adds a second UV layer, Cycles-bakes the
@@ -12,6 +12,10 @@
 #                   the bake sees the welded meshes in the same run)
 # --samples N      Cycles bake samples (default 64)
 # --resolution N   lightmap.png size, square (default 2048)
+# --dither         blue-noise ordered dither on the 8-bit encode (ON by default)
+# --no-dither      plain rounding — only for the A/B, see scripts/banding-check.mjs
+# --dither-ab      write both variants in one bake so the numbers compare fairly
+#                  (same linear values, quantized two ways); writes a second PNG
 #
 # Output: $OUT_DIR (default assets/map) — everything export_map.sh writes,
 # plus lightmap.png and the manifest "lightmap" block.
@@ -25,7 +29,7 @@ BLENDER="${BLENDER:-blender}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
 
-usage() { echo "usage: $0 [--weld] [--samples N] [--resolution N] path/to/map.blend" >&2; }
+usage() { echo "usage: $0 [--weld] [--samples N] [--resolution N] [--dither|--no-dither] [--dither-ab] path/to/map.blend" >&2; }
 
 BLEND=""
 PY_ARGS=()
@@ -44,6 +48,18 @@ while [[ $# -gt 0 ]]; do
       [[ $# -ge 2 ]] || { echo "error: --resolution needs a value" >&2; usage; exit 1; }
       PY_ARGS+=(--resolution "$2")
       shift 2
+      ;;
+    --dither)
+      PY_ARGS+=(--dither)
+      shift
+      ;;
+    --no-dither)
+      PY_ARGS+=(--no-dither)
+      shift
+      ;;
+    --dither-ab)
+      PY_ARGS+=(--dither-ab)
+      shift
       ;;
     -h|--help)
       usage
