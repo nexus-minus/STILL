@@ -190,6 +190,24 @@ K=π applied once at decode (static+dynamic share one scale, calibrated
 +10 % under AgX vs legacy); `?rtdebug=3` = realtime-dynamic-only,
 `?rtdebug=4` = the baked buffer, `?nolightmap` A/Bs the split.
 
+**Status 2026-11-22 (bake side, anti-banding):** the encode is dithered by default (blue
+noise, 64×64 void-and-cluster, same algorithm and seed as the runtime mask — `--dither` /
+`--no-dither` / `--dither-ab`, banding report printed every run). Measured on the fixture
+bake (1024², 48 spp, `--dither-ab` so both numbers come from the SAME linear buffer
+quantized two ways): dither 205 levels / longest flat run 158 px / 36.5 % of the lit area
+inside runs ≥ 8 px / 8×8 block error mean 0.01 %; plain rounding 207 levels / 290 px /
+54.1 % / 0.00 %. Plain rounding is **more** accurate — dithering only moves the error off
+the plateau boundary, so it is a perceptual fix, and the docs say so rather than
+overselling it. Two things still open here:
+
+- **Bake type.** Combined stores outgoing radiance *with albedo inside*, so it cannot be
+  reused as irradiance for moving objects (probes need `albedo × irradiance`). Changing
+  the bake to irradiance / no-color-contribution is the cleaner model but changes what the
+  static path multiplies — needs the user's call together with the probe work.
+- **16-bit lightmaps.** A browser PNG decodes at 8-bit, so a 16-bit bake needs KTX2 or a
+  binary RGBA16F file, not a PNG. Not worth it while dithering + texel density still solve
+  the visible problem, and it would break the "just look at the PNG" workflow.
+
 **Interactive/lever lights (design, not yet implemented):** a light
 toggled at runtime cannot remove its own baked pool — the bake must
 exclude it: Blender prop `dynamic=1` → `bake_map.py` zeroes that
@@ -285,3 +303,48 @@ no-gloss baseline. Reflections consume exactly this roughness.
   the RT path — skinned/dynamic geometry needs a refit or an analytic
   stand-in in the BVH; combined with #11's rule (players share the
   lighting path so they read correctly from every viewer's perspective).
+
+## 14. Anti-banding + idle frame (shipped 2026-11-22, visual check pending)
+
+Three mechanisms, each with an A/B URL flag so the effect can be seen instead of
+believed (full write-up in `docs/render-pipeline.md` → "Anti-banding + idle frame",
+German test checklist in `docs/test-checklist-de.md`):
+
+1. **Blue-noise dithering** at the 8-bit display step, applied AFTER tone mapping
+   (`renderOutput()` in the composite, `outputColorTransform = false`), indexed by the
+   display pixel (`screenCoordinate`, so pixel ratio and render scale are included).
+   Debug and material views stay exact so the smoke readbacks remain valid.
+2. **Dirty-flag scheduler + settle window** (`?settle=N`, `?idle=0`): a frame is traced
+   only when something that affects the picture changed; after the settle window the
+   dispatch is skipped and the composite re-shows the accumulated buffers. `rtFlag` is
+   not forced to 0 on a frozen frame (0 = raster beauty pass, which would replace the
+   accumulated frame with an unlit one). The HUD shows `· frozen` in the stats line —
+   otherwise a frozen frame and a slow frame are indistinguishable on screen.
+3. **Motion reprojection** (`?reproj=0` restores the old hard reset): each pixel reads
+   the history texel its own world point held last frame, with a depth-based
+   disocclusion check that keeps it from becoming TAA ghosting. This is the biggest
+   noise win, because the old behaviour (reset the whole frame on any camera move) is
+   exactly why standing still looked clean and walking looked noisy.
+
+**What is verified vs. what is not:** typecheck green, bake-side measurements done
+(numbers in #9 and render-pipeline.md). Nothing visual is verified — no WebGPU browser
+on this machine — so the visual judgement needs the user's hardware. Reported so far:
+banding confirmed to come from the bake; `?rtsoft=0` did not change the stripes the user
+saw, and the stripes were dark green and aligned with emissive objects → most likely
+baked coverage (UV island / margin), not geometry seams. The HUD `· frozen` marker and
+the reprojection ghosting need a real look.
+
+**Smoke scripts:** they measure ranges/plateaus, so a ±0.5 LSB dither cannot move a
+result; any script that compares exact pixel values must run with `?dither=0` (the debug
+and material views are already exempt by design).
+
+**Possible next step:** the bake report could warn per fixture when a light clips or is
+brighter than the display range allows — the user suspects some lights are too bright, and
+a warning in the bake output is cheaper than hunting it visually.
+
+**Open decisions (user's call, blocking the next build steps):**
+- **Room definition:** automatic spatial grid (no author work, rooms are not theirs) vs
+  an author-defined `rooms` collection in the `.blend` (matches the story, costs editor
+  work).
+- **Anti-aliasing:** MSAA (sharp edges, GPU cost) vs SMAA (post pass, kinder to weak
+  GPUs). For long corridors with soft light, SMAA is the cheaper fit.

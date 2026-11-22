@@ -132,8 +132,19 @@ tools/bake_map.sh path/to/map.blend
 #    objects.glb         re-exported with a second UV set (glTF TEXCOORD_1)
 #    manifest.json       + additive "lightmap" {file, resolution, uv}
 tools/bake_map.sh --samples 128 --resolution 4096 path/to/map.blend   # tune
+tools/bake_map.sh --dither-ab path/to/map.blend  # writes BOTH variants in one bake
 tools/export_map.sh --bake path/to/map.blend    # same thing (export + bake)
 ```
+
+Dither flags (the anti-banding work, 2026-11-22):
+
+- `--dither` — blue-noise ordered dither on the 8-bit encode. **ON by default**, so
+  a normal run already has it.
+- `--no-dither` — plain rounding, only for the comparison.
+- `--dither-ab` — writes both variants from the SAME linear buffer in one run, so the
+  two numbers are the same values quantized two ways (otherwise Cycles' own noise
+  makes the comparison meaningless). Report: distinct levels, longest flat run, % of
+  the lit area inside runs ≥ 8 px, 8×8 block-average error.
 
 **Re-run it after ANY map/light/material change** — a moved wall, a new
 fixture, a tweaked emission strength, a changed base color. The bake is cheap
@@ -160,7 +171,14 @@ What one run does:
    channels sRGB-encoded: `rgb = srgb(linear/m)`, `alpha = srgb(m/range)`)
    because a plain 8-bit sRGB bake clipped 1.59 % of texels above 1.0 under
    AgX (measured: max radiance 6.6, display error up to 0.177) — RGBM keeps
-   the full highlight range with a worst-case round-trip error of 0.77 %.
+   the full highlight range with a worst-case round-trip error of 0.77 %. The encode is dithered (blue noise — see the flags above): plain
+    rounding puts the error on the plateau boundary, which is the line the eye reads as a
+    band; dithering moves that error into an even scatter. It does NOT add information —
+    plain rounding still measures slightly more accurate, and that is stated on purpose:
+    dithering is a perceptual fix, not a correctness fix. Every run prints the banding
+    report for the atlas: distinct luma levels, longest flat run, share of the lit area
+    inside runs ≥ 8 px, and the 8×8 block-average error against the linear values (black
+    is skipped — it has no gradient to band).
 4. **`objects.glb` re-exported** so glTF carries the second UV set as
    **`TEXCOORD_1`**, and **`manifest.json`** gains the additive block:
 
