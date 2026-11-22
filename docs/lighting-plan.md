@@ -62,10 +62,13 @@ only for the few things that must react in the same frame.
 
 ## Decisions (owner, 2026-11-22)
 
-1. **Room definition: automatic spatial grid, no `rooms` collection.** Everything
-   must behave the same, and the owner does not want to name rooms. The game builds
-   the grid from the geometry; nothing is authored. Per-room atmosphere (step 9) can
-   still be added later as custom properties, but it must not change how lighting
+1. **No room concept at all.** The world is not a floor plan of rooms — it has
+   corridors, halls, caves, courtyards, outdoor areas, half-open spaces. A
+   room-shaped lookup would fail everywhere the geometry is not a box. So the lookup
+   is a **generic world-wide grid** (spatial hash / voxel cells over the whole map,
+   built automatically from the geometry, density chosen per area), never a named
+   room. Nothing is authored, and every cell behaves the same. Atmosphere values can
+   still be per-area custom properties later, but they must not change how lighting
    behaves.
 2. **Antialiasing: the player decides in the settings.** Implementation default: MSAA
    where the GPU can afford it, SMAA on weak GPUs, and "off" stays selectable.
@@ -81,10 +84,9 @@ only for the few things that must react in the same frame.
 
 ## Open decisions
 
-1. **Room definition.** Automatic spatial grid (no authoring work) or a `rooms`
-   collection the owner defines in Blender (needed for per-room fog/atmosphere)?
-   Both can coexist: grid for atlases, `rooms` collection for atmosphere.
-   **Decided 2026-11-22: grid** — see "Decisions" above.
+1. **Room definition — closed 2026-11-22: no rooms.** A world-shaped lookup (generic
+   world-wide grid) instead of any room concept, because the world is not made of
+   rooms. The grid is built automatically; nothing is authored.
 2. **Soft shadows.** Baked area shadows (free, look right, but static) vs shadow
    maps for dynamic. For the player's light we need one real source — shadow map
    or the existing fixture-surface sampling.
