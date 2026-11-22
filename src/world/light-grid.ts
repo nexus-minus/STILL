@@ -129,7 +129,8 @@ export interface LightGrid {
   raysPerCell: number;
 }
 
-const DEFAULTS: Required<LightGridOptions> = {
+/** exported so the file tool can fall back to the same numbers the check declares */
+export const DEFAULTS: Required<LightGridOptions> = {
   texelsPerCell: 512,
   raysPerCell: 512, // load-time ray count, chosen for how blocky dark rooms look (owner, 2026-11-22)
   minDensity: 32,
@@ -337,8 +338,10 @@ export function encodeLightGrid(packed: PackedLightGrid): Uint8Array {
   return bytes;
 }
 
-/** Read the file back. Copying into a fresh buffer keeps the views aligned whatever the
- *  caller hands in (fetch body, subarray, file read). */
+/** Read the file back. A real COPY is required, not a view: a Node Buffer from
+ *  readFileSync is often a slice of a shared pool, so `bytes.buffer` is not the file and a
+ *  typed-array view at header + offset reads the wrong bytes. That is what the first CLI run
+ *  caught (an empty table with a correct header). */
 export function decodeLightGrid(bytes: Uint8Array): PackedLightGrid {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const magic = String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]);
@@ -357,10 +360,11 @@ export function decodeLightGrid(bytes: Uint8Array): PackedLightGrid {
   if (bytes.byteLength !== expected) {
     throw new Error(`lightgrid file is ${bytes.byteLength} bytes, expected ${expected}`);
   }
-  const buffer = bytes.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength).buffer;
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes); // a real copy, so the views below start at the file, not at a shared pool
   return {
-    data: new Float32Array(buffer, GRID_FILE_HEADER, slotCount * stride),
-    neighbourMask: new Uint32Array(buffer, GRID_FILE_HEADER + slotCount * stride * 4, slotCount),
+    data: new Float32Array(copy.buffer, GRID_FILE_HEADER, slotCount * stride),
+    neighbourMask: new Uint32Array(copy.buffer, GRID_FILE_HEADER + slotCount * stride * 4, slotCount),
     slotCount, cellCount, cellSize, resolution, seed, raysPerCell, blend,
   };
 }

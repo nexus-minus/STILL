@@ -594,6 +594,15 @@ const toolMs = performance.now() - t2;
 const t3 = performance.now();
 const readBack = decodeLightGrid(tool.bytes);
 const decodeMs = performance.now() - t3;
+// the disk trap, kept as an assert: a file arrives as a VIEW into a bigger buffer, so the
+// decode must copy instead of pointing at the caller's buffer. Reading through a view is what
+// the first CLI run got wrong (correct header, empty table).
+const padded = new Uint8Array(64 + tool.bytes.length);
+padded.set(tool.bytes, 64);
+const fromView = decodeLightGrid(padded.subarray(64));
+let viewDiff = 0;
+for (let i = 0; i < readBack.data.length; i++) if (fromView.data[i] !== readBack.data[i]) viewDiff++;
+for (let i = 0; i < readBack.neighbourMask.length; i++) if (fromView.neighbourMask[i] !== readBack.neighbourMask[i]) viewDiff++;
 let byteDiff = 0;
 const byteLenOk = tool.bytes.length === baseBytes.length;
 if (byteLenOk) for (let i = 0; i < baseBytes.length; i++) if (tool.bytes[i] !== baseBytes[i]) byteDiff++;
@@ -612,7 +621,8 @@ for (const c of checkCells) {
 }
 console.log(`file path (tolerance 0 differences, base state): bytes ${byteLenOk ? `identical length (${tool.bytes.length})` : `LENGTH DIFFERS ${tool.bytes.length} vs ${baseBytes.length}`}, ` +
   `bytes that differ ${byteDiff}, metadata ${metaDiff.length ? `differs: ${metaDiff.join(',')}` : 'identical'}, ` +
-  `half decode ${decodeDiff} texels differ, lookups ${slotDiff} differ, slot values ${slotValueDiff} differ`);
+  `half decode ${decodeDiff} texels differ, lookups ${slotDiff} differ, slot values ${slotValueDiff} differ, ` +
+  `reading through a buffer view ${viewDiff} differ`);
 console.log(`  what the game pays at load: reading ${tool.bytes.length} bytes ${decodeMs.toFixed(1)} ms, ` +
   `versus building the same grid ${buildMs.toFixed(0)} ms — the cost moved to the bake run (${toolMs.toFixed(0)} ms there)`);
 
@@ -646,7 +656,11 @@ if (!byteLenOk) throw new Error(`lightgrid file is ${tool.bytes.length} bytes, t
 if (byteDiff > 0) throw new Error(`the tool wrote ${byteDiff} bytes that differ from the reference packer — the file would not be the thing that was measured`);
 if (metaDiff.length) throw new Error(`lightgrid header lost the numbers that built it: ${metaDiff.join(', ')}`);
 if (decodeDiff > 0) throw new Error(`half decode differs on ${decodeDiff} texels — the tool and the reference would disagree about a stored value`);
+if (tool.grid.raysPerCell !== opts.raysPerCell || tool.grid.seed !== opts.seed) {
+  throw new Error(`the tool built with ${tool.grid.raysPerCell} rays and seed ${tool.grid.seed}, the check declared ${opts.raysPerCell} and ${opts.seed}`);
+}
 if (slotDiff > 0) throw new Error(`reading the file back lost ${slotDiff} of the checked cells`);
 if (slotValueDiff > 0) throw new Error(`reading the file back changed ${slotValueDiff} slot values — a byte-identical file cannot do that`);
+if (viewDiff > 0) throw new Error(`decoding through a buffer view differs on ${viewDiff} entries — the decode must copy, not point at the caller's buffer`);
 
 console.log('PASS light-grid CPU reference (cell size from geometry, density warning, SH truncation, air cells, dirty flag, GPU mirror, file path)');

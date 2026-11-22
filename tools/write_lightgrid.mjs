@@ -28,15 +28,16 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {
-  buildLightGrid, buildNeighbourVisibility, packLightGrid, encodeLightGrid, decodeHalfTexels, GRID_SCALE,
+  buildLightGrid, buildNeighbourVisibility, packLightGrid, encodeLightGrid, decodeHalfTexels, DEFAULTS, GRID_SCALE,
 } from '../src/world/light-grid.ts';
 
 /** Pure core: inputs in, file bytes out. No filesystem, so the check can call this exact
- *  function and compare the bytes against the grid it measured. */
+ *  function and compare the bytes against the grid it measured. Missing fields fall back to
+ *  the module's defaults — a plain spread of `{ seed: undefined }` would overwrite the
+ *  default with undefined, which is what the first CLI run caught. */
 export function buildGridFile(scene, values) {
-  const grid = buildLightGrid(scene.tris, values, scene.resolution, {
-    seed: scene.seed, raysPerCell: scene.raysPerCell,
-  });
+  const opts = { seed: scene.seed ?? DEFAULTS.seed, raysPerCell: scene.raysPerCell ?? DEFAULTS.raysPerCell };
+  const grid = buildLightGrid(scene.tris, values, scene.resolution, opts);
   buildNeighbourVisibility(grid);
   return { grid, bytes: encodeLightGrid(packLightGrid(grid)) };
 }
