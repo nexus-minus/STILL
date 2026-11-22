@@ -76,4 +76,6 @@ fi
 OUT="${OUT_DIR:-$REPO_DIR/assets/map}"
 mkdir -p "$OUT"
 
-"$BLENDER" -b "$BLEND" --python "$SCRIPT_DIR/export_map.py" -- --out "$OUT" "${PY_ARGS[@]}"
+BLENDER_ARGS=(--out "$OUT")
+if [[ ${#PY_ARGS[@]} -gt 0 ]]; then BLENDER_ARGS+=("${PY_ARGS[@]}"); fi
+"$BLENDER" -b "$BLEND" --python "$SCRIPT_DIR/export_map.py" -- "${BLENDER_ARGS[@]}"

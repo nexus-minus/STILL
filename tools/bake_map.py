@@ -307,6 +307,9 @@ def pick_device():
     """GPU when Cycles has a compute device configured (this machine: RTX 5090
     via OptiX — a 2048/64 bake measured 6 s on GPU), CPU otherwise so the bake
     still works on machines without one (where it takes minutes)."""
+    if os.environ.get("LIMINAL_BAKE_DEVICE", "").upper() == "CPU":
+        print("bake_map: CPU device forced by retry guard")
+        return "CPU"
     try:
         prefs = bpy.context.preferences.addons["cycles"].preferences
         prefs.get_devices()

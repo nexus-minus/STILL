@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
-# Export a liminal .blend AND bake its static lighting into a lightmap PNG.
+# Export a liminal .blend, bake static light, and write a half-float game file.
 #
 #   tools/bake_map.sh [--weld] [--samples N] [--resolution N] [--dither|--no-dither] path/to/map.blend
 #
-# One headless Blender run does both steps: export_map.py writes the .glbs +
-# manifest.json, then bake_map.py adds a second UV layer, Cycles-bakes the
-# static lighting onto it, writes lightmap.png, re-exports objects.glb with
-# TEXCOORD_1 and patches the manifest with the "lightmap" entry.
+# One headless Blender run exports GLBs + manifest, bakes to lightmap.bin and
+# preview PNG, re-exports TEXCOORD_1, and patches the manifest. A native
+# Blender crash is retried in a fresh CPU-only process.
 #
 # --weld           merge coincident vertices first (same meaning as export_map.sh;
 #                   the bake sees the welded meshes in the same run)
@@ -100,10 +99,33 @@ fi
 OUT="${OUT_DIR:-$REPO_DIR/assets/map}"
 mkdir -p "$OUT"
 
-# ONE headless Blender run: export_map.py first (writes manifest.json, which
-# bake_map.py then patches), bake_map.py second. Both scripts parse the same
-# argv tail after `--`.
-"$BLENDER" -b "$BLEND" \
-  --python "$SCRIPT_DIR/export_map.py" \
-  --python "$SCRIPT_DIR/bake_map.py" \
-  -- --out "$OUT" ${PY_ARGS[@]+"${PY_ARGS[@]}"}
+# macOS Bash 3.2 errors on an empty array under `set -u`; keep output args in
+# a non-empty array and append optional flags only when they exist.
+BLENDER_ARGS=(--out "$OUT")
+if [[ ${#PY_ARGS[@]} -gt 0 ]]; then BLENDER_ARGS+=("${PY_ARGS[@]}"); fi
+
+run_blender() {
+  "$BLENDER" -b "$BLEND" \
+    --python "$SCRIPT_DIR/export_map.py" \
+    --python "$SCRIPT_DIR/bake_map.py" \
+    -- "${BLENDER_ARGS[@]}"
+}
+
+# Python exceptions are caught inside Blender; native GPU-driver crashes are
+# not. Restart the complete pipeline on CPU after SIGSEGV so partial outputs
+# get regenerated from the source .blend.
+set +e
+run_blender
+STATUS=$?
+set -e
+if [[ "$STATUS" -eq 139 ]]; then
+  echo "bake_map: Blender crashed (SIGSEGV); retrying the full export+bake on CPU" >&2
+  set +e
+  LIMINAL_BAKE_DEVICE=CPU run_blender
+  STATUS=$?
+  set -e
+fi
+if [[ "$STATUS" -ne 0 ]]; then
+  echo "bake_map: Blender failed with exit code $STATUS; outputs may be incomplete — fix the Blender/driver error and run again" >&2
+  exit "$STATUS"
+fi
