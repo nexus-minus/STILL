@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import type { WorldCollision } from '../world/collision.js';
 import type { Action, Bindings } from './bindings.js';
 import { requestPointerLockSafe } from '../ui/pointer-lock.js';
+import { stepViewRetention } from './step-view.mjs';
 
 const UP = new THREE.Vector3(0, 1, 0);
 const DOWN = new THREE.Vector3(0, -1, 0);
@@ -142,6 +143,8 @@ export class PlayerController {
   private coyote = 0;
   /** view-only Y offset: eased out after a sudden upward correction (step-up) */
   private camYOffset = 0;
+  /** view-only horizontal offset created by an accepted step-up */
+  private readonly camXZOffset = new THREE.Vector3();
   /** remaining seconds of wall-contact sleep + the normal we're pressed into */
   private wallSleep = 0;
   /** remaining seconds of the wall-LIKE classification hold (chatter guard) */
@@ -239,6 +242,7 @@ export class PlayerController {
       this.jumpBuffer = 0;
       this.coyote = 0; // physics resumes fresh — no grace inherited from freecam
       this.camYOffset = 0; // re-entering from freecam snaps, it doesn't ease
+      this.camXZOffset.set(0, 0, 0);
       this.wallSleep = 0;
       this.wallLikeHold = 0;
       this.collision.resolveCapsule(this.position, this.opts.height, this.opts.radius);
@@ -278,6 +282,7 @@ export class PlayerController {
     this.position.copy(feet).addScaledVector(UP, this.opts.height / 2);
     this.velocity.set(0, 0, 0);
     this.camYOffset = 0; // teleports snap, they don't ease
+    this.camXZOffset.set(0, 0, 0);
     this.wallSleep = 0; // contact normal belongs to the old spot
     this.wallLikeHold = 0; // so does the wall-like classification
     this.coyote = 0; // jump grace belongs to the OLD ground, not here
@@ -821,6 +826,11 @@ export class PlayerController {
         );
       }
       if (inRange) {
+        // Keep collision authoritative, but ease the sudden minimum advance
+        // out of the camera pose. The old height-only ease still let a
+        // 0.43–0.54 m horizontal move happen in one frame at a ledge.
+        this.camXZOffset.x -= trial.x - this.position.x;
+        this.camXZOffset.z -= trial.z - this.position.z;
         this.position.copy(trial);
         this.grounded = true;
         velocity.y = 0;
@@ -881,15 +891,17 @@ export class PlayerController {
     // and falls are never eased; the dt-scaled threshold keeps even a run up
     // the steepest walkable ramp out of it (climb rate < runSpeed·dt).
     const rise = this.position.y - this.frameStart.y;
-    this.camYOffset *= Math.exp(-dt / STEP_VIEW_TAU);
+    const viewRetention = stepViewRetention(dt, STEP_VIEW_TAU);
+    this.camYOffset *= viewRetention;
+    this.camXZOffset.multiplyScalar(viewRetention);
     if (this.grounded && velocity.y <= 0 && rise > Math.max(STEP_VIEW_MIN, opts.runSpeed * dt * 0.9)) {
       this.camYOffset -= rise; // hold the view here, then ease up to the feet
     }
 
     this.camera.position.set(
-      this.feet.x,
+      this.feet.x + this.camXZOffset.x,
       this.feet.y + opts.eyeHeight + this.camYOffset,
-      this.feet.z,
+      this.feet.z + this.camXZOffset.z,
     );
     this.camera.rotation.set(this.pitch, this.yaw, 0, 'YXZ');
   }
