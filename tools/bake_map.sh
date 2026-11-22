@@ -106,4 +106,4 @@ mkdir -p "$OUT"
 "$BLENDER" -b "$BLEND" \
   --python "$SCRIPT_DIR/export_map.py" \
   --python "$SCRIPT_DIR/bake_map.py" \
-  -- --out "$OUT" "${PY_ARGS[@]}"
+  -- --out "$OUT" ${PY_ARGS[@]+"${PY_ARGS[@]}"}
