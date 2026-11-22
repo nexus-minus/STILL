@@ -1,4 +1,4 @@
-# liminal
+# liminal (actively in developement)
 
 Browser game about exploring gigantic liminal spaces. One shared world,
 raytraced lighting, volumetrics, no paid servers.
@@ -19,6 +19,7 @@ npm install
 npm run dev        # http://localhost:5173
 npm run build      # typecheck + production build (deploy this to GitHub Pages)
 ```
+or: https://nexus-minus.github.io/STILL
 
 **Controls:** click to lock pointer · WASD move · shift run · space jump ·
 E interact · R respawn · T quality · M map · B glow · F freecam · F2 screenshot
