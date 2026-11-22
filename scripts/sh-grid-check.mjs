@@ -41,9 +41,12 @@ const changed = updateSHGridRegion(grid, [-4, 0, -2], [-2, 2, 2], [
 ]);
 const westAfter = sampleSparseSHGrid(grid, movingSpherePosition, [0, 1, 0]);
 const eastAfter = sampleSparseSHGrid(grid, [3, 1, 0], [0, 1, 0]);
+const eastKey = `${Math.floor((3 + 4) / size)},${Math.floor(1 / size)},${Math.floor(2 / size)}`;
+const eastCell = grid.cells.get(eastKey);
 console.log(`marked state: affected ${changed.affectedCells} cell(s), occupied ${changed.cellsBefore} → ${changed.cellsAfter}`);
 console.log(`west RGB change: ${(westAfter[0] - sphere[0]).toFixed(6)}; east cell RGB change: ${(eastAfter[0] - sphere[0]).toFixed(6)}`);
 if (changed.affectedCells !== 1 || Math.abs(eastAfter[0] - sphere[0]) > 1e-5) {
   throw new Error('marked state updated cells outside its affected spatial region');
 }
+if (grid.cells.get(eastKey) !== eastCell) throw new Error('unaffected cell was rebuilt');
 console.log('PASS SH grid CPU reference');

@@ -86,13 +86,25 @@ export function sampleSparseSHGrid(grid, position, direction) {
 export function updateSHGridRegion(grid, regionMin, regionMax, replacementSamples) {
   const inside = (p) => p.every((v, a) => v >= regionMin[a] && v <= regionMax[a]);
   const old = grid.sourceSamples;
+  const cellsBefore = grid.cells.size;
   const affected = new Set();
   for (const s of old) if (inside(s.position)) affected.add(cellKey(...indices(s.position, grid)));
   for (const s of replacementSamples) if (inside(s.position)) affected.add(cellKey(...indices(s.position, grid)));
   const kept = old.filter((s) => !inside(s.position));
   const added = replacementSamples.filter((s) => inside(s.position));
-  const next = buildSparseSHGrid([...kept, ...added], grid.cellSize, grid.origin);
-  grid.sourceSamples = next.sourceSamples;
-  grid.cells = next.cells;
-  return { affectedCells: affected.size, cellsBefore: old.length, cellsAfter: grid.cells.size };
+  grid.sourceSamples = [...kept, ...added];
+  // Rebuild only the cells reached by the changed region. Other cell objects
+  // retain identity, which lets callers upload only dirty ranges.
+  for (const key of affected) {
+    const matches = grid.sourceSamples.filter((s) => cellKey(...indices(s.position, grid)) === key);
+    if (matches.length === 0) {
+      grid.cells.delete(key);
+      continue;
+    }
+    const coefficients = new Float32Array(27);
+    for (const sample of matches) for (let i = 0; i < 27; i++) coefficients[i] += sample.coefficients[i];
+    for (let i = 0; i < 27; i++) coefficients[i] /= matches.length;
+    grid.cells.set(key, { index: indices(matches[0].position, grid), coefficients, count: matches.length });
+  }
+  return { affectedCells: affected.size, cellsBefore, cellsAfter: grid.cells.size };
 }
