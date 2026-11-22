@@ -128,9 +128,10 @@ it, and (like every export here) the `.blend` is never saved:
 ```sh
 tools/bake_map.sh path/to/map.blend
 # -> everything tools/export_map.sh writes, plus:
-#    lightmap.png        Cycles Combined bake of the static lighting
+#    lightmap.bin        Cycles Combined bake of the static lighting, 16-bit
+#                        half-float (the game file); lightmap.png as the preview
 #    objects.glb         re-exported with a second UV set (glTF TEXCOORD_1)
-#    manifest.json       + additive "lightmap" {file, resolution, uv}
+#    manifest.json       + additive "lightmap" {file, resolution, uv, encoding}
 tools/bake_map.sh --samples 128 --resolution 4096 path/to/map.blend   # tune
 tools/bake_map.sh --dither-ab path/to/map.blend  # writes BOTH variants in one bake
 tools/export_map.sh --bake path/to/map.blend    # same thing (export + bake)
@@ -150,8 +151,8 @@ Dither flags (the anti-banding work, 2026-11-22):
 fixture, a tweaked emission strength, a changed base color. The bake is cheap
 (~6 s GPU at the default 2048²/64 samples on this machine), fully automatic,
 and always consistent with the `.blend`, exactly like `--weld`: when in doubt,
-re-bake. Never hand-edit `lightmap.png` or the lightmap UVs — the `.blend`
-is the only source of truth.
+re-bake. Never hand-edit `lightmap.bin` / `lightmap.png` or the lightmap UVs — the
+`.blend` is the only source of truth.
 
 What one run does:
 
@@ -167,18 +168,27 @@ What one run does:
    glowing panel is white in the lightmap — which is what the renderer wants.
    Default 64 samples, 16 px margin, resolution 2048 (override with
    `--samples` / `--resolution`).
-3. **`lightmap.png`** written next to the other outputs — **RGBM** (both
-   channels sRGB-encoded: `rgb = srgb(linear/m)`, `alpha = srgb(m/range)`)
-   because a plain 8-bit sRGB bake clipped 1.59 % of texels above 1.0 under
-   AgX (measured: max radiance 6.6, display error up to 0.177) — RGBM keeps
-   the full highlight range with a worst-case round-trip error of 0.77 %. The encode is dithered (blue noise — see the flags above): plain
-    rounding puts the error on the plateau boundary, which is the line the eye reads as a
-    band; dithering moves that error into an even scatter. It does NOT add information —
-    plain rounding still measures slightly more accurate, and that is stated on purpose:
-    dithering is a perceptual fix, not a correctness fix. Every run prints the banding
-    report for the atlas: distinct luma levels, longest flat run, share of the lit area
-    inside runs ≥ 8 px, and the 8×8 block-average error against the linear values (black
-    is skipped — it has no gradient to band).
+3. **`lightmap.bin`** — the game file, **16-bit half-float** (raw RGBA16F, row 0
+   = top, same convention as the PNG and glTF v0). Why 16-bit and not 8-bit:
+   half-float keeps **relative** precision, so a dark wall at 0.005 linear keeps its
+   steps, while an 8-bit file has about one display step there — that single step is
+   where banding comes from. No range, nothing clips, no dither needed at storage,
+   and the loader reads plain bytes (`src/world/map-loader.ts`, `encoding: "half"`).
+   Measured on a 512² run (`scripts/lightmap-16bit-check.mjs`): the 8-bit file is
+   1.55 display LSB off the 16-bit reference on average and 80.3 % of its dark texels
+   are off by ≥ 1 byte — those are the flat steps the eye reads as bands. Cost, stated
+   honestly: 4 MB at 1024², 16 MB at 2048². `--bits 8` puts the old RGBM PNG back as
+   the game file for comparison.
+    **`lightmap.png`** is still written every run — the preview for humans and the
+    report of what an 8-bit **screen** gets (RGBM, blue-noise dithered, flags above).
+    With 16-bit storage the only 8-bit step left is the display, and that is where the
+    runtime dither (`src/render/bluenoise.ts`) applies. Dithering moves the quantization
+    error off the plateau boundary, which is the line the eye reads as a band. It does
+    NOT add information — plain rounding still measures slightly more accurate, and that
+    is stated on purpose: dithering is a perceptual fix, not a correctness fix. Every run
+    prints the report for the atlas: distinct luma levels, longest flat run, share of the
+    lit area inside runs ≥ 8 px, and the 8×8 block-average error against the linear
+    values (black is skipped — it has no gradient to band).
 
     Every run also prints a **brightness report per UV island**, so you can see which
     light is too strong without opening Blender:
@@ -198,24 +208,28 @@ What one run does:
    **`TEXCOORD_1`**, and **`manifest.json`** gains the additive block:
 
    ```json
-   "lightmap": { "file": "lightmap.png", "resolution": 2048, "uv": "TEXCOORD_1",
-                 "encoding": "rgbm", "range": 6.598 }
+   "lightmap": { "file": "lightmap.bin", "resolution": 2048, "uv": "TEXCOORD_1",
+                 "encoding": "half", "bits": 16, "preview": "lightmap.png",
+                 "range": 6.598 }
    ```
 
-   Additive keys — the loader ignores unknown manifest fields today.
+   `encoding` is the decode contract: `half` = read the file as bytes (raw RGBA16F),
+   `rgbm` = the legacy 8-bit PNG. `range` is the measured maximum radiance, kept so a
+   run can be compared against its own report. Additive keys — the loader ignores
+   unknown manifest fields today.
 
 ### TEXCOORD_1 contract (for the renderer)
 
 - `objects.glb` primitives now carry **two** UV sets: `TEXCOORD_0` is your
   original `UVMap` (byte-identical to a plain export — the bake proves it),
   `TEXCOORD_1` is the lightmap atlas.
-- `manifest.json → lightmap` is the pointer: which PNG, its square
-  resolution, which TEXCOORD indexes it, the `encoding` and the RGBM
-  `range`. Decode **CPU-side once at load** — `m = srgb⁻¹(alpha) × range`,
-  `linear = srgb⁻¹(rgb) × m` → a linear half-float texture — and sample it
-  with `TEXCOORD_1`. The renderer applies its one brightness scale (K=π,
-  matching the game's no-Lambert convention) during that decode, so static
-  and realtime lighting share a single scale.
+- `manifest.json → lightmap` is the pointer: which file, its square resolution,
+  which TEXCOORD indexes it, and the `encoding`. Decode **CPU-side once at load**
+  (`loadHalfLightmap` for `half`, `loadLightmap` for `rgbm`) into a linear half-float
+  texture, then sample it with `TEXCOORD_1`. For `half` the decode is only reading the
+  bytes; for `rgbm` it is `linear = srgb⁻¹(rgb) × srgb⁻¹(alpha) × range`. The renderer
+  applies its one brightness scale (K=π, matching the game's no-Lambert convention)
+  during that decode, so static and realtime lighting share a single scale.
 - The bake only covers static `objects` geometry (the lightmap's consumer);
   animated/playermodels keep a single UV set — they move, so baked static
   lighting doesn't apply to them (backlog #9: static for static, realtime
@@ -308,5 +322,6 @@ assets/map/manifest.json        per-collection counts + world bounds,
                                 emissive{} (exported fixtures + counts),
                                 skippedEmissive[] (glows that exported nothing),
                                 lightmap{} (from tools/bake_map.sh only)
-assets/map/lightmap.png         baked static lightmap (tools/bake_map.sh only)
+assets/map/lightmap.bin         baked static lightmap, 16-bit half-float (tools/bake_map.sh only)
+assets/map/lightmap.png         the 8-bit preview of the same bake (tools/bake_map.sh only)
 ```

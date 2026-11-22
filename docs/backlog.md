@@ -163,6 +163,11 @@ materials per the plan below.
 2. If the 8-bit sRGB `lightmap.png` clips bright highlights under AgX,
    **re-encode the bake as RGBM (or half-float HDR)** so fixtures keep
    smooth Cycles falloff instead of clipping white-hot.
+   **Resolved 2026-11-22 in the stronger form:** the game file is 16-bit half-float
+   (`lightmap.bin`), so no range and no clipping exist; the PNG remains as the preview
+   and as the 8-bit-screen report. Half-float's step is below one display LSB at every
+   value, so storage cannot band — banding is only possible at the display, which is
+   where the runtime dither already sits.
 3. **Runtime adaptation (user, 2026-11-21):** changing a light at
    runtime (lever/toggle, color, intensity, movement) must be visible
    within a frame via the realtime dynamic layer; permanent changes fold

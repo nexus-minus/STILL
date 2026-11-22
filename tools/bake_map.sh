@@ -16,9 +16,14 @@
 # --no-dither      plain rounding — only for the A/B, see scripts/banding-check.mjs
 # --dither-ab      write both variants in one bake so the numbers compare fairly
 #                  (same linear values, quantized two ways); writes a second PNG
+# --bits 16|8      storage precision. 16 (default) writes lightmap.bin as raw
+#                  RGBA16F: relative precision everywhere, no range, nothing
+#                  clips, no dither needed at storage. 8 keeps the RGBM PNG as the
+#                  game file (the comparison). lightmap.png is always written.
 #
 # Output: $OUT_DIR (default assets/map) — everything export_map.sh writes,
-# plus lightmap.png and the manifest "lightmap" block.
+# plus lightmap.bin (game file), lightmap.png (preview + reports) and the
+# manifest "lightmap" block.
 # Set OUT_DIR to write somewhere else (handy for A/B bakes), BLENDER to use
 # a non-default Blender binary. The .blend is NEVER saved (same rule as
 # export_map.sh — exports are side-effect-free).

@@ -111,8 +111,11 @@ const lin2srgb = (v) => (v <= 0.0031308 ? v * 12.92 : 1.055 * Math.pow(v, 1 / 2.
 let rgbmRange = null;
 try {
   const manifest = JSON.parse(readFileSync(join(dirname(file), 'manifest.json'), 'utf8'));
-  if (manifest?.lightmap?.encoding === 'rgbm' && Number.isFinite(manifest.lightmap.range)) {
-    rgbmRange = manifest.lightmap.range;
+  const lm = manifest?.lightmap;
+  // The 8-bit PNG is always the RGBM preview, even when the game file is the 16-bit
+  // one, so a present range means the same decode here.
+  if (lm && Number.isFinite(lm.range) && (lm.encoding === 'rgbm' || lm.encoding === 'half')) {
+    rgbmRange = lm.range;
   }
 } catch { /* no manifest next to the PNG → legacy mode */ }
 const rgbm = rgbmRange !== null && ihdr.color === 6 && channels >= 4;

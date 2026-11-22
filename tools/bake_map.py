@@ -13,7 +13,9 @@ first, then this script — without ever saving the .blend:
   2. Cycles-bakes the scene's static lighting onto that layer — bake type
      Combined, so emissive fixtures bake bright (a glowing panel stays white,
      which is what the renderer wants)
-  3. writes <out>/lightmap.png (sRGB-encoded, 8-bit)
+  3. writes <out>/lightmap.bin (raw 16-bit half-float RGBA — the game file) and
+     <out>/lightmap.png (8-bit preview for humans, and the report of what an
+     8-bit screen gets); --bits 8 makes the PNG the game file again
   4. re-exports objects.glb so the second UV set ships as glTF TEXCOORD_1
   5. patches manifest.json with additive "lightmap" metadata
 
@@ -53,6 +55,7 @@ RESOLUTION_DEFAULT = 2048
 # used because it has no low-frequency clumping — white noise looks like grain.
 DITHER_SIZE = 64
 DITHER_DEFAULT = True
+BITS_DEFAULT = 16
 
 
 def positive_int(flag, raw):
@@ -72,16 +75,22 @@ def parse_args():
     --dither / --no-dither  blue-noise ordered dither on the 8-bit encode (on
     by default; --no-dither exists for the A/B, see scripts/banding-check.mjs).
 
+    --bits 16|8             storage precision. 16 (default) writes lightmap.bin as
+    raw RGBA16F: relative precision everywhere, no range, nothing clips, no dither
+    needed at storage. 8 keeps the RGBM PNG as the game file for the comparison.
+    Either way lightmap.png is written: with 16-bit it is the preview for humans
+    and the report of what an 8-bit screen gets.
+
     --weld is export_map.py's: it already welded the meshes earlier in this
     same Blender process, so the bake sees the welded geometry for free.
     Unknown flags are skipped, mirroring export_map.parse_args.
     """
     if "--" not in sys.argv:
         return {"samples": SAMPLES_DEFAULT, "resolution": RESOLUTION_DEFAULT,
-                "dither": DITHER_DEFAULT, "dither_ab": False}
+                "dither": DITHER_DEFAULT, "dither_ab": False, "bits": BITS_DEFAULT}
     args = sys.argv[sys.argv.index("--") + 1:]
     out = {"samples": SAMPLES_DEFAULT, "resolution": RESOLUTION_DEFAULT,
-           "dither": DITHER_DEFAULT, "dither_ab": False}
+           "dither": DITHER_DEFAULT, "dither_ab": False, "bits": BITS_DEFAULT}
     i = 0
     while i < len(args):
         if args[i] == "--out" and i + 1 < len(args):
@@ -102,6 +111,12 @@ def parse_args():
         elif args[i] == "--dither-ab":
             out["dither_ab"] = True
             i += 1
+        elif args[i] == "--bits" and i + 1 < len(args):
+            bits = positive_int("--bits", args[i + 1])
+            if bits not in (8, 16):
+                raise SystemExit("bake_map: --bits must be 8 or 16")
+            out["bits"] = bits
+            i += 2
         else:
             i += 1
     return out
@@ -702,6 +717,67 @@ def save_lightmap_png(img, path, dither=True, dither_ab=False):
     return len(png), range_v
 
 
+def save_lightmap_bin(linear_rgb, resolution, path):
+    """16-bit half-float texels: raw RGBA16F, no encode at all.
+
+    WHY 16-bit beats RGBM-8 as STORAGE: half-float keeps RELATIVE precision. The
+    lit walls of this bake live at 0.005-0.05 linear, where an 8-bit sRGB texel
+    has about one display step of accuracy — that single step is exactly where the
+    banding we measured comes from. A half-float texel has a relative step of
+    2^-11 (~0.05 % of its own value, far under one display LSB at any brightness),
+    so the stored file cannot produce a band the screen could show. No range, no
+    clipping, no dither needed here: the only 8-bit step left is the DISPLAY, and
+    that is where the runtime dither (src/render/bluenoise.ts) already applies.
+
+    Stated honestly, the costs: the file is bigger (4 MB at 1024², 16 MB at 2048²),
+    it is not viewable in an image viewer (the 8-bit PNG is kept as the preview and
+    as the report of what the screen gets), and the loader must read raw bytes
+    instead of an image. Row 0 is the TOP — same convention as the PNG and glTF v0,
+    so nothing in the sampling path changes.
+    """
+    w = h = resolution
+    vals = np.asarray(linear_rgb, dtype=np.float64).reshape(h, w, 3)
+    rgba = np.zeros((h, w, 4), dtype=np.float16)
+    rgba[..., :3] = vals.astype(np.float16)
+    rgba[..., 3] = np.float16(1.0)
+    data = rgba[::-1].tobytes()          # pixels[] is bottom-up, file row 0 is top
+    with open(path, "wb") as fh:
+        fh.write(data)
+
+    # Audit reads the FILE back, not the buffer — same rule as the PNG self-audit.
+    read = np.frombuffer(data, dtype=np.float16).astype(np.float64).reshape(h, w, 4)[::-1]
+    dec = read[..., :3]
+    peak = vals.max(axis=2)
+    lit = peak > 1e-4
+    # Half-float's smallest normal value is 6.1e-5; below it the format is subnormal
+    # and a relative error is meaningless (those texels are black on screen anyway).
+    # Measuring only at/above the floor is the honest number.
+    rep = lit & (peak >= 6.1e-5)
+    rel = np.abs(dec - vals) / np.maximum(vals, 1e-12)
+    err = float(rel[rep].max()) if rep.any() else 0.0
+    dark = rep & (peak < 0.05)
+    print(
+        f"bake_map: half-float self-audit — decoded max {dec.max():.4f} vs linear {vals.max():.4f} "
+        f"(nothing clips) · worst relative error at representable values {100 * err:.4f}% · "
+        f"dark lit area (<0.05) mean relative error "
+        f"{100 * float(rel[dark].mean()) if dark.any() else 0.0:.4f}% · "
+        f"{int((lit & ~rep).sum())} lit texels under half's floor 6.1e-5 (black on screen)"
+    )
+    # What an 8-bit display still sees: the file is exact, the screen is not. This
+    # is why the runtime dither stays in the pipeline — measure the storage step in
+    # display LSBs, which is the unit the eye actually resolves.
+    print("bake_map: storage step in display LSBs (AgX, exposure 1):")
+    for v in (0.002, 0.005, 0.02, 0.05, 0.2, 1.0, 4.0):
+        ulp = float(np.nextafter(np.float16(v), np.float16(np.inf)) - np.float16(v))
+        lsb = float((agx_display(np.array([v + ulp, 0.0, 0.0]))[0]
+                     - agx_display(np.array([v, 0.0, 0.0]))[0]) * 255.0)
+        print(f"bake_map:   linear {v:>6.3f} · half step {ulp:.6f} -> {lsb:.3f} display LSB "
+              f"{'(display saturates above 1.0, so no band is possible here)' if v > 1.0 else '(8-bit sRGB puts a whole band here)'}")
+    print("bake_map: so 16-bit removes banding at STORAGE; the screen's 8-bit step "
+          "is still handled by the runtime dither (src/render/bluenoise.ts)")
+    return len(data), err
+
+
 def glb_json(path):
     """Parse a .glb's JSON chunk — copy of export_map.glb_json (that module
     runs its whole export at import time, so it can't be imported here)."""
@@ -774,27 +850,33 @@ def verify_texcoord1(path):
     print(f"bake_map: objects.glb verified — TEXCOORD_1 on all {len(prims)} primitive(s)")
 
 
-def patch_manifest(out_dir, resolution, lm_range):
+def patch_manifest(out_dir, resolution, lm_range, bits=16):
     """Add the additive lightmap entry — the loader ignores unknown manifest
     fields today, so this is safe for every existing consumer (same JSON
     formatting as export_map.py so the diff is only the new block).
 
-    `range` + `encoding` are the RGBM decode contract: the loader reconstructs
-    linear radiance as srgbDecode(rgb) * a * range (see save_lightmap_png)."""
+    `encoding` is the decode contract:
+      "half" -> the file is raw RGBA16F, the loader reads it as bytes (no image
+               decode, no range, nothing clips). `preview` names the 8-bit PNG.
+      "rgbm" -> legacy 8-bit PNG: linear = srgbDecode(rgb) * srgbDecode(a) * range.
+    `range` stays in the block as the measured maximum radiance (the bake report
+    prints it), so a run can be compared against the report without re-baking."""
     path = os.path.join(out_dir, "manifest.json")
     with open(path, encoding="utf-8") as fh:
         manifest = json.load(fh)
     manifest["lightmap"] = {
-        "file": "lightmap.png",
+        "file": "lightmap.bin" if bits == 16 else "lightmap.png",
         "resolution": resolution,
         "uv": "TEXCOORD_1",
-        "encoding": "rgbm",
+        "encoding": "half" if bits == 16 else "rgbm",
+        "bits": bits,
+        "preview": "lightmap.png",
         "range": round(lm_range, 6),
     }
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, indent=2)
-    print(f"bake_map: manifest.json += lightmap (lightmap.png, {resolution}px, TEXCOORD_1, "
-          f"RGBM range {lm_range:.3f})")
+    print(f"bake_map: manifest.json += lightmap ({manifest['lightmap']['file']}, {resolution}px, "
+          f"TEXCOORD_1, {manifest['lightmap']['encoding']}, preview lightmap.png)")
 
 
 def run():
@@ -867,8 +949,19 @@ def run():
         raise SystemExit("bake_map: bake produced a black image — no light reached the baker")
 
     png_path = os.path.join(out_dir, "lightmap.png")
+    if args["bits"] == 16:
+        print("bake_map: the 8-bit report below describes what an UNDITHERED 8-bit display "
+              "would show — the game file is the 16-bit one, and its storage step is below 1 "
+              "display LSB, so banding here can only come from the screen, where the runtime "
+              "dither already applies.")
     size, lm_range = save_lightmap_png(img, png_path, args["dither"], args["dither_ab"])
-    print(f"bake_map: wrote {png_path} ({size // 1024} KB, RGBM sRGB 8-bit RGBA, range {lm_range:.3f})")
+    role = "the game file" if args["bits"] == 8 else "the human preview + the report of what an 8-bit screen gets"
+    print(f"bake_map: wrote {png_path} ({size // 1024} KB, RGBM sRGB 8-bit RGBA, range {lm_range:.3f}) — {role}")
+
+    if args["bits"] == 16:
+        bin_path = os.path.join(out_dir, "lightmap.bin")
+        bin_size, _ = save_lightmap_bin(linear_rgb, resolution, bin_path)
+        print(f"bake_map: wrote {bin_path} ({bin_size // 1024} KB, raw RGBA16F, row 0 = top) — the game file")
 
     unwire(added_nodes, temp_mats)
     bpy.data.images.remove(img)
@@ -876,7 +969,7 @@ def run():
     if not export_objects_glb(out_dir):
         raise SystemExit("bake_map: objects.glb re-export failed — not patching the manifest")
     verify_texcoord1(os.path.join(out_dir, "objects.glb"))
-    patch_manifest(out_dir, resolution, lm_range)
+    patch_manifest(out_dir, resolution, lm_range, args["bits"])
     print("bake_map: done")
 
 

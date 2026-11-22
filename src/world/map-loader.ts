@@ -12,17 +12,18 @@ export interface WorldCheckpoint {
   radius: number;
 }
 
-/** Decoded static-light bake (manifest → lightmap.png → linear half-float). */
+/** Decoded static-light bake (manifest → lightmap.bin or lightmap.png → linear half-float). */
 export interface WorldLightmap {
   /**
    * Linear RGB as an RGBA half-float texture, row 0 = TOP = glTF v0 (the
    * game's flipY=false convention — glTF UV (0,0) is the image's top-left).
-   * RGBM is decoded ONCE on the CPU at load (see loadLightmap) so both
-   * consumers — the WebGPU lighting kernel (textureLoad) and the forward
-   * path's emissiveMap — read plain linear values with zero shader decode.
+   * Both encodings are decoded ONCE on the CPU at load (see loadLightmap /
+   * loadHalfLightmap) so both consumers — the WebGPU lighting kernel
+   * (textureLoad) and the forward path's emissiveMap — read plain linear
+   * values with zero shader decode.
    */
   texture: THREE.DataTexture;
-  /** RGBM decode range (manifest lightmap.range) — already folded into `texture` */
+  /** measured maximum radiance (manifest lightmap.range); informational for 'half' */
   range: number;
   resolution: number;
 }
@@ -84,8 +85,15 @@ interface Manifest {
     file?: string;
     resolution?: number;
     uv?: string;
-    /** 'rgbm' = rgb is the sRGB-encoded ratio, alpha the sRGB-encoded m/RANGE (see loadLightmap) */
+    /**
+     * 'half' = the file is raw RGBA16F, read as bytes (see loadLightmap).
+     * 'rgbm' = rgb is the sRGB-encoded ratio, alpha the sRGB-encoded m/RANGE.
+     */
     encoding?: string;
+    bits?: number;
+    /** 8-bit preview PNG written next to it — for humans, never loaded by the game */
+    preview?: string;
+    /** measured maximum radiance of the bake (informational; not needed to decode 'half') */
     range?: number;
   };
 }
@@ -316,6 +324,10 @@ export function fixtureExposed(
 /**
  * Load + decode manifest.lightmap into a linear half-float texture.
  *
+ * This is the 8-bit PNG path (encoding "rgbm"); encoding "half" is handled by
+ * loadHalfLightmap above. The PNG is still written for every run as the preview
+ * and as the report of what an 8-bit screen gets.
+ *
  * ENCODING (tools/bake_map.py → manifest.lightmap.encoding = "rgbm"):
  *   rgb = srgb_encode(rgb_linear / m),  alpha = srgb_encode(m / RANGE)
  * so decode is `srgbDecode(rgb) * srgbDecode(alpha) * RANGE` — full HDR (this
@@ -335,9 +347,61 @@ export function fixtureExposed(
  * A legacy manifest (no `encoding` field) decodes as plain sRGB — the clip is
  * baked in already, nothing to undo.
  */
+/**
+ * 16-bit lightmap (manifest.lightmap.encoding = "half"): raw bytes, no image
+ * decode. WHY this path exists — half-float keeps RELATIVE precision, so the dark
+ * walls this bake lives on (0.005–0.05 linear) keep their steps, while an 8-bit
+ * file has about one display step there: that single step is where the measured
+ * banding came from. Nothing clips, no range is needed, and no dither is needed AT
+ * STORAGE — the only 8-bit step left is the screen, where src/render/bluenoise.ts
+ * already dithers.
+ *
+ * Layout: RGBA16F, row 0 = TOP = glTF v0 — the same convention as the PNG path and
+ * the game's flipY=false sampling, so nothing downstream changes.
+ */
+async function loadHalfLightmap(
+  info: NonNullable<Manifest['lightmap']>,
+  res: Response,
+): Promise<WorldLightmap> {
+  const size = info.resolution;
+  // A raw binary file has no header, so the manifest is the only source of its size.
+  if (!size) throw new Error('half-float lightmap without manifest resolution');
+  const bytes = new Uint8Array(await res.arrayBuffer());
+  const texels = size * size;
+  if (bytes.length !== texels * 8) {
+    throw new Error(
+      `map/${info.file} is ${bytes.length} bytes — expected ${texels * 8} for a ${size}x${size} RGBA16F`,
+    );
+  }
+  const src = new Uint16Array(bytes.buffer, bytes.byteOffset, texels * 4);
+  const fromHalf = THREE.DataUtils.fromHalfFloat;
+  const toHalf = THREE.DataUtils.toHalfFloat;
+  // SCALE, identical to the PNG path: the bake is physical Cycles radiance, the
+  // realtime layer runs the light-power heuristic without the 1/π Lambert, so the
+  // bake is multiplied by π to put static and dynamic light on ONE scale.
+  const SCALE = Math.PI;
+  const out = new Uint16Array(texels * 4);
+  for (let i = 0; i < src.length; i += 4) {
+    out[i] = toHalf(fromHalf(src[i]) * SCALE);
+    out[i + 1] = toHalf(fromHalf(src[i + 1]) * SCALE);
+    out[i + 2] = toHalf(fromHalf(src[i + 2]) * SCALE);
+    out[i + 3] = toHalf(1);
+  }
+  const texture = new THREE.DataTexture(out, size, size, THREE.RGBAFormat, THREE.HalfFloatType);
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  texture.colorSpace = THREE.NoColorSpace; // already linear
+  texture.needsUpdate = true;
+  console.info(
+    `[world] lightmap ${info.file} — ${size}x${size} RGBA16F (16-bit, nothing clips) → linear half-float`,
+  );
+  return { texture, range: info.range ?? 0, resolution: size };
+}
+
 async function loadLightmap(info: NonNullable<Manifest['lightmap']>): Promise<WorldLightmap> {
   const res = await fetch(`map/${info.file}`);
   if (!res.ok) throw new Error(`HTTP ${res.status} for map/${info.file}`);
+  if (info.encoding === 'half') return loadHalfLightmap(info, res);
   const url = URL.createObjectURL(await res.blob());
   try {
     const image = await new Promise<HTMLImageElement>((resolve, reject) => {
