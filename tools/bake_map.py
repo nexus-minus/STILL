@@ -199,7 +199,7 @@ def audit_uv_overlap(meshes, grid=512):
 
     Overlapping UV2 islands mean one mesh's bake silently overwrites another's
     — corruption the PNG alone can hide, so check it every run.
-    Returns the number of texels claimed by more than one mesh.
+    Returns (number of texels claimed by more than one mesh, owner grid).
     """
     owner = np.full((grid, grid), -1, dtype=np.int16)
     for idx, obj in enumerate(meshes):
@@ -233,7 +233,10 @@ def audit_uv_overlap(meshes, grid=512):
                 mask[y0:y1 + 1, x0:x1 + 1] |= (a >= -1e-6) & (b >= -1e-6) & (a + b <= 1 + 1e-6)
         owner[mask & (owner == -1)] = idx
         owner[mask & (owner != -1) & (owner != idx)] = 1000
-    return int((owner >= 1000).sum())
+    # owner is returned as well: the fixture report below needs to know WHICH
+    # mesh a texel belongs to, and this is the only place that already rasterizes
+    # the islands (re-deriving it would mean a second UV pass).
+    return int((owner >= 1000).sum()), owner
 
 
 def wire_bake_targets(img, meshes):
@@ -484,6 +487,65 @@ def plateau_stats(display):
         "plateau_pct": 100.0 * in_plateau / max(1, int(measured.sum())),
         "jumps": int(jumps),
     }
+
+
+def fixture_report(owner, meshes, linear_rgb, resolution, em_names, grid=512, top=10):
+    """Per-island brightness as the player sees it — printed every run.
+
+    The atlas alone cannot answer "is this fixture too bright?": a PNG shows the
+    whole scene averaged, and "a bright wall" is not the same question as "a bright
+    fixture". Island ownership from the audit grid makes it answerable per object —
+    the value stored for a texel IS what that surface receives.
+
+    Fixtures and receiving surfaces are separated on purpose. A fixture island is
+    EXPECTED to be bright (a Combined bake stores its own emission), so warning on
+    it would be noise. What is actionable is a SURFACE island reading near white:
+    that is the look the owner would want to change, by lowering that fixture's
+    emission in the .blend.
+
+    Honest limits:
+      - a bright surface island means "this surface reads near white on screen", not
+        necessarily "its own fixture is too strong" — light from other fixtures lands
+        on it too, and a Combined bake stores outgoing radiance, albedo included.
+      - only island INTERIOR cells are sampled (the margin repeats the edge colour and
+        would fake a highlight).
+      - the grid is a 512² sampling, so a small island owns few cells; those rows print
+        their cell count and are not warned on.
+
+    The threshold (mean display luma 0.70, max 0.985) is a stated measurement
+    threshold, not a taste judgement — which value is "right" stays the author's call.
+    """
+    disp = agx_display(linear_rgb).reshape(resolution, resolution, 3)
+    luma = disp[..., 0] * 0.2126 + disp[..., 1] * 0.7152 + disp[..., 2] * 0.0722
+    rows = []
+    for idx, obj in enumerate(meshes):
+        cells = np.where(owner == idx)
+        n = int(cells[0].size)
+        if n == 0:
+            continue
+        # grid cell → atlas pixel. The audit raster used ys = grid-1-v*(grid-1), i.e.
+        # row 0 is the TOP of the image, so row = grid-1-gy and col = gx, scaled up.
+        row = np.round((grid - 1 - cells[0]) * (resolution - 1) / (grid - 1)).astype(int)
+        col = np.round(cells[1] * (resolution - 1) / (grid - 1)).astype(int)
+        vals = luma[row, col]
+        rows.append((obj.name, obj.name in em_names, n, float(vals.mean()), float(vals.max())))
+    if not rows:
+        return
+    rows.sort(key=lambda r: -r[3])
+    print(f"bake_map: brightness report — brightest {min(top, len(rows))} of {len(rows)} islands "
+          f"(AgX display luma, 0..1):")
+    warned = 0
+    for name, is_fixture, n, mean_l, max_l in rows[:top]:
+        kind = "fixture" if is_fixture else "surface"
+        flag = ""
+        if not is_fixture and n >= 40 and (max_l >= 0.985 or mean_l >= 0.70):
+            flag = "  <- reads near white"
+            warned += 1
+        print(f"  {name[:32]:<32} {kind:<7} {n:>5} px  mean {mean_l:.3f}  max {max_l:.3f}{flag}")
+    if warned:
+        print(f"bake_map: {warned} receiving surface(s) read near white. That is a measurement, not "
+              "a verdict — if that is not the look you want, lower the emission in the .blend and "
+              "re-bake.")
 
 
 def save_lightmap_png(img, path, dither=True, dither_ab=False):
@@ -774,7 +836,7 @@ def run():
         )
     print(f"bake_map: UV1 verified untouched on {len(meshes)} mesh(es)")
 
-    overlap = audit_uv_overlap(meshes)
+    overlap, owner_grid = audit_uv_overlap(meshes)
     if overlap:
         raise SystemExit(
             f"bake_map: EXPORT WARNING {overlap} overlapping texels after packing — "
@@ -792,6 +854,15 @@ def run():
     print(f"bake_map: baked in {duration:.1f}s — linear buffer mean {mean:.4f}, "
           f"max {max_v:.4f}, non-black {nonzero * 100:.1f}%")
     clipping_report(linear_rgb)
+    # Emissive names come from the manifest export_map.py wrote earlier in THIS run —
+    # the same source of truth as the .glb, so the fixture/surface split does not
+    # re-implement the emission lookup.
+    try:
+        with open(os.path.join(out_dir, "manifest.json"), encoding="utf-8") as fh:
+            em_names = {e["name"] for e in json.load(fh).get("emissive", {}).get("exported", [])}
+    except (OSError, ValueError):
+        em_names = set()
+    fixture_report(owner_grid, meshes, linear_rgb, resolution, em_names)
     if max_v <= 0.0:
         raise SystemExit("bake_map: bake produced a black image — no light reached the baker")
 

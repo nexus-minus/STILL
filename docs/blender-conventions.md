@@ -179,6 +179,21 @@ What one run does:
     report for the atlas: distinct luma levels, longest flat run, share of the lit area
     inside runs ≥ 8 px, and the 8×8 block-average error against the linear values (black
     is skipped — it has no gradient to band).
+
+    Every run also prints a **brightness report per UV island**, so you can see which
+    light is too strong without opening Blender:
+
+    - **Fixture islands** (island mean ≥ 0.45 display luma) are listed as numbers only.
+      Bright there is expected — that's the emitting surface itself, and Combined bake
+      deliberately keeps it white.
+    - **Receiving surfaces** warn when they read blown out: mean ≥ 0.70, or max ≥ 0.985,
+      over at least 40 grid cells. Those are the surfaces a light is landing on, and a
+      warning means "check this fixture's strength in Blender".
+
+    It measures, it does not judge taste — it only names the island that sits in the
+    clipped range. Like the audit, a warning never blocks the bake (the PNG is written by
+    then). Islands are matched to their object through the bake's owner grid, so a bright
+    lamp and a blown-out wall never get mixed up.
 4. **`objects.glb` re-exported** so glTF carries the second UV set as
    **`TEXCOORD_1`**, and **`manifest.json`** gains the additive block:
 
