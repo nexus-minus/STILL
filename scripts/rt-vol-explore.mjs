@@ -44,7 +44,10 @@ await page.setViewport({ width: 1280, height: 720 });
 await page.evaluateOnNewDocument(() => {
   try { sessionStorage.clear(); } catch { /* private mode */ }
 });
-await page.goto(`${BASE}/`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+// settle=0: this explorer's numbers were picked under long per-frame convergence, and
+// the idle freeze stops the fog march after the settle window, so a run without the
+// flag would not be comparable to the framings already chosen here.
+await page.goto(`${BASE}/?settle=0`, { waitUntil: 'domcontentloaded', timeout: 30000 });
 for (let i = 0; i < 150; i++) {
   if (await page.evaluate(() => window.__liminalReady === true).catch(() => false)) break;
   await sleep(200);

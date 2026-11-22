@@ -83,8 +83,15 @@ async function boot(url, name) {
   await page.evaluateOnNewDocument(() => {
     try { sessionStorage.clear(); } catch { /* private mode */ }
   });
-  console.log(`\n== ${name}: ${url}`);
-  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  // Pin the freeze off for the fog measurements. The fog march runs inside the
+  // lighting dispatch, so with the idle freeze a static scene stops marching after the
+  // settle window: the banding and luminance asserts here would then describe a
+  // settle-window average instead of the accumulated values they were calibrated on.
+  // (The dither needs no flag in this script: its checks are range/mean based, and a
+  // ±0.5 LSB display-step offset averages out over a region.)
+  const target = `${url}${url.includes('?') ? '&' : '?'}settle=0`;
+  console.log(`\n== ${name}: ${target}`);
+  await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 30000 });
   let booted = false;
   for (let i = 0; i < 150 && !booted; i++) {
     booted = await page.evaluate(() => window.__liminalReady === true).catch(() => false);

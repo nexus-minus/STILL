@@ -316,7 +316,9 @@ German test checklist in `docs/test-checklist-de.md`):
    Debug and material views stay exact so the smoke readbacks remain valid.
 2. **Dirty-flag scheduler + settle window** (`?settle=N`, `?idle=0`): a frame is traced
    only when something that affects the picture changed; after the settle window the
-   dispatch is skipped and the composite re-shows the accumulated buffers. `rtFlag` is
+   dispatch is skipped and the composite re-shows the accumulated buffers. Honest limit: at
+   `blendAlpha = 0.08` the history needs ~12 effective samples, so the frozen frame is the
+   settle-window average, not full convergence — `?settle=N` is the quality knob. `rtFlag` is
    not forced to 0 on a frozen frame (0 = raster beauty pass, which would replace the
    accumulated frame with an unlit one). The HUD shows `· frozen` in the stats line —
    otherwise a frozen frame and a slow frame are indistinguishable on screen.
@@ -334,9 +336,16 @@ saw, and the stripes were dark green and aligned with emissive objects → most 
 baked coverage (UV island / margin), not geometry seams. The HUD `· frozen` marker and
 the reprojection ghosting need a real look.
 
-**Smoke scripts:** they measure ranges/plateaus, so a ±0.5 LSB dither cannot move a
-result; any script that compares exact pixel values must run with `?dither=0` (the debug
-and material views are already exempt by design).
+**Smoke scripts (checked individually, not assumed):** the dither cannot move their results —
+they compare means, ranges, ranks or plateaus with tolerances of ≥ 2 LSB, a dither offset is at
+most 0.5 LSB, and the debug/material views they read are exempt from the dither by design.
+`recovery-test` thresholds at 8/255, which a ±0.5 LSB offset cannot cross. No script needs
+`?dither=0`. The **freeze** does change what they measure (a static scene stops dispatching
+after the settle window, so numbers would describe a settle-window average instead of the
+long-converged image the asserts were calibrated on, and `?vol=off` asserts like
+"dispatches === 0" could pass for the wrong reason). So the pixel-readback scripts pin
+`settle=0` in their boot URL: `rt-bake-smoke`, `rt-denoise-smoke`, `rt-mat-smoke`,
+`rt-mat-probe`, `rt-vol-smoke`, `rt-vol-explore`. `recovery-test` needs no flag.
 
 **Possible next step:** the bake report could warn per fixture when a light clips or is
 brighter than the display range allows — the user suspects some lights are too bright, and

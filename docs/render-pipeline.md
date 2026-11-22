@@ -261,6 +261,22 @@ canvas readbacks against buffer values. The mask is indexed by the DISPLAY pixel
 (`screenCoordinate`), not by the lighting texel: a quarter-res buffer would give
 every pixel inside one texel the same threshold and the banding would survive.
 
+Effect on the measurement scripts (checked individually, not assumed):
+
+- **Dither:** the readback scripts compare means, ranges, ranks or plateaus with
+  tolerances of ≥ 2 LSB, and a dither offset is at most 0.5 LSB, so it cannot move a
+  result. The black-frame detector thresholds at 8/255, which a ±0.5 LSB offset cannot
+  cross. Debug/material views are gated off anyway, so `scripts/rt-mat-*` and
+  `scripts/rt-bake-smoke` read exact values. No script needs `?dither=0`.
+- **Idle freeze:** this one DOES change what the scripts measure, because a static
+  scene stops dispatching after the settle window — the numbers would describe a
+  settle-window average instead of the long-converged image the asserts were calibrated
+  on, and `?vol=off` asserts like "dispatches === 0" could pass for the wrong reason.
+  So every pixel-readback script pins `settle=0` in its boot URL
+  (`rt-bake-smoke`, `rt-denoise-smoke`, `rt-mat-smoke`, `rt-mat-probe`, `rt-vol-smoke`,
+  `rt-vol-explore`). `recovery-test` needs no flag: it tests the detector, which still
+  reads the canvas on a frozen frame.
+
 ### 2. Dirty-flag scheduler + settle window
 
 A frame is only traced when something that affects the picture changed: camera
@@ -268,7 +284,14 @@ pose, settings key, debug/material view, light gain, light list, buffer size, or
 an explicit `markDirty()` call. After a change, `SETTLE_FRAMES` frames run so the
 accumulation converges; from then on the dispatch is skipped and the composite
 re-shows the existing buffers. That is free money on a laptop — and the picture is
-not worse, because the frozen frame *is* the accumulated one.
+not a single-sample frame: the frozen frame is the settle-window average.
+
+Worth stating precisely, because it is the honest limit: `blendAlpha = 0.08` needs
+roughly 1/0.08 ≈ 12 effective samples for the history to dominate, so after 6 frames
+the image is *partially* converged. `?settle=N` is therefore the quality knob — raise
+it for cleaner dark gradients and give up some of the frame budget, lower it to get the
+freeze back. The agreed default of 6 is the window the owner said is acceptable, and
+long corridors with soft light matter more than glossy floors.
 
 Two details that make this safe:
 
