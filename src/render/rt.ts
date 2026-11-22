@@ -1422,16 +1422,19 @@ export function createAdvancedRenderer(
   // ---- dirty-flag scheduler (why a settled frame needs no rays) --------------
   // Everything the lighting kernel reads is either static (BVH, lightmap, light
   // list) or per-frame (camera pose, jitter seed). When nothing changed AND the
-  // settle window is done, the buffers already hold the converged picture: the
-  // same rays would return the same answer, so the dispatch is skipped and the
+  // settle window is done, the buffers already hold the picture the eye was shown:
+  // the same rays would return the same answer, so the dispatch is skipped and the
   // composite re-shows the frozen buffers. That is where the frame budget comes
-  // back for a laptop — and the picture is not worse, because the frozen frame
-  // IS the accumulated one, not a single-sample frame.
+  // back for a laptop — and the picture is not a single-sample frame, it is the
+  // settle-window average. Honest limit: blendAlpha 0.08 needs ~1/0.08 = 12
+  // effective samples before the history dominates, so 6 frames is PARTIAL
+  // convergence. SETTLE_FRAMES is therefore the quality knob (raise it for cleaner
+  // dark gradients, give up the freeze), not a free win.
   // The composite still runs every frame: the canvas is not guaranteed to keep
   // its content, and the screenshot + black-frame paths read it back.
   /** ?settle=N — frames allowed after a change before the frame freezes.
-   *  Default 6 (the window the eye still sees settle); 0 = never freeze, which
-   *  is the always-dispatch A/B baseline. */
+   *  Default 6 (the window the owner said is acceptable); 0 = never freeze, which
+   *  is the always-dispatch A/B baseline and what the readback scripts pin. */
   const settleRaw = Number(new URLSearchParams(location.search).get('settle'));
   const SETTLE_FRAMES = Number.isFinite(settleRaw) && settleRaw >= 0 ? settleRaw : 6;
   /** ?idle=0 — never freeze (dispatch every frame), for the A/B comparison */
