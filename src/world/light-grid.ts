@@ -108,6 +108,11 @@ export interface LightGrid {
   cells: LightCell[];
   /** 27 coefficients per cell (9 terms x 3 channels), in cell order */
   sh: Float64Array;
+  /** cell index → 27 bits (self + 26 neighbours): which corners a point in this cell can
+   *  see. Built once at load with one ray per pair, so a pixel only looks the bit up.
+   *  A corner that is not set never contributes — that is the rule that light cannot come
+   *  through a wall. */
+  neighbourMask: Uint32Array;
   /** traversal hash: cell key → triangles whose bounding box overlaps that cell */
   buckets: Map<string, number[]>;
   /** cell key → cell index, in the order the cells were created */
@@ -142,6 +147,50 @@ function keyOf(ix: number, iy: number, iz: number): string {
   return `${ix},${iy},${iz}`;
 }
 
+/** Which corner of the 3x3x3 neighbourhood a offset is, as a bit index (self = bit 13). */
+export function neighbourBit(dx: number, dy: number, dz: number): number {
+  return (dx + 1) * 9 + (dy + 1) * 3 + (dz + 1);
+}
+
+/** Mild blend strength the shader uses (owner decision 2026-11-23): a quarter neighbourhood. */
+export const DEFAULT_BLEND = 0.25;
+
+/**
+ * One ray per cell pair: which of the 27 corners (self + 26 neighbours) a point in this
+ * cell can see. Built ONCE at load so a pixel only reads a bit instead of casting a ray.
+ * A corner that is not in the table (solid material, or air that sees nothing) and a corner
+ * that geometry blocks are both left out — that is the rule that light cannot come through
+ * a wall. A surface cell never blocks itself, because the point stands on that surface.
+ */
+export function buildNeighbourVisibility(grid: LightGrid): { mask: Uint32Array; blocked: number; absent: number } {
+  const mask = new Uint32Array(grid.cells.length);
+  let blocked = 0, absent = 0;
+  for (let ci = 0; ci < grid.cells.length; ci++) {
+    const c = grid.cells[ci];
+    const [ix, iy, iz] = c.key.split(',').map(Number);
+    let m = 1 << neighbourBit(0, 0, 0);
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dz = -1; dz <= 1; dz++) {
+          if (dx === 0 && dy === 0 && dz === 0) continue;
+          const ni = grid.cellOfKey.get(keyOf(ix + dx, iy + dy, iz + dz));
+          if (ni === undefined) { absent++; continue; }
+          const nb = grid.cells[ni];
+          const vx = nb.px - c.px, vy = nb.py - c.py, vz = nb.pz - c.pz;
+          const len = Math.hypot(vx, vy, vz);
+          if (len <= 1e-6) continue;
+          const hit = trace(grid, c.px, c.py, c.pz, vx / len, vy / len, vz / len, len);
+          if (hit >= 0 && !c.own.includes(hit)) { blocked++; continue; }
+          m |= 1 << neighbourBit(dx, dy, dz);
+        }
+      }
+    }
+    mask[ci] = m;
+  }
+  grid.neighbourMask = mask;
+  return { mask, blocked, absent };
+}
+
 /** Hash a voxel key identically on the CPU packer and WGSL lookup. */
 export function hashCellKey(ix: number, iy: number, iz: number, mask: number): number {
   let h = (Math.imul(ix | 0, 73856093) ^ Math.imul(iy | 0, 19349663) ^ Math.imul(iz | 0, 83492791)) >>> 0;
@@ -151,24 +200,137 @@ export function hashCellKey(ix: number, iy: number, iz: number, mask: number): n
 }
 
 /** Open-addressed GPU table: one key/header vec4 plus nine RGB SH vec4s per slot. */
-export function packLightGrid(grid: LightGrid): { data: Float32Array; slotCount: number; cellCount: number } {
+export interface PackedLightGrid {
+  data: Float32Array;
+  /** per slot: the 27 visibility bits of the cell in that slot. The shader reads this
+   *  once for its own cell and then only checks bits — no ray per pixel. */
+  neighbourMask: Uint32Array;
+  slotCount: number;
+  cellCount: number;
+}
+
+export function packLightGrid(grid: LightGrid): PackedLightGrid {
   let slotCount = 16;
   while (slotCount < grid.cells.length * 2) slotCount <<= 1;
   const stride = SH_GRID_STRIDE_VEC4 * 4;
   const data = new Float32Array(slotCount * stride);
+  const neighbourMask = new Uint32Array(slotCount);
   for (let ci = 0; ci < grid.cells.length; ci++) {
     const [ix, iy, iz] = grid.cells[ci].key.split(',').map(Number);
     let slot = hashCellKey(ix, iy, iz, slotCount - 1);
     while (data[slot * stride + 3] !== 0) slot = (slot + 1) & (slotCount - 1);
     const base = slot * stride;
     data[base] = ix; data[base + 1] = iy; data[base + 2] = iz; data[base + 3] = 1;
+    neighbourMask[slot] = grid.neighbourMask[ci];
     for (let k = 0; k < SH_TERMS; k++) {
-      const co = ci * 27 + k * 3;
+      // grid.sh is stored CHANNEL-MAJOR (channel * 9 + term), the GPU slot stores one
+      // vec4 per term (rgb + pad). Reading it as term-major here would shuffle the
+      // coefficients across the channels — that is what the mirror check caught.
       const to = base + 4 + k * 4;
-      data[to] = grid.sh[co]; data[to + 1] = grid.sh[co + 1]; data[to + 2] = grid.sh[co + 2];
+      for (let c = 0; c < 3; c++) data[to + c] = grid.sh[ci * 27 + c * SH_TERMS + k];
     }
   }
-  return { data, slotCount, cellCount: grid.cells.length };
+  return { data, neighbourMask, slotCount, cellCount: grid.cells.length };
+}
+
+/**
+ * Voxel lookup exactly as the shader does it: hash the key, then walk the
+ * open-addressed chain. Returns the slot, -1 when the voxel is not in the table
+ * (an empty slot ends the chain — a missing voxel is NOT a wrong cell), and -2
+ * when the probe limit is reached, which is the shader's stop condition instead
+ * of an endless loop.
+ */
+export function packedSlot(packed: PackedLightGrid, ix: number, iy: number, iz: number, probeLimit = 64): number {
+  const stride = SH_GRID_STRIDE_VEC4 * 4;
+  const mask = packed.slotCount - 1;
+  let slot = hashCellKey(ix, iy, iz, mask);
+  for (let step = 0; step < probeLimit; step++) {
+    const base = slot * stride;
+    if (packed.data[base + 3] === 0) return -1;
+    if (packed.data[base] === ix && packed.data[base + 1] === iy && packed.data[base + 2] === iz) return slot;
+    slot = (slot + 1) & mask;
+  }
+  return -2;
+}
+
+/** Irradiance for a normal out of ONE slot, as the shader computes it. */
+export function packedIrradiance(packed: PackedLightGrid, slot: number, n: number[], out: Float64Array): void {
+  const basis = new Float64Array(SH_TERMS);
+  shBasis(n[0], n[1], n[2], basis);
+  const base = slot * SH_GRID_STRIDE_VEC4 * 4 + 4;
+  for (let c = 0; c < 3; c++) {
+    let e = 0;
+    for (let k = 0; k < SH_TERMS; k++) e += LOBE[BAND[k]] * packed.data[base + k * 4 + c] * basis[k];
+    out[c] = e;
+  }
+}
+
+/** The 8 corner voxels around a point, with their trilinear weights. */
+export interface BlendSample {
+  /** slot of the voxel the point is in, -1 when it is not in the table */
+  ownSlot: number;
+  slots: number[];
+  weights: number[];
+  /** corners that are not in the table (solid or unlit air) */
+  missing: number;
+  /** corners in the table that this point cannot see (geometry in between) */
+  gated: number;
+}
+
+/**
+ * Trilinear blend over the 8 voxel corners, gated by the load-time neighbour visibility:
+ * only corners the point can see contribute, so light cannot come through a wall.
+ * Weights are renormalised over the corners that count, so a corner inside a wall does not
+ * pull the value towards zero.
+ */
+export function packedBlend(packed: PackedLightGrid, x: number, y: number, z: number, cellSize: number, out: BlendSample, probeLimit = 64): BlendSample {
+  const cs = cellSize;
+  const ix = Math.floor(x / cs), iy = Math.floor(y / cs), iz = Math.floor(z / cs);
+  const fx = x / cs - ix, fy = y / cs - iy, fz = z / cs - iz;
+  out.ownSlot = packedSlot(packed, ix, iy, iz, probeLimit);
+  out.slots = [];
+  out.weights = [];
+  out.missing = 0;
+  out.gated = 0;
+  const mask = out.ownSlot >= 0 ? packed.neighbourMask[out.ownSlot] : 0xffffffff;
+  for (let a = 0; a < 2; a++) {
+    for (let b = 0; b < 2; b++) {
+      for (let c = 0; c < 2; c++) {
+        const slot = packedSlot(packed, ix + a, iy + b, iz + c, probeLimit);
+        if (slot < 0) { out.missing++; continue; }
+        if ((mask & (1 << neighbourBit(a, b, c))) === 0) { out.gated++; continue; }
+        const wx = a === 0 ? 1 - fx : fx;
+        const wy = b === 0 ? 1 - fy : fy;
+        const wz = c === 0 ? 1 - fz : fz;
+        out.slots.push(slot);
+        out.weights.push(wx * wy * wz);
+      }
+    }
+  }
+  let sum = 0;
+  for (const w of out.weights) sum += w;
+  if (sum > 0) for (let i = 0; i < out.weights.length; i++) out.weights[i] /= sum;
+  return out;
+}
+
+/**
+ * Irradiance for a normal from the blended corners. `factor` is how much of the value
+ * comes from the neighbourhood: 1 = pure trilinear blend (the soft picture), 0 = the
+ * own cell alone (the accurate picture). The shader uses the same factor, so a change
+ * here is a picture decision, not a maths change.
+ */
+export function packedBlendIrradiance(packed: PackedLightGrid, sample: BlendSample, n: number[], out: Float64Array, factor = DEFAULT_BLEND): void {
+  const basis = new Float64Array(SH_TERMS);
+  shBasis(n[0], n[1], n[2], basis);
+  const single = new Float64Array(3);
+  out[0] = 0; out[1] = 0; out[2] = 0;
+  for (let i = 0; i < sample.slots.length; i++) {
+    packedIrradiance(packed, sample.slots[i], n, single);
+    for (let c = 0; c < 3; c++) out[c] += single[c] * sample.weights[i];
+  }
+  if (factor === 1 || sample.ownSlot < 0) return;
+  packedIrradiance(packed, sample.ownSlot, n, single);
+  for (let c = 0; c < 3; c++) out[c] = single[c] * (1 - factor) + out[c] * factor;
 }
 
 /** deterministic PRNG so a reference run and the build see the same rays */
@@ -330,6 +492,7 @@ export function buildLightGrid(tris: GridTriangle[], values: Float64Array, resol
   const grid: LightGrid = {
     cellSize: 0, resolution, cells: [], sh: new Float64Array(0),
     buckets: new Map(), cellOfKey: new Map(), visible: [], metrics: [], triangleVertices: [],
+    neighbourMask: new Uint32Array(0),
   };
 
   let texelArea = 0, metreArea = 0;
@@ -530,6 +693,51 @@ export function sampleIrradiance(grid: LightGrid, x: number, y: number, z: numbe
   const coefs = grid.sh.subarray(cellIndex * 27, cellIndex * 27 + 27);
   shIrradiance(coefs, nx, ny, nz, out);
   return cellIndex;
+}
+
+/**
+ * The same reading as the shipped shader path: own cell plus the mild blend over the
+ * visible corners. `factor` is the share of the neighbourhood (owner chose 0.25).
+ * This is the value a pixel or a moving object actually gets, so the check compares it
+ * against the truth at that point, and the difference has two named parts: the ray noise
+ * of the cell content and the smoothing itself.
+ */
+export function sampleBlendIrradiance(grid: LightGrid, x: number, y: number, z: number, nx: number, ny: number, nz: number, out: Float64Array, factor = DEFAULT_BLEND): number {
+  const cs = grid.cellSize;
+  const ix = Math.floor(x / cs), iy = Math.floor(y / cs), iz = Math.floor(z / cs);
+  const own = grid.cellOfKey.get(keyOf(ix, iy, iz));
+  if (own === undefined) { out[0] = 0; out[1] = 0; out[2] = 0; return -1; }
+  const fx = x / cs - ix, fy = y / cs - iy, fz = z / cs - iz;
+  const mask = grid.neighbourMask[own];
+  const basis = new Float64Array(SH_TERMS);
+  shBasis(nx, ny, nz, basis);
+  const single = new Float64Array(3);
+  let sum = 0;
+  out[0] = 0; out[1] = 0; out[2] = 0;
+  const corners: number[] = [];
+  const weights: number[] = [];
+  for (let a = 0; a < 2; a++) {
+    for (let b = 0; b < 2; b++) {
+      for (let c = 0; c < 2; c++) {
+        const ci = grid.cellOfKey.get(keyOf(ix + a, iy + b, iz + c));
+        if (ci === undefined) continue;
+        if ((mask & (1 << neighbourBit(a, b, c))) === 0) continue;
+        corners.push(ci);
+        weights.push((a === 0 ? 1 - fx : fx) * (b === 0 ? 1 - fy : fy) * (c === 0 ? 1 - fz : fz));
+        sum += weights[weights.length - 1];
+      }
+    }
+  }
+  for (let i = 0; i < corners.length; i++) {
+    shIrradiance(grid.sh.subarray(corners[i] * 27, corners[i] * 27 + 27), nx, ny, nz, single);
+    const w = weights[i] / sum;
+    for (let ch = 0; ch < 3; ch++) out[ch] += single[ch] * w;
+  }
+  if (factor !== 1) {
+    shIrradiance(grid.sh.subarray(own * 27, own * 27 + 27), nx, ny, nz, single);
+    for (let ch = 0; ch < 3; ch++) out[ch] = single[ch] * (1 - factor) + out[ch] * factor;
+  }
+  return own;
 }
 
 /**
