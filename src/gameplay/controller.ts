@@ -145,6 +145,10 @@ export class PlayerController {
   private camYOffset = 0;
   /** view-only horizontal offset created by an accepted step-up */
   private readonly camXZOffset = new THREE.Vector3();
+  /** this frame's accepted horizontal advance, parked into the view AFTER the
+   *  retention (the same order the height ease uses, so the step frame itself
+   *  holds the view instead of letting 28 % of the jump through on that frame) */
+  private readonly stepXzAdvance = new THREE.Vector3();
   /** remaining seconds of wall-contact sleep + the normal we're pressed into */
   private wallSleep = 0;
   /** remaining seconds of the wall-LIKE classification hold (chatter guard) */
@@ -243,6 +247,7 @@ export class PlayerController {
       this.coyote = 0; // physics resumes fresh — no grace inherited from freecam
       this.camYOffset = 0; // re-entering from freecam snaps, it doesn't ease
       this.camXZOffset.set(0, 0, 0);
+      this.stepXzAdvance.set(0, 0, 0);
       this.wallSleep = 0;
       this.wallLikeHold = 0;
       this.collision.resolveCapsule(this.position, this.opts.height, this.opts.radius);
@@ -283,6 +288,7 @@ export class PlayerController {
     this.velocity.set(0, 0, 0);
     this.camYOffset = 0; // teleports snap, they don't ease
     this.camXZOffset.set(0, 0, 0);
+    this.stepXzAdvance.set(0, 0, 0);
     this.wallSleep = 0; // contact normal belongs to the old spot
     this.wallLikeHold = 0; // so does the wall-like classification
     this.coyote = 0; // jump grace belongs to the OLD ground, not here
@@ -826,11 +832,12 @@ export class PlayerController {
         );
       }
       if (inRange) {
-        // Keep collision authoritative, but ease the sudden minimum advance
-        // out of the camera pose. The old height-only ease still let a
-        // 0.43–0.54 m horizontal move happen in one frame at a ledge.
-        this.camXZOffset.x -= trial.x - this.position.x;
-        this.camXZOffset.z -= trial.z - this.position.z;
+        // Keep collision authoritative, but ease the sudden minimum advance out of
+        // the camera pose. Recorded here and applied after the retention below, so
+        // the step frame itself holds the view — the same order the height ease uses.
+        // Applying it before the retention measured 0.153 m of the 0.54 m jump through
+        // on the first frame (28 %); this ordering measures 0 m on that frame.
+        this.stepXzAdvance.set(trial.x - this.position.x, 0, trial.z - this.position.z);
         this.position.copy(trial);
         this.grounded = true;
         velocity.y = 0;
@@ -894,6 +901,12 @@ export class PlayerController {
     const viewRetention = stepViewRetention(dt, STEP_VIEW_TAU);
     this.camYOffset *= viewRetention;
     this.camXZOffset.multiplyScalar(viewRetention);
+    if (this.stepXzAdvance.lengthSq() > 0) {
+      // park the view at the pre-step spot for this frame, then let it catch up —
+      // the horizontal equivalent of the height ease above
+      this.camXZOffset.addScaledVector(this.stepXzAdvance, -1);
+      this.stepXzAdvance.set(0, 0, 0);
+    }
     if (this.grounded && velocity.y <= 0 && rise > Math.max(STEP_VIEW_MIN, opts.runSpeed * dt * 0.9)) {
       this.camYOffset -= rise; // hold the view here, then ease up to the feet
     }
