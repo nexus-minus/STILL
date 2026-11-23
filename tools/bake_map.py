@@ -882,6 +882,61 @@ def patch_manifest(out_dir, resolution, lm_range, bits=16):
           f"TEXCOORD_1, {manifest['lightmap']['encoding']}, preview lightmap.png)")
 
 
+def write_grid_source(meshes, resolution, out_dir):
+    """Write the INPUTS for the light-cell grid (tools/write_lightgrid.mjs reads this file).
+
+    Only inputs live here, never maths: cell size, rays and the SH projection live in
+    src/world/light-grid.ts — the same module scripts/light-grid-check.mjs measures — so the
+    file the game loads cannot drift away from the numbers that were proven. Keeping the
+    maths on one side is also why `scale` is not written here: the tool takes it from the
+    module, so pi exists in exactly one place. Seed and ray count are not written either:
+    the tool records what it actually used in the file header and in the manifest, so a
+    rebuild can be compared against them without a second copy of the numbers here.
+
+    UV convention (the part that is easy to get backwards): the game samples the lightmap
+    with row 0 = TOP (glTF v0, flipY=false), which is what save_lightmap_bin writes.
+    Blender's own UV v runs from the BOTTOM, so every v is written as 1 - v. A writer that
+    skipped this flip would read every cell mirrored top-to-bottom.
+
+    Winding is taken exactly as the model has it, split along Blender's own fan diagonal
+    (loops 0-1-2 and 0-2-3) — the same split the glTF export writes, so the grid describes
+    the geometry the game actually sees. The air-side winding contract still applies to the
+    model: a face turned into the wall makes its cells read the back of the surface.
+    """
+    tris = []
+    for obj in meshes:
+        layer = obj.data.uv_layers.get(LIGHTMAP_UV)
+        if layer is None:
+            continue
+        mw = obj.matrix_world
+        for poly in obj.data.polygons:
+            loops = list(poly.loop_indices)
+            if len(loops) < 3:
+                continue
+            # Blender stores ngons as a loop list; the glTF exporter fans them from loop 0
+            # (0-1-2, 0-2-3, ...), so the fan split here describes the same triangles the game
+            # sees. A quad is the common case — skipping it would leave whole walls out of the
+            # grid, which is what the first end-to-end run caught.
+            for k in range(1, len(loops) - 1):
+                verts, uvs = [], []
+                for li in (loops[0], loops[k], loops[k + 1]):
+                    co = mw @ obj.data.vertices[obj.data.loops[li].vertex_index].co
+                    verts.extend([float(co.x), float(co.y), float(co.z)])
+                    u, v = layer.data[li].uv
+                    uvs.extend([float(u), 1.0 - float(v)])  # row 0 = top, see the docstring
+                tris.append({"verts": verts, "uv": uvs, "island": obj.name})
+    if not tris:
+        raise SystemExit("bake_map: no triangles carry a lightmap UV — nothing to build a grid from")
+
+    scene = {"resolution": resolution, "tris": tris}
+    path = os.path.join(out_dir, "gridsource.json")
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(scene, fh)
+    print(f"bake_map: wrote {path} ({len(tris)} triangles, {resolution}px, "
+          f"uv = glTF convention (row 0 = top))")
+    return path
+
+
 def run():
     args = parse_args()
     out_dir = args.get("out", os.path.join(os.getcwd(), "assets", "map"))
@@ -965,6 +1020,11 @@ def run():
         bin_path = os.path.join(out_dir, "lightmap.bin")
         bin_size, _ = save_lightmap_bin(linear_rgb, resolution, bin_path)
         print(f"bake_map: wrote {bin_path} ({bin_size // 1024} KB, raw RGBA16F, row 0 = top) — the game file")
+        # the light-cell grid is built from THESE bytes, so its inputs are written next to
+        # them. The rays themselves are cast by tools/write_lightgrid.mjs (node), which is
+        # called from bake_map.sh after this run — 19 s of rays is a load screen if the game
+        # does it, and the bake already spends a minute here.
+        write_grid_source(meshes, resolution, out_dir)
 
     unwire(added_nodes, temp_mats)
     bpy.data.images.remove(img)

@@ -129,3 +129,17 @@ if [[ "$STATUS" -ne 0 ]]; then
   echo "bake_map: Blender failed with exit code $STATUS; outputs may be incomplete — fix the Blender/driver error and run again" >&2
   exit "$STATUS"
 fi
+
+# ---- light-cell grid (the rays are cast ONCE, here, not at load) ----
+# Measured on the reference scene: building 11.701 cells at 512 rays each takes 19.1 s,
+# while the game reads the same grid from the file in 0.6 ms. 19 s is a load screen on a
+# gaming machine and worse on a simple laptop, so it happens next to the bake.
+# Without node the map simply has no grid file: the render path keeps its one-bounce ray for
+# dynamic pixels, so this is a warning, not a failure.
+if [[ -f "$OUT/gridsource.json" ]]; then
+  if command -v node >/dev/null 2>&1; then
+    node --experimental-strip-types "$SCRIPT_DIR/write_lightgrid.mjs" "$OUT"
+  else
+    echo "bake_map: node not found — grid file not written, dynamic pixels keep the one-bounce ray" >&2
+  fi
+fi

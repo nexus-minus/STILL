@@ -89,13 +89,27 @@
  *       file back must give the same table and the same lookup results (tolerance 0).
  *     - the scale the tool applies is the loader's scale (x pi). Asserted exact: a texel
  *       decoded through the tool equals the stored half value times pi.
+ *   UV convention + manifest (the writer side is Python, so its rule is mirrored here):
+ *     - Blender measures a UV v from the BOTTOM of the image, the game's texel indexing
+ *       measures it from the TOP row (row 0 = glTF v0, flipY=false — probe-measured by the PNG
+ *       writer), so tools/bake_map.py must write v as 1 - v. Checked three ways, tolerance 0:
+ *       the rule must be present in the writer (text), the mirrored rule must land back on the
+ *       texel the bake stored for a 1/16 sample of the grid, and it must match Blender's own
+ *       texel assignment (floor from the bottom, file row = res-1-texel) for the scene's
+ *       triangle centres. Points that sit exactly on a texel boundary are reported, not
+ *       asserted — there the two readings are the same texel's edge. Measured on a real
+ *       Blender run: 14 triangle centres, 0 differ, none on a boundary.
+ *     - the manifest block must equal the header the game reads back (tolerance 0), so the
+ *       info block cannot describe a different file than the one it points at.
+ *     - the bake script must actually call the tool after the bake, or nothing writes the file
+ *       the game reads.
  */
 import {
   buildLightGrid, buildNeighbourVisibility, dirtyCellsFor, fillCell, hashCellKey, lastSampleDistance, lastSampleOwn, packLightGrid, projectCoefficients,
   referenceIrradiance, sampleIrradiance, sampleBlendIrradiance, shIrradiance, packedSlot, packedIrradiance, packedBlend, packedBlendIrradiance,
-  DEFAULT_BLEND, SH_GRID_STRIDE_VEC4, SH_TERMS, LOBE, neighbourBit, shBasis, trace, toHalfBits, fromHalfBits, decodeHalfTexels, encodeLightGrid, decodeLightGrid, GRID_SCALE,
+  DEFAULT_BLEND, SH_GRID_STRIDE_VEC4, SH_TERMS, LOBE, neighbourBit, shBasis, lightmapAt, trace, toHalfBits, fromHalfBits, decodeHalfTexels, encodeLightGrid, decodeLightGrid, GRID_SCALE,
 } from '../src/world/light-grid.ts';
-import { buildGridFile } from '../tools/write_lightgrid.mjs';
+import { buildGridFile, lightgridManifest } from '../tools/write_lightgrid.mjs';
 import fs from 'node:fs';
 
 const RES = 1024;
@@ -735,6 +749,60 @@ console.log(`WGSL mirror (shader TEXT, WebGPU cannot run on this machine): ${sha
   `blend from DEFAULT_BLEND ${usesModuleBlend}, gate reads the mask ${gatesFromMask}, ` +
   `dynamic branch uses it + sets skipBaked ${readsGate}, slot values ${mirrorMax.toExponential(1)} (tolerance 1e-6)`);
 
+// 7) UV row convention + manifest block. tools/bake_map.py is the only side that knows Blender's
+//    island layout, so it writes the inputs and the tool does the maths. The flip is the part
+//    that is easy to get backwards, so the rule is mirrored here and declared before the numbers:
+//    Blender measures a UV v from the BOTTOM of the image, the game's texel indexing measures it
+//    from the TOP row (row 0 = glTF v0, flipY=false — probe-measured by bake_map.py's PNG writer),
+//    so the writer must write 1 - v. A texel centre must land back on the texel the bake stored
+//    (tolerance 0 differences, on a 1/16 sample of the grid); without the flip every cell would
+//    read the mirrored row. And the manifest block must be the header the game reads back
+//    (tolerance 0), so the info cannot describe a different file.
+const pySrc = fs.readFileSync(new URL('../tools/bake_map.py', import.meta.url), 'utf8');
+const shSrc = fs.readFileSync(new URL('../tools/bake_map.sh', import.meta.url), 'utf8');
+const flipRule = /uvs\.extend\(\[float\(u\), 1\.0 - float\(v\)\]\)/.test(pySrc);
+let flipDiff = 0, flipSeen = 0;
+const flipOut = new Float64Array(3);
+for (let r = 0; r < RES; r += 16) {
+  for (let c = 0; c < RES; c += 16) {
+    const blenderU = (c + 0.5) / RES, blenderV = 1 - (r + 0.5) / RES;
+    lightmapAt(baseValues, RES, blenderU, 1 - blenderV, flipOut);   // writer writes 1 - v, sampler reads v from the top
+    const i = (r * RES + c) * 4;
+    flipSeen++;
+    for (let ch = 0; ch < 3; ch++) if (flipOut[ch] !== baseValues[i + ch]) flipDiff++;
+  }
+}
+// and the same rule on the scene's real triangle centres: Blender assigns a bake texel with
+// floor from the BOTTOM, so its texel t is the file's row res-1-t. The writer's flip and the
+// game's indexing must land on the same texel Blender baked for that face (tolerance 0).
+// A point that sits EXACTLY on a texel boundary is ambiguous in both readings (floor picks the
+// texel below, Blender's indexing picks the one above), so those points are reported, not
+// asserted. On a real bake no centre lands on a boundary: measured 14 centres, 0 differ, none
+// on a boundary (the fixture's UV rect corners do land on boundaries, which is why they are
+// reported separately here).
+let centreDiff = 0, centreBoundary = 0;
+for (const t of tris) {
+  const v = (t.uv[1] + t.uv[3] + t.uv[5]) / 6, u = (t.uv[0] + t.uv[2] + t.uv[4]) / 6;
+  if (Number.isInteger(v * RES) || Number.isInteger(u * RES)) { centreBoundary++; continue; }
+  const gameRow = Math.floor(v * RES), gameCol = Math.floor(u * RES);
+  if (gameRow !== RES - 1 - Math.floor((1 - v) * RES) || gameCol !== Math.floor(u * RES)) centreDiff++;
+}
+const manifestBlock = lightgridManifest(readBack);
+// "cells" is the manifest's name for the header's cellCount — the comparison has to use the
+// header names, otherwise it compares the block against fields the header does not have
+const MANIFEST_FIELDS = { cells: 'cellCount', cellSize: 'cellSize', resolution: 'resolution', seed: 'seed', raysPerCell: 'raysPerCell', blend: 'blend' };
+const manifestDiff = Object.entries(manifestBlock)
+  .filter(([k, v]) => MANIFEST_FIELDS[k] !== undefined && readBack[MANIFEST_FIELDS[k]] !== v)
+  .map(([k]) => k);
+// the pipeline has to actually run the tool, otherwise nothing writes the file the game reads
+const callsTool = /node[^\n]*write_lightgrid\.mjs/.test(shSrc);
+console.log(`UV convention (tolerance 0): writer rule "1 - v" found in tools/bake_map.py ${flipRule}, ` +
+  `${flipSeen} texel centres land on the texel the bake stored (${flipDiff} differ), ` +
+  `${tris.length} scene triangle centres match Blender's own texel assignment (${centreDiff} differ, ` +
+  `${centreBoundary} sit on an exact texel boundary and are reported only) | ` +
+  `manifest block ${manifestDiff.length ? `differs on ${manifestDiff.join(',')}` : 'equals the file header (0 differ)'} | ` +
+  `bake script calls the tool after the bake ${callsTool}`);
+
 // asserts, in the order the tolerances were declared
 if (grid.cellSize < 0.25 || grid.cellSize > 4) throw new Error('cell size left its clamp');
 if (warned.length === 0) throw new Error('density warning never fired — the sparse island was not measured');
@@ -783,5 +851,12 @@ if (!usesModuleBlend) throw new Error('the shader hardcodes a blend strength ins
 if (!gatesFromMask) throw new Error('the shader does not read the neighbour mask — a pixel would cast a ray per corner or ignore visibility');
 if (!readsGate) throw new Error('the dynamic-pixel branch does not use the cell reading, or does not apply the no-double-lighting rule there');
 if (mirrorMax > 1e-6) throw new Error(`the shader's evaluation path differs from the reference by ${mirrorMax.toExponential(1)}, above the f32 rounding tolerance 1e-6`);
+if (!pySrc.includes('def write_grid_source')) throw new Error('tools/bake_map.py does not write the grid inputs, so the game has nothing to build the file from');
+if (!flipRule) throw new Error('the Python writer no longer writes the UV convention this check mirrors (v must be written as 1 - v)');
+if (flipDiff > 0) throw new Error(`the writer's UV convention lands on ${flipDiff} of ${flipSeen} texel centres — every cell would read mirrored light`);
+if (centreDiff > 0) throw new Error(`the writer's convention disagrees with Blender's own texel assignment on ${centreDiff} triangle centres`);
+if (!/range\(1, len\(loops\) - 1\)/.test(pySrc)) throw new Error('the writer must fan-split ngons (0-1-2, 0-2-3) like the glTF export does — skipping quads leaves whole walls out of the grid, which is what the first end-to-end run caught');
+if (manifestDiff.length) throw new Error(`the manifest block does not equal the header the game reads back: ${manifestDiff.join(', ')}`);
+if (!callsTool) throw new Error('tools/bake_map.sh does not call tools/write_lightgrid.mjs after the bake — the grid file would never be written');
 
-console.log('PASS light-grid CPU reference (cell size from geometry, density warning, SH truncation, air cells, dirty flag, GPU mirror, file path, WGSL mirror)');
+console.log('PASS light-grid CPU reference (cell size from geometry, density warning, SH truncation, air cells, dirty flag, GPU mirror, file path, WGSL mirror, UV convention)');

@@ -28,7 +28,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {
-  buildLightGrid, buildNeighbourVisibility, packLightGrid, encodeLightGrid, decodeHalfTexels, DEFAULTS, GRID_SCALE,
+  buildLightGrid, buildNeighbourVisibility, packLightGrid, encodeLightGrid, decodeHalfTexels, decodeLightGrid, DEFAULTS, GRID_SCALE,
 } from '../src/world/light-grid.ts';
 
 /** Pure core: inputs in, file bytes out. No filesystem, so the check can call this exact
@@ -40,6 +40,23 @@ export function buildGridFile(scene, values) {
   const grid = buildLightGrid(scene.tris, values, scene.resolution, opts);
   buildNeighbourVisibility(grid);
   return { grid, bytes: encodeLightGrid(packLightGrid(grid)) };
+}
+
+/** What the manifest records about the grid. Built from the DECODED header, not from the
+ *  grid object, so the info block cannot disagree with the file it describes — the f32 blend
+ *  and the f64 cell size are what the game actually reads back. */
+export function lightgridManifest(decoded) {
+  return {
+    file: 'lightgrid.bin',
+    cells: decoded.cellCount,
+    // no rounding: JSON writes the number exactly as the header stored it, so the info block
+    // is the same value the game reads from the file (tolerance 0 differences)
+    cellSize: decoded.cellSize,
+    resolution: decoded.resolution,
+    seed: decoded.seed,
+    raysPerCell: decoded.raysPerCell,
+    blend: decoded.blend,
+  };
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
@@ -56,4 +73,18 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     `cell ${grid.cellSize.toFixed(3)} m, ${bytes.length} bytes, ` +
     `seed ${grid.seed}, ${grid.raysPerCell} rays per cell, scale ${scale.toFixed(5)}`
   );
+  // The manifest block is written HERE, from the numbers actually used, because the tool is
+  // the only place that knows them (the defaults live in the module). Indent 2 matches
+  // export_map.py/bake_map.py so the diff stays only the new block. The loader reads file +
+  // the recorded numbers; a map without this block simply has no grid and keeps the bounce ray.
+  const manifestPath = path.join(dir, 'manifest.json');
+  if (fs.existsSync(manifestPath)) {
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    manifest.lightgrid = lightgridManifest(decodeLightGrid(bytes));
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+    console.log(`manifest.json += lightgrid (${manifest.lightgrid.cells} cells, ` +
+      `cell ${manifest.lightgrid.cellSize}, seed ${manifest.lightgrid.seed}, ${manifest.lightgrid.raysPerCell} rays)`);
+  } else {
+    console.log(`no manifest.json in ${dir} — the grid file is written, but the game will not look for it`);
+  }
 }

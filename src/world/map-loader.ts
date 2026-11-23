@@ -113,8 +113,10 @@ interface Manifest {
     file?: string;
     cells?: number;
     cellSize?: number;
+    resolution?: number;
     seed?: number;
     raysPerCell?: number;
+    blend?: number;
   };
 }
 
