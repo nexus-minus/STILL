@@ -1111,8 +1111,11 @@ export function createAdvancedRenderer(
     // hash the same way the packer does. u32() is the wrapping two's-complement conversion
     // that matches "ix | 0" + ">>> 0" in JS, and u32 multiplication wraps at 32 bits like
     // Math.imul, so the CPU packer and this lookup cannot land on different slots.
+    // Parentheses are REQUIRED when operators of different precedence are mixed (WGSL rule —
+    // the parse on the owner's machine rejected the unparenthesised form). Same grouping the
+    // JS reference uses, so the result cannot change.
     fn gridHash(ix: i32, iy: i32, iz: i32, hmask: u32) -> u32 {
-      var h = bitcast<u32>(ix) * 73856093u ^ bitcast<u32>(iy) * 19349663u ^ bitcast<u32>(iz) * 83492791u;
+      var h = ((bitcast<u32>(ix) * 73856093u) ^ (bitcast<u32>(iy) * 19349663u)) ^ (bitcast<u32>(iz) * 83492791u);
       h = h ^ (h >> 16u);
       h = h * 2146121005u;   // 0x7feb352d
       h = h ^ (h >> 15u);
@@ -1180,9 +1183,17 @@ export function createAdvancedRenderer(
     // inside a wall does not pull the value towards zero. Same order of operations as
     // packedBlend() + packedBlendIrradiance(): normalise, then mix with the own cell.
     fn gridBlendIrradiance(P: vec3f, n: vec3f, cs: f32, strength: f32, hmask: u32) -> vec3f {
-      let gx = floor(P.x / cs), gy = floor(P.y / cs), gz = floor(P.z / cs);
-      let ix = i32(gx), iy = i32(gy), iz = i32(gz);
-      let fx = gx - f32(ix), fy = gy - f32(iy), fz = gz - f32(iz);
+      // one declaration per line: WGSL has no multi-assignment let (the parse on the owner's
+      // machine rejected the comma form)
+      let gx = floor(P.x / cs);
+      let gy = floor(P.y / cs);
+      let gz = floor(P.z / cs);
+      let ix = i32(gx);
+      let iy = i32(gy);
+      let iz = i32(gz);
+      let fx = gx - f32(ix);
+      let fy = gy - f32(iy);
+      let fz = gz - f32(iz);
       let own = gridSlotAt(ix, iy, iz, hmask);
       // no own cell → nothing gates, the CPU path uses an all-ones mask there
       var mask = 4294967295u;

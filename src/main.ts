@@ -671,7 +671,12 @@ async function main(): Promise<void> {
   let wireframeOn = false;
 
   renderer.setAnimationLoop((time: number) => {
-    const dt = Math.min((time - last) / 1000, 0.05);
+    // dt can never be negative: `last` is initialised with performance.now(), while the
+    // timestamp three hands the loop is the FRAME START time — which is earlier than the
+    // moment the callback actually runs. On frame 1 that difference is negative, and the
+    // controller's damping guard (step-view.mjs) is right to refuse it: exp(-dt/tau) with a
+    // negative dt would mean "the view runs backwards". Clamping to 0 keeps the guard honest.
+    const dt = Math.min(Math.max((time - last) / 1000, 0), 0.05);
     last = time;
 
     controller.update(dt);
