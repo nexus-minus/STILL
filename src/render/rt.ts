@@ -1641,8 +1641,13 @@ export function createAdvancedRenderer(
   // its content, and the screenshot + black-frame paths read it back.
   /** ?settle=N — frames allowed after a change before the frame freezes.
    *  Default 6 (the window the owner said is acceptable); 0 = never freeze, which
-   *  is the always-dispatch A/B baseline and what the readback scripts pin. */
-  const settleRaw = Number(new URLSearchParams(location.search).get('settle'));
+   *  is the always-dispatch A/B baseline and what the readback scripts pin.
+   *  Bug found by scripts/settings-hud-check.mjs on 2026-11-23: Number(null) is 0, so without the
+   *  URL parameter the documented default 6 never applied and the frame froze after one dispatch -
+   *  a single-sample frame instead of the average of the settle window. An absent parameter must
+   *  mean the default, so the parameter is checked for null before the conversion. */
+  const settleParam = new URLSearchParams(location.search).get('settle');
+  const settleRaw = settleParam === null ? NaN : Number(settleParam);
   const SETTLE_FRAMES = Number.isFinite(settleRaw) && settleRaw >= 0 ? settleRaw : 6;
   /** ?idle=0 — never freeze (dispatch every frame), for the A/B comparison */
   const idleFreeze = new URLSearchParams(location.search).get('idle') !== '0';
