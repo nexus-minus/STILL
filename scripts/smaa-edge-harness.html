@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>SMAA edge harness</title>
+    <style>html, body { margin: 0; background: #000; } canvas { display: block; }</style>
+  </head>
+  <body>
+    <canvas id="c" width="320" height="200"></canvas>
+    <script type="module">
+      import * as THREE from 'three/webgpu';
+      import { texture, uv } from 'three/tsl';
+      // gpuSampleCount comes from pipeline.js (the same import settings.ts uses), so the
+      // number the harness reports is the number the menu row prints.
+      import { FramePipeline, gpuSampleCount } from '../src/render/pipeline.js';
+      import { createPostChain } from '../src/render/passes/post.js';
+      import { QualityManager } from '../src/render/quality.js';
+
+      const W = 320, H = 200;
+      const canvas = document.getElementById('c');
+
+      // antialias: false — the sample count is then whatever setAA() sets, so the
+      // check can tell a real MSAA target from the menu recording it.
+      const renderer = new THREE.WebGPURenderer({ canvas, antialias: false });
+      await renderer.init();
+
+      // The readback must be a plain linear pass-through, otherwise the analytic
+      // reference cannot be compared byte-exact: no tone mapping, no sRGB encode,
+      // no dither (the page is loaded with ?dither=0).
+      renderer.toneMapping = THREE.NoToneMapping;
+      renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
+      renderer.setPixelRatio(1);
+      renderer.setSize(W, H, false);
+
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0, 0, 0);
+      const camera = new THREE.OrthographicCamera(0, W, H, 0, 0.1, 100);
+      camera.position.set(0, 0, 10);
+
+      // The one edge in the frame: the quad below the line y = (5/8)x + 1/4,
+      // in drawing-buffer pixels (y up, 1 world unit = 1 pixel). The quad's other
+      // edges are outside the canvas, so inside the frame the edge IS the line.
+      const lineY = (x) => (5 / 8) * x + 1 / 4;
+      const geo = new THREE.BufferGeometry();
+      const v = [
+        -40, lineY(-40), 0,
+        360, lineY(360), 0,
+        360, -120, 0,
+        -40, -120, 0,
+      ];
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(v, 3));
+      geo.setIndex([0, 3, 2, 0, 2, 1]); // counter-clockwise, so the quad is front-facing
+      const material = new THREE.MeshBasicMaterial();
+      // exactly representable binary floats, so the shader value is byte-exact
+      material.color.setRGB(0.25, 0.5, 0.75, THREE.LinearSRGBColorSpace);
+      const mesh = new THREE.Mesh(geo, material);
+      scene.add(mesh);
+
+      const quality = new QualityManager('medium');
+      const pipeline = new FramePipeline(renderer);
+      const post = createPostChain(renderer, scene, camera);
+      pipeline.setPost(post);
+
+      // Float target: readback is the raw value the graph wrote.
+      const rt = new THREE.RenderTarget(W, H, {
+        type: THREE.FloatType,
+        depthBuffer: true,
+        resolveColorBuffer: true,
+      });
+
+      // Second target + copy graph: the only way to read a multisampled target, since
+      // its resolve buffer is only written when something SAMPLES the texture.
+      const dst = new THREE.RenderTarget(W, H, { type: THREE.FloatType, depthBuffer: false });
+      const copySource = texture(rt.texture, uv());
+      const copyPipeline = new THREE.RenderPipeline(renderer, copySource);
+      copyPipeline.outputColorTransform = false;
+
+      renderer.info.autoReset = false;
+
+      // Which render target each fullscreen pass drew into, per frame. The names are
+      // three's own (SMAANode.edges / .weights / .blend), so the check counts the
+      // SMAA passes instead of guessing from a draw-call total.
+      window.__targets = [];
+      const origSetRenderTarget = renderer.setRenderTarget;
+      renderer.setRenderTarget = function (target) {
+        window.__targets.push(target ? (target.name || target.texture?.name || 'untitled') : 'canvas');
+        return origSetRenderTarget.call(this, target);
+      };
+
+      window.__edge = {
+        ready: true,
+        W, H,
+        quality,
+        pipeline,
+        post,
+        renderer,
+        scene,
+        camera,
+        // a target created WITH the sample count (three allocates the MSAA texture
+        // at creation, which is what a live mutation of .samples does not do)
+        newTarget(samples) {
+          return new THREE.RenderTarget(W, H, {
+            type: THREE.FloatType, depthBuffer: true, samples, resolveColorBuffer: true,
+          });
+        },
+        readTarget(target) {
+          return renderer.readRenderTargetPixelsAsync(target, 0, 0, W, H).then((a) => Array.from(a));
+        },
+        // the real code path: FramePipeline.render() -> post chain or forward render
+        frame({ usePost, rtSamples = 0 }) {
+          window.__targets.length = 0;
+          renderer.info.reset();
+          rt.samples = rtSamples; // three reallocates the target when the count changes
+          renderer.setRenderTarget(rt);
+          if (usePost) post.render();
+          else renderer.render(scene, camera);
+          return { calls: renderer.info.render.calls, samples: rt.samples, targets: window.__targets.slice() };
+        },
+        async read() {
+          return Array.from(await renderer.readRenderTargetPixelsAsync(rt, 0, 0, W, H));
+        },
+        // A multisampled target cannot be read directly: three only fills the resolve
+        // buffer when something SAMPLES the texture. So the MSAA picture is read through
+        // a copy graph that samples it. uv (0,0) is the bottom-left, while readback row 0
+        // is the top row, so the copy flips y to keep the same mapping as read().
+        async readResolved(target = rt) {
+          copySource.source = target.texture;   // sample the resolve output of that target
+          renderer.setRenderTarget(dst);
+          copyPipeline.render();
+          return Array.from(await renderer.readRenderTargetPixelsAsync(dst, 0, 0, W, H));
+        },
+        move(shift) { mesh.position.y = shift; },
+        // clear the cached render contexts so the sample counts reported after a run
+        // belong to that run alone
+        resetContexts() { renderer._renderContexts.dispose(); },
+        // what the pipeline thinks + what three's backend will really run
+        state() {
+          return {
+            aa: pipeline.aa,
+            requested: pipeline.aaSamples,
+            effective: pipeline.effectiveSamples,
+            // what the GPU really runs: three clamps to 1 or 4
+            gpuSampleCount: renderer.backend.utils.getSampleCount(renderer.backend.renderer.currentSamples),
+            rtSamples: rt.samples, // the target this frame is written to
+            postActive: pipeline.postActive,
+            // the raw sampleCount each cached render context was asked for
+            contextSampleCounts: Object.values(renderer._renderContexts._renderContexts).map((c) => c.sampleCount),
+            // ...and what three's own backend builds its pipelines with for those
+            // contexts (the same rule, read through three's function, not ours)
+            contextRuns: Object.values(renderer._renderContexts._renderContexts).map(
+              (c) => renderer.backend.utils.getSampleCountRenderContext(c)),
+            // what the settings row prints, through the SAME function settings.ts uses
+            menuShows: gpuSampleCount(pipeline.aaSamples),
+            // what three's own backend clamps to — the check compares these two (tol 0)
+            clamped: renderer.backend.utils.getSampleCount(pipeline.aaSamples),
+            // three's clamp on its own, measured through the backend function (tol 0 in (6b))
+            clampOfEight: renderer.backend.utils.getSampleCount(8),
+            // potato's preset request, for the same test on a tier that asks for 2
+            clampOfTwo: renderer.backend.utils.getSampleCount(2),
+          };
+        },
+      };
+      window.__edgeReady = true;
+    </script>
+  </body>
+</html>

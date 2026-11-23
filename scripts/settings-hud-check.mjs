@@ -21,7 +21,7 @@
  */
 import puppeteer from 'puppeteer-core';
 import { TIER_ORDER, TIER_PRESETS, detectTier, defaultAA, QualityManager } from '../src/render/quality.ts';
-import { FramePipeline } from '../src/render/pipeline.ts';
+import { FramePipeline, gpuSampleCount } from '../src/render/pipeline.ts';
 
 const BASE = process.argv[2] ?? 'http://localhost:5173';
 const CHROME = process.env.CHROME ??
@@ -54,6 +54,23 @@ const HUD_POLL_MS = 200;
 //     per-frame camera position delta over the idle window must be 0. Measured, not
 //     assumed — without it a "0 dispatches" result could be an accident.
 const T_CAMERA_STILLNESS = 0;
+// (g) the number the settings row shows must be the number the GPU runs, tolerance 0.
+//     Declared on the owner's order (2026-11-23) before measuring: ultra used to show 8
+//     while three clamps to 4, so the row must print the effective count. Measured as the
+//     DOM text vs pipeline.effectiveSamples AND vs three's own clamp function, so the row
+//     cannot agree with itself.
+const T_DISPLAY_EXACT = 0;
+// (h) the 'msaa' option must be greyed out while the fullscreen post pass runs, and
+//     selectable when it does not. Tolerance 0.
+// (i) added by the owner's decision of 2026-11-23 (tolerance 0, declared before measuring):
+//     'msaa' must ALSO be greyed out on the potato tier, because its request of 2 samples is
+//     clamped to 1 by three (see gpuSampleCount), and 1 sample is no antialiasing at all —
+//     a player could pick an option that visibly does nothing. So the rule the menu
+//     implements is: disabled <=> post pass active OR clamp(requested) == 1. The row TEXT
+//     still prints the truth ("asks 2, runs 1"); only the option is not selectable.
+//     Note for the numbers below: a disabled option cannot be clicked, so the potato 'msaa'
+//     stage is reached by setting the select value in code. That is reported as such.
+const T_GREY_EXACT = 0;
 // (f) the settle window is DOCUMENTED in src/render/rt.ts:1643 as 6 frames after a
 //     change. Measured as the dispatch frames between the dirty event and the first
 //     frame that dispatches nothing: 1 dirty frame + 6 settle frames = 7. A window of
@@ -61,11 +78,15 @@ const T_CAMERA_STILLNESS = 0;
 const T_SETTLE_WINDOW_FRAMES = 6;
 
 /** what each tier's preset must name, and what each stage must produce */
+/** what each tier's preset must name, and what each stage must produce.
+ *  high/ultra changed on 2026-11-23 by owner decision: the measurement (run C in
+ *  scripts/smaa-edge-check.mjs) showed no gain from MSAA behind the post pass, so the
+ *  preset default is SMAA there too and ultra's 8 became 4 (three clamps 8 to 4). */
 const EXPECT = {
   potato: { aa: 'smaa', msaaSamples: 2 },
   medium: { aa: 'smaa', msaaSamples: 4 },
-  high: { aa: 'msaa', msaaSamples: 4 },
-  ultra: { aa: 'msaa', msaaSamples: 8 },
+  high: { aa: 'smaa', msaaSamples: 4 },
+  ultra: { aa: 'smaa', msaaSamples: 4 },
 };
 /** effective sample count per stage (SMAA is a post pass → no sample work) */
 const EXPECT_SAMPLES = { off: 0, smaa: 0, msaa: null }; // null = the tier's own count
@@ -86,6 +107,9 @@ console.log(`  (b) weak machine cores=${WEAK.cores} memory=${WEAK.memory}: tier 
 console.log(`  (c) compute dispatches on an idle frame: <= ${T_IDLE_DISPATCHES_PER_FRAME} per frame, baseline >= ${T_BASELINE_MIN_PER_FRAME}`);
 console.log(`  (d) HUD 'frozen' within ${T_HUD_LATENCY_MS} ms of the last dispatch; fps agrees within ${T_FPS_AGREEMENT_PCT} %`);
 console.log(`  (e) camera must stand still during the idle window: per-frame delta ${T_CAMERA_STILLNESS}`);
+console.log(`  (g) the AA row must show the count the GPU runs: tol ${T_DISPLAY_EXACT}, checked against three's own clamp`);
+console.log(`  (h) 'msaa' must be greyed out while the post pass runs, selectable when it does not (tol ${T_GREY_EXACT})`);
+console.log(`  (i) 'msaa' must ALSO be greyed out on potato (owner 2026-11-23): its request of 2 runs 1 sample (tol ${T_GREY_EXACT})`);
 console.log(`  (f) settle window as documented in rt.ts:1643: >= 1 dirty frame + ${T_SETTLE_WINDOW_FRAMES} settle frames`);
 
 // ============================================================================
@@ -124,7 +148,8 @@ check(
 const stub = { _samples: 4, get samples() { return this._samples; } };
 const pipeline = new FramePipeline(stub);
 for (const stage of ['off', 'msaa', 'smaa']) {
-  const expected = stage === 'msaa' ? EXPECT.medium.msaaSamples : EXPECT_SAMPLES[stage];
+  const requested = stage === 'msaa' ? EXPECT.medium.msaaSamples : EXPECT_SAMPLES[stage];
+  const expected = stage === 'msaa' ? gpuSampleCount(requested) : requested;
   pipeline.setAA(stage, EXPECT.medium.msaaSamples);
   const ok =
     pipeline.aa === stage &&
@@ -195,6 +220,12 @@ const readState = (page) =>
     requested: window.__liminal.pipeline.aaSamples,
     effective: window.__liminal.pipeline.effectiveSamples,
     persisted: JSON.parse(localStorage.getItem('liminal.settings.v1') ?? '{}').aa,
+    // (g) what the AA row actually prints, and the two independent sources the number
+    //     must agree with: the pipeline's effective count and three's own clamp function
+    displayed: document.getElementById('set-aa-val')?.textContent ?? '',
+    msaaDisabled: !!document.querySelector('#set-aa option[value="msaa"]')?.disabled,
+    postActive: window.__liminal.pipeline.postActive,
+    backendClamp: window.__liminal.renderer.backend?.utils?.getSampleCount(window.__liminal.pipeline.aaSamples) ?? null,
     hudVisible: !document.getElementById('perf')?.classList.contains('hidden'),
     hud: document.getElementById('perf')?.textContent ?? '',
     dispatches: window.__gpu.dispatches,
@@ -228,9 +259,35 @@ try {
       `got tier=${boot.tier} aa=${boot.setting}`,
     );
 
-    // (a) play every stage through the DOM for every tier
+    // (a) play every stage through the DOM for every tier.
+    // The 'msaa' row is greyed out while the post pass draws the frame (tolerance (h)),
+    // so the picks run with glow off — the path MSAA actually belongs to. The grey-out
+    // itself is measured first, in the default state (glow on).
+    // (h) + (i): the grey-out the menu must show. Rule (tol 0):
+    //   disabled <=> the post pass draws the frame OR clamp(requested) == 1 (potato: asks 2).
+    const greyExpected = (tier, postActive) =>
+      postActive || gpuSampleCount(EXPECT[tier].msaaSamples) === 1;
+
     for (const tier of TIER_ORDER) {
       await page.evaluate((t) => window.__liminal.quality.setTier(t), tier);
+      // known starting state for (h): the post pass running (glow on)
+      await page.evaluate(() => {
+        const g = document.getElementById('set-glow');
+        if (!g.checked) g.click();
+      });
+      const on = await readState(page);
+      check(`(h) tier ${tier} with the post pass ON: 'msaa' greyed out`,
+        on.postActive === true && on.msaaDisabled === true,
+        `postActive ${on.postActive}, option disabled ${on.msaaDisabled}`);
+      await page.evaluate(() => {
+        const g = document.getElementById('set-glow');
+        if (g.checked) g.click(); // change event -> syncUI -> the AA row updates
+      });
+      const off = await readState(page);
+      check(`(h)${tier === 'potato' ? '+(i)' : ''} tier ${tier} with the post pass OFF: 'msaa' ${greyExpected(tier, false) ? 'greyed out' : 'selectable'}`,
+        off.postActive === false && off.msaaDisabled === greyExpected(tier, false),
+        `postActive ${off.postActive}, option disabled ${off.msaaDisabled}` +
+        (tier === 'potato' ? ' -> (i): its 2 samples run 1, so it stays greyed out' : ''));
       for (const stage of ['off', 'msaa', 'smaa']) {
         await page.evaluate((m) => {
           const sel = document.getElementById('set-aa');
@@ -239,15 +296,38 @@ try {
         }, stage);
         await sleep(150); // the pipeline applies on the change event
         const got = await readState(page);
-        const expected = stage === 'msaa' ? EXPECT[tier].msaaSamples : EXPECT_SAMPLES[stage];
+        const requested = stage === 'msaa' ? EXPECT[tier].msaaSamples : EXPECT_SAMPLES[stage];
+        // three only runs 1 or 4 samples, so the effective count is the CLAMPED one
+        const expected = stage === 'msaa' ? gpuSampleCount(requested) : requested;
+        const shown = Number((got.displayed.match(/\d+/) ?? [])[0]);
         const ok =
           got.setting === stage &&
           got.pipelineAA === stage &&
-          got.requested === expected &&
+          got.requested === requested &&
           got.effective === expected &&
           got.persisted === stage;
         check(`tier ${tier} + stage ${stage} -> ${expected} samples`, ok,
-          `got setting=${got.setting} pipeline=${got.pipelineAA} requested=${got.requested} effective=${got.effective} persisted=${got.persisted}`);
+          `got setting=${got.setting} pipeline=${got.pipelineAA} requested=${got.requested} effective=${got.effective} persisted=${got.persisted}` +
+          (tier === 'potato' && stage === 'msaa'
+            ? ' [measured by setting the select value in code — the option is greyed out, so a player cannot reach this stage]'
+            : ''));
+        // (g) the row must print the number the GPU runs, and three's own clamp must
+        //     agree with it — two independent sources, not the same function twice
+        if (stage === 'msaa') {
+          check(`(g) tier ${tier} + msaa: the row shows ${shown}, the GPU runs ${expected}`,
+            shown === expected && got.backendClamp === expected,
+            `row text "${got.displayed}", backend clamp ${got.backendClamp}, requested ${got.requested}`);
+        }
+        // (h) the row is greyed out while the fullscreen post pass draws the frame
+        check(`(h) tier ${tier} + ${stage}: 'msaa' greyed out matches the rule (post pass OR clamp == 1)`,
+          got.msaaDisabled === greyExpected(tier, got.postActive),
+          `postActive ${got.postActive}, option disabled ${got.msaaDisabled}`);
+        // (i) potato: the option is not selectable, but the text must stay honest.
+        if (tier === 'potato' && stage === 'msaa') {
+          check(`(i) potato + msaa: option greyed out, row still prints the clamp`,
+            got.msaaDisabled === true && /asks 2, runs 1/.test(got.displayed),
+            `row text "${got.displayed}", option disabled ${got.msaaDisabled}`);
+        }
       }
     }
 

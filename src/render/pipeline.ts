@@ -4,6 +4,16 @@ import type { FrameContext, RenderPass } from './passes/types.js';
 import type { PostChain } from './passes/post.js';
 import type { AdvancedRenderer } from './rt.js';
 
+/** three's sample clamp, kept in one place so the menu and the renderer cannot
+ *  disagree: the WebGPU backend runs only 1 or 4 samples (`Utils.getSampleCount`,
+ *  three.webgpu.js:39100 — measured by scripts/smaa-edge-check.mjs: asking 8 runs 4,
+ *  asking 2 runs 1). The settings row prints THIS, never the value the tier asked for.
+ *  Kept here (not in quality.ts) so a node check can import it without resolving
+ *  quality.js from a .ts file. */
+export function gpuSampleCount(samples: number): number {
+  return samples >= 4 ? 4 : 1;
+}
+
 /**
  * Frame orchestration.
  *
@@ -113,10 +123,12 @@ export class FramePipeline {
     return this.aaRequestedSamples;
   }
 
-  /** what the renderer actually runs with. 0 while a fullscreen post pass draws
-   *  the frame — three zeroes the sample count for those passes */
+  /** what the renderer actually runs with: the request AFTER three's clamp (1 or 4,
+   *  see gpuSampleCount below), so the settings row can show what the GPU uses.
+   *  0 while a fullscreen post pass draws the frame — three zeroes the sample count
+   *  for those passes */
   get effectiveSamples(): number {
-    return this.renderer.samples;
+    return this.aaRequestedSamples === 0 ? 0 : gpuSampleCount(this.renderer.samples);
   }
 
   /** phase 1: addPass(new GBufferPass(...)) etc. */

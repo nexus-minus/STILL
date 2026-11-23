@@ -48,7 +48,9 @@ export const TIER_PRESETS: Record<Tier, QualitySettings> = {
     bloom: true,
     antialiasing: 'smaa',
     // what a manual MSAA pick would use on this tier — 2, the cheapest MSAA the
-    // target can ask for
+    // target can ask for. NOTE: WebGPU clamps 2 to 1 (see gpuSampleCount), so a manual
+    // 'msaa' pick on this tier runs single-sample. The menu shows the effective value,
+    // not this request; that is reported to the owner as an open point.
     msaaSamples: 2,
     lightGain: 1,
   },
@@ -68,6 +70,11 @@ export const TIER_PRESETS: Record<Tier, QualitySettings> = {
     msaaSamples: 4,
     lightGain: 1,
   },
+  // Full-res traced lighting. SMAA is the default here as well (owner decision
+  // 2026-11-23): the measured cost of a 4x MSAA target is 126.6 MB at 1080p and no
+  // gain against the single-sample reference — scripts/smaa-edge-check.mjs run C
+  // showed 12.60 ms/frame vs 11.80 for 'off' and a 1.8 % worse spread. The menu still
+  // offers 'msaa' for players who render without the post pass, where it does help.
   high: {
     renderScale: 1,
     raytracedLighting: true,
@@ -76,7 +83,8 @@ export const TIER_PRESETS: Record<Tier, QualitySettings> = {
     volumetrics: true,
     volumetricScale: 0.5,
     bloom: true,
-    antialiasing: 'msaa',
+    antialiasing: 'smaa',
+    // what a manual MSAA pick would use on this tier
     msaaSamples: 4,
     lightGain: 1,
   },
@@ -89,8 +97,13 @@ export const TIER_PRESETS: Record<Tier, QualitySettings> = {
     volumetrics: true,
     volumetricScale: 1,
     bloom: true,
-    antialiasing: 'msaa',
-    msaaSamples: 8,
+    antialiasing: 'smaa', // same reason as high, see above
+    // 4, not 8: three's Utils.getSampleCount clamps any request to 1 or 4
+    // (three.webgpu.js:39100; measured by scripts/smaa-edge-check.mjs, run F — asking
+    // for 8 runs 4). A menu that displayed 8 would show a number the GPU never uses,
+    // so the preset names the value the hardware actually runs (tolerance 0 in
+    // scripts/settings-hud-check.mjs: displayed == effective).
+    msaaSamples: 4,
     lightGain: 1,
   },
 };

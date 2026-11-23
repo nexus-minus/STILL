@@ -6,6 +6,8 @@ import {
   type QualityManager,
   type Tier,
 } from '../render/quality.js';
+// the clamp lives in the render layer (pipeline.ts), so the row cannot invent its own rule
+import { gpuSampleCount } from '../render/pipeline.js';
 import { ACTION_LABELS, keyLabel, PLAYER_ACTIONS, ALL_ACTIONS, type Action, type Bindings } from '../gameplay/bindings.js';
 import type { PlayerController } from '../gameplay/controller.js';
 import type { OverlayPrefs } from './hud.js';
@@ -83,6 +85,9 @@ export function initSettings(opts: {
   setExposure: (value: number) => void;
   getGlow: () => boolean;
   setGlow: (value: boolean) => void;
+  /** is the fullscreen post pass the one drawing the frame? The MSAA row is greyed
+   *  out while it runs (see syncUI) */
+  isPostActive: () => boolean;
   getOverlays: () => OverlayPrefs;
   setOverlays: (next: OverlayPrefs) => void;
 }): SettingsHandle {
@@ -361,6 +366,7 @@ export function initSettings(opts: {
   const vol = $<HTMLInputElement>('set-vol');
   const aaSelect = $<HTMLSelectElement>('set-aa');
   const aaVal = $<HTMLElement>('set-aa-val');
+  const aaMsaaOption = aaSelect.querySelector('option[value="msaa"]') as HTMLOptionElement;
   const sens = $<HTMLInputElement>('set-sens');
   const sensVal = $<HTMLElement>('set-sens-val');
   const invert = $<HTMLInputElement>('set-invert');
@@ -386,12 +392,37 @@ export function initSettings(opts: {
     badge.hidden = !modified;
   };
 
-  /** the AA row's value text: MSAA names the sample count it asks for, SMAA names
-   *  the post pass (no sample work), 'off' names nothing */
+  /** The AA row's value text. MSAA names the count the GPU RUNS, not the count the
+   *  tier asks for: three clamps to 1 or 4 (`Utils.getSampleCount`,
+   *  three.webgpu.js:39100 — measured in scripts/smaa-edge-check.mjs), so showing the
+   *  request could show a number the hardware never uses. Displayed == effective,
+   *  tolerance 0 (scripts/settings-hud-check.mjs). */
   const aaNote = (mode: AAMode, samples: number): string => {
-    if (mode === 'msaa') return `${samples} samples`;
+    if (mode === 'msaa') {
+      const runs = gpuSampleCount(samples);
+      const clamped = runs === samples ? '' : ` (asks ${samples}, runs ${runs})`;
+      return `${runs} samples, max 4${clamped}${opts.isPostActive() ? ' · geometry only' : ''}`;
+    }
     if (mode === 'smaa') return 'post pass';
     return 'none';
+  };
+
+  /** Why the menu declines 'msaa'. Tolerance 0 in scripts/settings-hud-check.mjs.
+   *  (1) While the fullscreen post pass draws the frame: MSAA only smooths the geometry,
+   *      never what the pass itself draws, and the measurement (run C in
+   *      scripts/smaa-edge-check.mjs) shows no gain there. It is not technically
+   *      impossible behind the pass (the check measured 320 changed pixels) — this is the
+   *      menu declining a pick that does little for the player.
+   *  (2) When the request clamps to 1 sample: three runs only 1 or 4 (gpuSampleCount), so
+   *      potato's request of 2 runs 1, and 1 sample is no antialiasing at all. A player
+   *      could pick something that visibly does nothing, so the menu greys 'msaa' out on
+   *      that tier (owner decision 2026-11-23). The row text still prints the truth
+   *      ("asks 2, runs 1"), because a value persisted from another tier can still show up. */
+  const msaaReasons = (samples: number): string[] => {
+    const reasons: string[] = [];
+    if (opts.isPostActive()) reasons.push('geometry only, off while bloom is on');
+    if (gpuSampleCount(samples) === 1) reasons.push(`runs ${gpuSampleCount(samples)} sample -> no effect`);
+    return reasons;
   };
 
   const syncUI = (): void => {
@@ -401,6 +432,11 @@ export function initSettings(opts: {
     scaleVal.textContent = `${Math.round(s.renderScale * 100)}%`;
     aaSelect.value = s.antialiasing;
     aaVal.textContent = aaNote(s.antialiasing, s.msaaSamples);
+    // The grey-out and the hint text come from the SAME list of reasons (see msaaReasons),
+    // so the row cannot print one thing and disable for another.
+    const reasons = msaaReasons(s.msaaSamples);
+    aaMsaaOption.disabled = reasons.length > 0;
+    aaMsaaOption.textContent = reasons.length ? `msaa (${reasons.join(', ')})` : 'msaa';
     exposure.value = String(opts.getExposure());
     exposureVal.textContent = `${opts.getExposure().toFixed(1)}×`;
     gain.value = String(s.lightGain);
@@ -468,6 +504,9 @@ export function initSettings(opts: {
   });
   glow.addEventListener('change', () => {
     opts.setGlow(glow.checked);
+    // syncUI is needed here too: the AA row greys 'msaa' out while the post pass runs,
+    // so turning glow off must make that row selectable again without reopening the menu
+    syncUI();
     persist();
   });
   rt.addEventListener('change', () => {

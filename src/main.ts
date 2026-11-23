@@ -421,6 +421,8 @@ async function main(): Promise<void> {
     },
     getGlow: () => pipeline.glowOn,
     setGlow: (value) => pipeline.setGlowEnabled(value),
+    // the AA row greys out 'msaa' while this is true (see settings.ts syncUI)
+    isPostActive: () => pipeline.postActive,
     getOverlays: () => overlayPrefs,
     setOverlays: (next) => {
       Object.assign(overlayPrefs, next);
