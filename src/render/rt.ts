@@ -1185,15 +1185,21 @@ export function createAdvancedRenderer(
     fn gridBlendIrradiance(P: vec3f, n: vec3f, cs: f32, strength: f32, hmask: u32) -> vec3f {
       // one declaration per line: WGSL has no multi-assignment let (the parse on the owner's
       // machine rejected the comma form)
-      let gx = floor(P.x / cs);
-      let gy = floor(P.y / cs);
-      let gz = floor(P.z / cs);
+      let qx = P.x / cs;
+      let qy = P.y / cs;
+      let qz = P.z / cs;
+      let gx = floor(qx);
+      let gy = floor(qy);
+      let gz = floor(qz);
       let ix = i32(gx);
       let iy = i32(gy);
       let iz = i32(gz);
-      let fx = gx - f32(ix);
-      let fy = gy - f32(iy);
-      let fz = gz - f32(iz);
+      // the fraction is the distance from the lower corner, so it must come from the QUOTIENT
+      // (q - floor), not from the floor itself. Writing it as gx - f32(ix) is always 0, which
+      // turned the blend into a single-corner lookup; the executed check measured that.
+      let fx = qx - f32(ix);
+      let fy = qy - f32(iy);
+      let fz = qz - f32(iz);
       let own = gridSlotAt(ix, iy, iz, hmask);
       // no own cell → nothing gates, the CPU path uses an all-ones mask there
       var mask = 4294967295u;
@@ -1207,9 +1213,17 @@ export function createAdvancedRenderer(
             if (slot < 0) { continue; }   // corner not in the table (solid or unlit air)
             // neighbourBit(a,b,c) — a bit read, not a ray cast
             if ((mask & (1u << ((a + 1u) * 9u + (b + 1u) * 3u + (c + 1u)))) == 0u) { continue; }
-            let wx = select(fx, 1.0 - fx, a == 0u);
-            let wy = select(fy, 1.0 - fy, b == 0u);
-            let wz = select(fz, 1.0 - fz, c == 0u);
+            // Corner 0 is the lower corner, so its weight is 1 - fraction (the fraction is the
+            // distance from corner 0). This is written as an if-chain on purpose: `select(e, f,
+            // cond)` is specified to return e when cond is true, but this Dawn build returns f
+            // (measured by the executed check), which would mirror the weights inside every
+            // cell. An if-chain is unambiguous on both builds.
+            var wx = fx;
+            if (a == 0u) { wx = 1.0 - fx; }
+            var wy = fy;
+            if (b == 0u) { wy = 1.0 - fy; }
+            var wz = fz;
+            if (c == 0u) { wz = 1.0 - fz; }
             let w = wx * wy * wz;
             acc += gridSlotIrradiance(slot, n) * w;
             wsum += w;

@@ -78,6 +78,13 @@
  *     - no ternary operator in the grid block (this Tint build rejects '?').
  *     The picture itself cannot be verified here; it is checked on the owner's hardware
  *     (docs/test-checklist-de.md, test 7).
+ *   WGSL EXECUTED (added 2026-11-23, because a headless Chromium with WebGPU is now available
+ *     on this machine): the same functions from src/render/rt.ts run on a real device, on the
+ *     table the reference packed. Declared before the numbers: integer and bit results must be
+ *     identical (tolerance 0 — hash, slot index, negative-key two's-complement, probe stop),
+ *     float results are compared as f32 with tolerance 1e-6 (the shader computes in f32, the
+ *     reference in f64). If no device is found the line says NOT VERIFIED HERE and asserts
+ *     nothing, so a pass cannot silently claim execution.
  *   file path (owner decision 2026-11-23: the grid is written ONCE at bake time by
  *     tools/write_lightgrid.mjs, the game only reads it — measured build cost is 18.9 s
  *     for this scene, which is a load screen, not a frame):
@@ -111,6 +118,7 @@ import {
 } from '../src/world/light-grid.ts';
 import { buildGridFile, lightgridManifest } from '../tools/write_lightgrid.mjs';
 import fs from 'node:fs';
+import http from 'node:http';
 
 const RES = 1024;
 const TARGET = 4096; // texels per square metre = 64 texels per metre
@@ -738,16 +746,387 @@ for (const c of checkCells) {
   for (let ch = 0; ch < 3; ch++) mirrorMax = Math.max(mirrorMax, Math.abs(wgslOut[ch] - refOut[ch]));
 }
 const usesModuleBlend = rtSrc.includes('DEFAULT_BLEND') && !block.includes('0.25');
-const gatesFromMask = block.includes('rt_gridmask.value[') && block.includes('select(');
+const gatesFromMask = block.includes('rt_gridmask.value[') && /if \(\(mask & \(1u << /.test(block);
 const cellBranch = rtSrc.slice(rtSrc.indexOf('var cellStatic'), rtSrc.indexOf('fn gridHash'));
 const readsGate = cellBranch.includes('gridBlendIrradiance(') && cellBranch.includes('skipBaked = 1.0');
-console.log(`WGSL mirror (shader TEXT, WebGPU cannot run on this machine): ${shaderValues.length} numbers, ` +
+// Trilinear weights read out of the source. Corner index 0 is the lower corner, so its weight
+// must be 1 - fraction (the fraction is the distance from corner 0). Tolerance 0. This is read
+// from the if-chain, not from select(): the executed run showed this Dawn build returns the
+// second argument of select() when the condition is true, which is the opposite of the WGSL
+// spec, so a weight written with select() is build-dependent and cannot be verified as a rule.
+const weightDiff = [];
+const axisOf = { a: 'x', b: 'y', c: 'z' };
+const weightRules = [...block.matchAll(/var w([xyz]) = f\1;[\s\S]{0,60}?if \(([abc]) == 0u\) \{ w\1 = 1\.0 - f\1; \}/g)];
+for (const m of weightRules) {
+  const axis = m[1], corner = m[2];
+  if (axisOf[corner] !== axis) weightDiff.push(`w${axis} is chosen by corner ${corner}, which is on axis ${axisOf[corner]}`);
+}
+if (weightRules.length !== 3) weightDiff.push(`found ${weightRules.length} of 3 trilinear weight rules (expected "var wX = fX;" plus an "if (C == 0u)" branch that gives 1.0 - fX)`);
+
+// The fraction has to be the distance from the lower corner, so it must be built from the
+// QUOTIENT (q - floor). Built from the floor it is always 0, and the blend silently becomes a
+// single-corner lookup — that is a real bug the executed run found, so it is asserted as a rule.
+const fractionDiff = [];
+for (const axis of ['x', 'y', 'z']) {
+  const parts = [['quotient', `let q${axis} = P\\.${axis} / cs;`], ['floor', `let g${axis} = floor\\(q${axis}\\);`],
+    ['cell index', `let i${axis} = i32\\(g${axis}\\);`], ['fraction from the quotient', `let f${axis} = q${axis} - f32\\(i${axis}\\);`]];
+  for (const [label, src] of parts) if (!new RegExp(src).test(block)) fractionDiff.push(`no ${label} line for axis ${axis}`);
+}
+console.log(`WGSL mirror (shader TEXT, compared with the module; execution is the next line): ${shaderValues.length} numbers, ` +
   `${foreign.length} not a value the module has (tolerance 0)` +
   (foreign.length ? ` [${foreign.join(', ')}]` : '') + `, hash ${hashDiff} of 500 keys differ, ` +
   `bit formula ${bitDiff} of 27 offsets differ, layout ${stride} floats / header ${header} / term ${termStride} ` +
   `+ channels ${channels.join('')}, probe limit ${probeLimit}, ternary ${ternary}, ` +
   `blend from DEFAULT_BLEND ${usesModuleBlend}, gate reads the mask ${gatesFromMask}, ` +
+  `trilinear weights ${weightDiff.length} differ (tolerance 0)` +
+  (weightDiff.length ? ` [${weightDiff.join('; ')}]` : '') + `, ` +
+  `fraction from the quotient ${fractionDiff.length} differ (tolerance 0)` +
+  (fractionDiff.length ? ` [${fractionDiff.join('; ')}]` : '') + `, ` +
   `dynamic branch uses it + sets skipBaked ${readsGate}, slot values ${mirrorMax.toExponential(1)} (tolerance 1e-6)`);
+
+// 6b) WGSL EXECUTED on a real device. The mirror above compares TEXT, which cannot prove that
+//    the shader runs or that its casts preserve bits — that needs a device. Tolerances, declared
+//    before the numbers (the same ones as in the mirror, they cannot be changed by the result):
+//      - integer and bit results must match the reference exactly (tolerance 0): hash, slot index,
+//        the negative-key two's-complement conversion, the probe-limit stop value;
+//      - float results are compared as f32 with tolerance 1e-6, because the shader computes in f32
+//        and the reference in f64 — a bit-exact float comparison is not a meaningful claim here;
+//      - the neighbour gate must actually be exercised: at least one test point must have a corner
+//        the reference gates, otherwise the gate path is not tested (reported).
+//    If no browser with a WebGPU device is found, this section prints "NOT VERIFIED HERE" and
+//    asserts nothing, so the pass line cannot silently claim execution.
+//    What runs is the text from src/render/rt.ts, not a reimplementation. Only the storage access
+//    is written the way a standalone module needs it; which form the parser accepts is reported.
+const EXEC_TOL = 1e-6;
+const EXEC_TESTS = 64;
+const chromePath = process.env.CHROME ??
+  (fs.globSync?.(`${process.env.HOME}/Library/Caches/ms-playwright/chromium-*/chrome-mac-*/**/MacOS/Google Chrome for Testing`).at(-1) ?? '/usr/bin/chromium');
+let execLine = `WGSL executed (device): NOT VERIFIED HERE — no browser found (${chromePath})`;
+if (fs.existsSync(chromePath)) {
+  let browser = null, server = null;
+  try {
+    const puppeteer = await import('puppeteer-core');
+    browser = await puppeteer.launch({ executablePath: chromePath, headless: true, args: ['--enable-unsafe-webgpu'] });
+    // WebGPU needs a secure context, so the page is served on localhost, not from about:blank.
+    server = http.createServer((_q, res) => { res.writeHead(200, { 'content-type': 'text/html' }); res.end('<title>wgsl exec</title>'); });
+    await new Promise((r) => server.listen(0, '127.0.0.1', r));
+    const page = await browser.newPage();
+    await page.goto(`http://localhost:${server.address().port}`, { waitUntil: 'domcontentloaded' });
+
+    const bits32 = (v) => new Uint32Array(new Float32Array([v]).buffer)[0];
+    const bitsI32 = (v) => new Uint32Array(new Int32Array([v]).buffer)[0];
+    const b64 = (a) => Buffer.from(a.buffer, a.byteOffset, a.byteLength).toString('base64');
+
+    // header: hash mask, blend strength, cell size, test count. Then per test: key(3) + normal(3) + point(3).
+    const tests = new Uint32Array(4 + EXEC_TESTS * 9);
+    tests[0] = table.slotCount - 1;
+    tests[1] = bits32(DEFAULT_BLEND);
+    // the cell size the shader sees is the f32 value, so the reference uses the same number here
+    const execCellSize = Math.fround(grid.cellSize);
+    tests[2] = bits32(execCellSize);
+    const rows = [];
+    for (const c of checkCells) {
+      if (rows.length >= EXEC_TESTS) break;
+      const [ix, iy, iz] = c.key.split(',').map(Number);
+      const n = c.kind === 'surface' ? [c.nx, c.ny, c.nz] : UP;
+      if (Math.max(...n) === 0) continue;
+      const keys = [[ix, iy, iz]];
+      // every second test flips the sign: that is the two's-complement path the shader's
+      // bitcast<u32>() has to agree with, on a key the reference produced, not an invented one.
+      if (rows.length % 2 === 1) keys.push([-ix, -iy, -iz]);
+      for (const k of keys) {
+        if (rows.length >= EXEC_TESTS) break;
+        const at = 4 + rows.length * 9;
+        for (let i = 0; i < 3; i++) tests[at + i] = bitsI32(k[i]);
+        for (let i = 0; i < 3; i++) tests[at + 3 + i] = bits32(Math.fround(n[i]));
+        const off = (rows.length % 2) * 0.31 * execCellSize;
+        const p = [Math.fround(c.px + off), Math.fround(c.py + off), Math.fround(c.pz + off)];
+        for (let i = 0; i < 3; i++) tests[at + 6 + i] = bits32(p[i]);
+        rows.push({ key: k, n: [Math.fround(n[0]), Math.fround(n[1]), Math.fround(n[2])], p });
+      }
+    }
+    tests[3] = rows.length;
+
+    // Which declaration shape the device accepts is measured, not assumed. In the game the
+    // storage node is printed by TSL; a standalone module has to declare it itself.
+    const structHead = `struct GridTable { value: array<f32> }
+struct MaskTable { value: array<u32> }
+@group(0) @binding(0) var<storage, read> rt_grid: GridTable;
+@group(0) @binding(1) var<storage, read> rt_gridmask: MaskTable;
+`;
+    const plainHead = `@group(0) @binding(0) var<storage, read> rt_grid: array<f32>;
+@group(0) @binding(1) var<storage, read> rt_gridmask: array<u32>;
+`;
+    const renamedBlock = block.replace(/rt_grid\.value\[/g, 'rt_grid[').replace(/rt_gridmask\.value\[/g, 'rt_gridmask[');
+    const mainBody = `
+      @compute @workgroup_size(${EXEC_TESTS})
+      fn main(@builtin(global_invocation_index) i: u32) {
+        if (i >= tests[3]) { return; }   // only the tests that exist are read
+        let hmask = tests[0];
+        let strength = bitcast<f32>(tests[1]);
+        let cs = bitcast<f32>(tests[2]);
+        let b = 4u + i * 9u;
+        var key = vec3<i32>(bitcast<i32>(tests[b]), bitcast<i32>(tests[b + 1u]), bitcast<i32>(tests[b + 2u]));
+        let n = vec3f(bitcast<f32>(tests[b + 3u]), bitcast<f32>(tests[b + 4u]), bitcast<f32>(tests[b + 5u]));
+        let P = vec3f(bitcast<f32>(tests[b + 6u]), bitcast<f32>(tests[b + 7u]), bitcast<f32>(tests[b + 8u]));
+        let o = i * 27u;   // record: hash, slot, 3 single, 3 blend, mask, counted, weight sum, 8 corner slots, 8 weights
+        out[o] = gridHash(key.x, key.y, key.z, hmask);
+        let slot = gridSlotAt(key.x, key.y, key.z, hmask);
+        out[o + 1u] = bitcast<u32>(slot);
+        let e = gridSlotIrradiance(slot, n);
+        out[o + 2u] = bitcast<u32>(e.x); out[o + 3u] = bitcast<u32>(e.y); out[o + 4u] = bitcast<u32>(e.z);
+        let bl = gridBlendIrradiance(P, n, cs, strength, hmask);
+        out[o + 5u] = bitcast<u32>(bl.x); out[o + 6u] = bitcast<u32>(bl.y); out[o + 7u] = bitcast<u32>(bl.z);
+        // The 27 bits the shader actually read for the cell the point is in, plus how many
+        // corners it counted and the sum of its weights. This localises a blend difference:
+        // either the gate decides differently, or one corner's value does. If-form everywhere —
+        // WGSL has no ternary, which is what this build rejected on the first run.
+        let qx = P.x / cs;
+        let qy = P.y / cs;
+        let qz = P.z / cs;
+        let gx = floor(qx);
+        let gy = floor(qy);
+        let gz = floor(qz);
+        let ix = i32(gx);
+        let iy = i32(gy);
+        let iz = i32(gz);
+        let fx = qx - f32(ix);
+        let fy = qy - f32(iy);
+        let fz = qz - f32(iz);
+        let ownp = gridSlotAt(ix, iy, iz, hmask);
+        var omask: u32 = 4294967295u;
+        if (ownp >= 0) { omask = MASK_READ; }
+        out[o + 8u] = omask;
+        var counted: u32 = 0u;
+        var wsum = 0.0;
+        for (var a: u32 = 0u; a < 2u; a = a + 1u) {
+          for (var bb: u32 = 0u; bb < 2u; bb = bb + 1u) {
+            for (var c: u32 = 0u; c < 2u; c = c + 1u) {
+              let s = gridSlotAt(ix + i32(a), iy + i32(bb), iz + i32(c), hmask);
+              if (s < 0) { continue; }
+              if ((omask & (1u << ((a + 1u) * 9u + (bb + 1u) * 3u + (c + 1u)))) == 0u) { continue; }
+              var wx = fx;
+              if (a == 0u) { wx = 1.0 - fx; }
+              var wy = fy;
+              if (bb == 0u) { wy = 1.0 - fy; }
+              var wz = fz;
+              if (c == 0u) { wz = 1.0 - fz; }
+              wsum += wx * wy * wz;
+              counted = counted + 1u;
+            }
+          }
+        }
+        out[o + 9u] = counted;
+        out[o + 10u] = bitcast<u32>(wsum);
+        // the weight the shader used for each corner, so a differing sum can be read corner by
+        // corner instead of being guessed
+        var w: u32 = 0u;
+        for (var a2: u32 = 0u; a2 < 2u; a2 = a2 + 1u) {
+          for (var b2: u32 = 0u; b2 < 2u; b2 = b2 + 1u) {
+            for (var c2: u32 = 0u; c2 < 2u; c2 = c2 + 1u) {
+              let s2 = gridSlotAt(ix + i32(a2), iy + i32(b2), iz + i32(c2), hmask);
+              out[o + 11u + w] = bitcast<u32>(s2);
+              var wx2 = fx;
+              if (a2 == 0u) { wx2 = 1.0 - fx; }
+              var wy2 = fy;
+              if (b2 == 0u) { wy2 = 1.0 - fy; }
+              var wz2 = fz;
+              if (c2 == 0u) { wz2 = 1.0 - fz; }
+              out[o + 19u + w] = bitcast<u32>(wx2 * wy2 * wz2);
+              w = w + 1u;
+            }
+          }
+        }
+      }`;
+    const exec = await page.evaluate(async ({ gridB64, maskB64, testsB64, forms, mainBody, testCount }) => {
+      const adapter = await navigator.gpu.requestAdapter();
+      if (!adapter) return { device: false };
+      const device = await adapter.requestDevice();
+      // getCompilationInfo() reports nothing on this build, so the device error is the
+      // honest source: a shader that fails here must not look like a run that produced zeros.
+      const deviceErrors = [];
+      device.onuncapturederror = (e) => deviceErrors.push(e.error.message);
+      const decode = (s, Ctor) => {
+        const bin = atob(s);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        return new Ctor(bytes.buffer);
+      };
+      // writeBuffer needs COPY_DST: without it the write is silently refused and the shader
+      // reads zeros, which a comparison would then report as "the shader produced 0". Both
+      // directions are needed here, so one usage flag covers all buffers.
+      const STORAGE_RW = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
+      const buf = (arr) => {
+        const b = device.createBuffer({ size: arr.byteLength, usage: STORAGE_RW });
+        device.queue.writeBuffer(b, 0, arr);
+        return b;
+      };
+      // The game's text uses `rt_grid.value[i]`, which is what the TSL storage node prints.
+      // A standalone module needs a declaration for that shape; the fallback is the plain
+      // storage-array form. Which one the parser accepts is reported, not assumed.
+      const bind = `@group(0) @binding(2) var<storage, read> tests: array<u32>;
+@group(0) @binding(3) var<storage, read_write> out: array<u32>;
+`;
+      let used = null, parseError = null;
+      for (const form of forms) {
+        const code = form.head + bind + form.text + mainBody.replace('MASK_READ', form.maskRead);
+        try {
+          const module = device.createShaderModule({ code });
+          if (module.getCompilationInfo) {
+            const info = await module.getCompilationInfo();
+            if (info.messages.some((m) => m.type === 'error')) { parseError = info.messages.map((m) => m.message).join('; '); continue; }
+          }
+          used = { ...form, code };
+          break;
+        } catch (e) { parseError = String(e); }
+      }
+      if (!used) return { device: true, parseError };
+      const pipeline = device.createComputePipeline({ layout: 'auto', compute: { module: device.createShaderModule({ code: used.code }), entryPoint: 'main' } });
+      const gridBuf = buf(decode(gridB64, Float32Array));
+      const maskBuf = buf(decode(maskB64, Uint32Array));
+      const testsBuf = buf(decode(testsB64, Uint32Array));
+      const bytes = testCount * 27 * 4;
+      const outBuf = device.createBuffer({ size: bytes, usage: STORAGE_RW });
+      const readback = device.createBuffer({ size: bytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+      const buffers = [gridBuf, maskBuf, testsBuf, outBuf];
+      const entries = buffers.map((b, i) => ({ binding: i, resource: b }));
+      let bindGroup;
+      try {
+        bindGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries });
+      } catch {
+        // older Dawn builds read the entry member as `buffer` instead of `resource`
+        bindGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: entries.map((e) => ({ binding: e.binding, buffer: e.resource })) });
+      }
+      const enc = device.createCommandEncoder();
+      const pass = enc.beginComputePass();
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, bindGroup);
+      pass.dispatchWorkgroups(1);   // one workgroup of EXEC_TESTS invocations
+      pass.end();
+      enc.copyBufferToBuffer(outBuf, 0, readback, 0, bytes);
+      device.queue.submit([enc.finish()]);
+      await readback.mapAsync(GPUMapMode.READ);
+      await new Promise((r) => setTimeout(r, 300));   // give the device time to report errors
+      // a device error means something was refused (a write, a binding, a read out of range);
+      // in that case the numbers below cannot be trusted, so they are reported as such.
+      return {
+        device: true,
+        out: Array.from(new Uint32Array(readback.getMappedRange().slice(0))),
+        usedForm: used.label,
+        deviceErrors,
+      };
+    }, { gridB64: b64(table.data), maskB64: b64(table.neighbourMask), testsB64: b64(tests), forms: [{ head: structHead, text: block, label: 'the text exactly as written in rt.ts', maskRead: 'rt_gridmask.value[bitcast<u32>(ownp)]' }, { head: plainHead, text: renamedBlock, label: 'same text with plain storage arrays', maskRead: 'rt_gridmask[bitcast<u32>(ownp)]' }], mainBody, testCount: rows.length });
+
+    if (!exec.device) {
+      execLine = `WGSL executed (device): NOT VERIFIED HERE — no adapter on ${chromePath}`;
+    } else if (exec.parseError) {
+      // reported, not worked around: the game's own text is what is being tested
+      execLine = `WGSL executed (device): the game's text as-is did not parse (${exec.parseError.slice(0, 200)})`;
+    } else {
+      if (exec.deviceErrors?.length) {
+        throw new Error(`executed WGSL: the device refused something, so these numbers are not a shader result | ${exec.deviceErrors[0].slice(0, 240)}`);
+      }
+      let intDiff = 0, floatMax = 0, singleMax = 0, blendMax = 0, gatedTests = 0, emptySlots = 0, maskDiff = 0,
+        countedDiff = 0, wsumMax = 0, slotDiff = 0, firstIntDiff = null, firstFloatDiff = null, firstMaskDiff = null,
+        firstCountedDiff = null, firstWsumDiff = null, firstSlotDiff = null;
+      const sample = { ownSlot: -1, slots: [], weights: [], missing: 0, gated: 0 };
+      for (let i = 0; i < rows.length; i++) {
+        const r = rows[i];
+        const got = exec.out.slice(i * 27, i * 27 + 27);
+        const asF32 = (w) => new Float32Array(new Uint32Array([w]).buffer)[0];
+        const asI32 = (w) => new Int32Array(new Uint32Array([w]).buffer)[0];
+        const hRef = hashCellKey(r.key[0], r.key[1], r.key[2], table.slotCount - 1) >>> 0;
+        const sRef = packedSlot(table, r.key[0], r.key[1], r.key[2], PROBE_LIMIT);
+        if (got[0] !== hRef) { intDiff++; if (!firstIntDiff) firstIntDiff = `row ${i} key ${r.key.join(',')} gpu ${got[0]} ref ${hRef}`; }
+        if (bitsI32(sRef) !== got[1]) { intDiff++; if (!firstIntDiff) firstIntDiff = `row ${i} key ${r.key.join(',')} gpu slot ${got[1]} ref slot ${sRef}`; }
+        // The cell the point is in (f32 division, as the shader does it), and the mask word its
+        // own branch reads — for a flipped key this is not the key's own cell, so the check uses
+        // the point, which is what the gate is defined on.
+        // The cell and the fractions are computed the way the shader computes them: an f32
+        // division, then floor, then the subtraction. Comparing an exact f64 fraction with an
+        // f32 one would report the rounding itself as a difference.
+        const qx = Math.fround(r.p[0] / execCellSize), qy = Math.fround(r.p[1] / execCellSize), qz = Math.fround(r.p[2] / execCellSize);
+        const gx = Math.floor(qx), gy = Math.floor(qy), gz = Math.floor(qz);
+        const fx = Math.fround(qx - gx), fy = Math.fround(qy - gy), fz = Math.fround(qz - gz);
+        const ownRef = packedSlot(table, gx, gy, gz, PROBE_LIMIT);
+        const mRef = ownRef >= 0 ? table.neighbourMask[ownRef] : 0xffffffff;
+        if (got[8] !== mRef) { maskDiff++; if (!firstMaskDiff) firstMaskDiff = `row ${i} key ${r.key.join(',')} gpu mask ${got[8]} ref mask ${mRef}`; }
+        const ref = new Float64Array(3);
+        if (sRef >= 0) packedIrradiance(table, sRef, r.n, ref);
+        for (let ch = 0; ch < 3; ch++) {
+          const d = Math.abs(asF32(got[2 + ch]) - ref[ch]);
+          if (d > singleMax) singleMax = d;
+          floatMax = Math.max(floatMax, d);
+        }
+        packedBlend(table, r.p[0], r.p[1], r.p[2], execCellSize, sample, PROBE_LIMIT);
+        packedBlendIrradiance(table, sample, r.n, ref, DEFAULT_BLEND);
+        for (let ch = 0; ch < 3; ch++) {
+          const d = Math.abs(asF32(got[5 + ch]) - ref[ch]);
+          if (d > blendMax) {
+            blendMax = d;
+            firstFloatDiff = `row ${i} key ${r.key.join(',')} p [${r.p.join(',')}] channel ${ch}: gpu ${asF32(got[5 + ch])} ref ${ref[ch]} | ` +
+              `own ${sample.ownSlot} counted corners ${sample.slots.length} gated ${sample.gated} missing ${sample.missing} ` +
+              `weights [${sample.weights.map((w) => w.toFixed(4)).join(',')}]`;
+          }
+        }
+        // Which corners the shader counted, compared with the reference's count and raw weight
+        // sum (the reference's own functions, not a copy of the shader). This is what tells a
+        // gate difference apart from a rounding difference.
+        let cRef = 0, rawRef = 0;
+        const cornerDetail = [];
+        const refSlots = [];
+        for (let a = 0; a < 2; a++) for (let b = 0; b < 2; b++) for (let c = 0; c < 2; c++) {
+          const s = packedSlot(table, gx + a, gy + b, gz + c, PROBE_LIMIT);
+          refSlots.push(s);
+          const gpuSlot = asI32(got[11 + a * 4 + b * 2 + c]);
+          if (s !== gpuSlot) { slotDiff++; if (!firstSlotDiff) firstSlotDiff = `row ${i} key ${r.key.join(',')} corner ${a}${b}${c}: gpu slot ${gpuSlot}, reference ${s}`; }
+          if (s < 0) { cornerDetail.push(`${a}${b}${c}:not in table`); continue; }
+          const w = (a === 0 ? 1 - fx : fx) * (b === 0 ? 1 - fy : fy) * (c === 0 ? 1 - fz : fz);
+          if ((mRef & (1 << neighbourBit(a, b, c))) === 0) { cornerDetail.push(`${a}${b}${c}:slot ${s} gated`); continue; }
+          cornerDetail.push(`${a}${b}${c}:slot ${s} w ${w.toFixed(4)}`);
+          rawRef += w;
+          cRef++;
+        }
+        if (got[9] !== cRef) { countedDiff++; if (!firstCountedDiff) firstCountedDiff = `row ${i} key ${r.key.join(',')}: gpu counts ${got[9]}, reference ${cRef}`; }
+        if (Math.abs(asF32(got[10]) - rawRef) > wsumMax) {
+          wsumMax = Math.abs(asF32(got[10]) - rawRef);
+          firstWsumDiff = `row ${i} key ${r.key.join(',')} p [${r.p.join(',')}] cell [${gx},${gy},${gz}] fractions [${fx.toFixed(4)},${fy.toFixed(4)},${fz.toFixed(4)}]: ` +
+            `gpu counts ${got[9]} weight sum ${asF32(got[10]).toFixed(6)}, reference counts ${cRef} sum ${rawRef.toFixed(6)} | ` +
+            `reference: ${cornerDetail.join(' | ')} | gpu: ${[...Array(8)].map((_, j) => `${(j >> 2) & 1}${(j >> 1) & 1}${j & 1}:slot ${asI32(got[11 + j])} weight ${asF32(got[19 + j]).toFixed(6)}`).join(' | ')}`;
+        }
+        if (sample.gated > 0) gatedTests++;
+        if (sRef < 0) emptySlots++;
+      }
+      // the declared tolerances, asserted here so the numbers cannot soften them
+      if (intDiff > 0) throw new Error(`executed WGSL differs from the reference on integers: ${intDiff} | first: ${firstIntDiff}`);
+      if (maskDiff > 0) throw new Error(`executed WGSL reads a different neighbour mask than the reference: ${maskDiff} | first: ${firstMaskDiff}`);
+      if (countedDiff > 0) throw new Error(`executed WGSL counts a different number of corners than the reference: ${countedDiff} | first: ${firstCountedDiff}`);
+      if (slotDiff > 0) throw new Error(`executed WGSL finds a different corner slot than the reference: ${slotDiff} | first: ${firstSlotDiff}`);
+      if (wsumMax > EXEC_TOL) throw new Error(`executed WGSL weight sum differs from the reference by ${wsumMax.toExponential(3)}, above ${EXEC_TOL} | ${firstWsumDiff}`);
+      if (floatMax > EXEC_TOL) {
+        throw new Error(`executed WGSL exceeds the f32 tolerance: ${floatMax.toExponential(3)} > ${EXEC_TOL} ` +
+          `(single slot ${singleMax.toExponential(3)}, blend ${blendMax.toExponential(3)}) | first: ${firstFloatDiff}`);
+      }
+      execLine = `WGSL executed on a real device (${exec.usedForm}): ` +
+        `${rows.length} tests, integer ${intDiff} differ (tolerance 0), mask ${maskDiff} differ (tolerance 0), ` +
+        `corner slots ${slotDiff} differ (tolerance 0), counted corners ${countedDiff} differ (tolerance 0), ` +
+        `weight sum ${wsumMax.toExponential(1)}, ` +
+        `float single ${singleMax.toExponential(1)} blend ${blendMax.toExponential(1)} (tolerance ${EXEC_TOL}), ` +
+        `${emptySlots} lookups land on an empty slot (the negative-key path), ` +
+        `${gatedTests} tests exercise the neighbour gate`;
+    }
+    await browser.close();
+    server.close();
+  } catch (e) {
+    // an assertion failure must not be turned into a soft "not verified" line
+    const assertion = String(e).startsWith('executed WGSL');
+    if (!assertion) execLine = `WGSL executed (device): NOT VERIFIED HERE — ${String(e)}`;
+    if (browser) await browser.close();
+    if (server) server.close();
+    if (assertion) throw e;
+  }
+}
+console.log(execLine);
 
 // 7) UV row convention + manifest block. tools/bake_map.py is the only side that knows Blender's
 //    island layout, so it writes the inputs and the tool does the maths. The flip is the part
@@ -850,6 +1229,8 @@ if (ternary) throw new Error(`the grid block contains ${ternary} ternary operato
 if (!usesModuleBlend) throw new Error('the shader hardcodes a blend strength instead of taking DEFAULT_BLEND from the module, so a change there would not change the picture');
 if (!gatesFromMask) throw new Error('the shader does not read the neighbour mask — a pixel would cast a ray per corner or ignore visibility');
 if (!readsGate) throw new Error('the dynamic-pixel branch does not use the cell reading, or does not apply the no-double-lighting rule there');
+if (weightDiff.length) throw new Error(`the trilinear weights are not the trilinear rule: ${weightDiff.join('; ')}`);
+if (fractionDiff.length) throw new Error(`the trilinear fraction is not built from the quotient: ${fractionDiff.join('; ')}`);
 if (mirrorMax > 1e-6) throw new Error(`the shader's evaluation path differs from the reference by ${mirrorMax.toExponential(1)}, above the f32 rounding tolerance 1e-6`);
 if (!pySrc.includes('def write_grid_source')) throw new Error('tools/bake_map.py does not write the grid inputs, so the game has nothing to build the file from');
 if (!flipRule) throw new Error('the Python writer no longer writes the UV convention this check mirrors (v must be written as 1 - v)');
