@@ -11,7 +11,9 @@ Collection scheme (see docs/blender-conventions.md):
     sound        -> manifest.sound[]         speaker objects -> 3D audio sources
     playermodels -> playermodels.glb         selectable avatars (one root each)
 
-Any other top-level collection is listed in manifest.json under "skipped".
+Any other top-level collection is listed in manifest.json under "skipped". A sub-collection
+is attributed to its top-level ancestor under "subCollections" — its objects export through
+that ancestor, so a sub-collection name is never reported as a skipped collection.
 
 Every run ends with an emissive audit: the whole file is scanned for materials
 with emission strength > 0 and each one is reported — exported fixtures with
@@ -26,6 +28,11 @@ default so geometry is never changed unless the author asks for it.
 import json
 import os
 import sys
+
+# the material-field helpers are shared with bake_map.py, which re-exports objects.glb after the
+# bake and must apply the same rule to the file that actually ships (see tools/glb_fields.py).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from glb_fields import GLTF_DEFAULTS, PRINCIPLED_INPUTS, authored_fields, glb_chunks, glb_json, write_material_fields
 
 import bpy
 
@@ -265,12 +272,10 @@ def object_emission(obj):
     return best
 
 
-def top_level_collections(obj):
-    """Root-level collection names holding the object (walks out of sub-collections).
-
-    Collection has no parent pointer, so the tree is walked from each scene's
-    master collection (cached — one export scans the scene a few times).
-    """
+def top_map():
+    """collection name -> top-level ancestor. Collection has no parent pointer, so the
+    tree is walked from each scene's master collection (cached — one export scans the
+    scene a few times). Direct children of a master collection are tops themselves."""
     global _TOP_OF
     if _TOP_OF is None:
         _TOP_OF = {}
@@ -281,13 +286,16 @@ def top_level_collections(obj):
                 walk(child, top)
 
         for scene in bpy.data.scenes:
-            # direct children of the master collection are tops themselves
             for child in scene.collection.children:
                 walk(child, child.name)
+    return _TOP_OF
 
+
+def top_level_collections(obj):
+    """Root-level collection names holding the object (walks out of sub-collections)."""
     names = []
     for coll in obj.users_collection:
-        top = _TOP_OF.get(coll.name, coll.name)
+        top = top_map().get(coll.name, coll.name)
         if top not in names:
             names.append(top)
     return names
@@ -308,21 +316,29 @@ def skip_reason(obj):
     return f"in skipped collection '{tops[0]}'"
 
 
-def glb_json(path):
-    """Parse a .glb's JSON chunk — node/material structure survives Draco."""
-    import struct
+# The glTF 2.0 material defaults, checked against the spec schema files (material.schema.json,
+# material.pbrMetallicRoughness.schema.json, the KHR_materials_emissive_strength README).
+GLTF_DEFAULTS = {
+    "baseColorFactor": [1.0, 1.0, 1.0, 1.0],
+    "metallicFactor": 1.0,
+    "roughnessFactor": 1.0,
+    "emissiveFactor": [0.0, 0.0, 0.0],
+    "emissiveStrength": 1.0,
+}
 
-    try:
-        with open(path, "rb") as fh:
-            header = fh.read(12)
-            if len(header) != 12 or header[:4] != b"glTF":
-                return None
-            clen, ctype = struct.unpack("<II", fh.read(8))
-            if ctype != 0x4E4F534A:  # 'JSON' chunk type
-                return None
-            return json.loads(fh.read(clen).decode("utf-8"))
-    except (OSError, ValueError, struct.error):
-        return None
+# field name in the file -> Blender Principled input name
+PRINCIPLED_INPUTS = {
+    "baseColorFactor": "Base Color",
+    "metallicFactor": "Metallic",
+    "roughnessFactor": "Roughness",
+    "emissiveFactor": "Emission Color",
+    "emissiveStrength": "Emission Strength",
+}
+
+
+# glb_json, glb_chunks, authored_fields, write_material_fields, GLTF_DEFAULTS and
+# PRINCIPLED_INPUTS come from tools/glb_fields.py, so bake_map.py uses the same code path on the
+# re-exported file instead of a copy.
 
 
 def glb_emissive_nodes(data):
@@ -343,6 +359,64 @@ def glb_emissive_nodes(data):
         if node.get("name") and any(p.get("material") in emitting for p in meshes[mi].get("primitives", [])):
             names.add(node["name"])
     return names
+
+
+def audit_material_defaults(exported_by_file, out_dir):
+    """What the file actually says about each authored material value.
+
+    Every field is now written by write_material_fields(), so `written` is true for all five fields
+    of every material and no value can be assumed. The audit still compares both sides and writes
+    the answer down: `notDefault` flags a value in the file that is NOT the spec default — Blender's
+    Principled defaults are Emission Color (1,1,1) and Emission Strength 0, while the glTF defaults
+    are emissiveFactor [0,0,0] and emissiveStrength 1.0, so an emission-off material is a real
+    difference that has to be recorded. `defaultsUsed` only appears for a field the file does not
+    write, and a field that is absent AND not equal to the default is a loud EXPORT WARNING, because
+    that one really is lost.
+
+    Defaults from the glTF 2.0 schema (GLTF_DEFAULTS) and the KHR_materials_emissive_strength README.
+    Returns manifest["materialDefaults"].
+    """
+    defaults = GLTF_DEFAULTS
+    entries = []
+    lost = []
+    for fname, objs in exported_by_file.items():
+        data = glb_json(os.path.join(out_dir, fname))
+        if data is None:
+            continue
+        for mat_json in data.get("materials", []):
+            authored = authored_fields(bpy.data.materials.get(mat_json.get("name") or ""))
+            if authored is None:
+                continue
+            entry = {"material": mat_json.get("name"), "file": fname, "written": {},
+                     "defaultsUsed": {}, "notDefault": {}}
+            for field in PRINCIPLED_INPUTS:
+                written = (mat_json.get("pbrMetallicRoughness") or {}).get(field)
+                if field == "emissiveStrength":
+                    written = ((mat_json.get("extensions") or {}).get("KHR_materials_emissive_strength") or {}).get("emissiveStrength")
+                elif field == "emissiveFactor":
+                    written = mat_json.get("emissiveFactor")
+                entry["written"][field] = written is not None
+                default = defaults[field]
+                same = ([round(v, 6) for v in default] if isinstance(default, list) else round(default, 6)) == (
+                    authored[field] if isinstance(authored[field], list) else round(authored[field], 6))
+                if written is None:
+                    entry["defaultsUsed"][field] = default
+                    if not same:
+                        entry["notDefault"][field] = authored[field]
+                        lost.append((mat_json.get("name"), field, authored[field], default))
+                elif not same:
+                    # the value is in the file, so nothing is hidden — but the file says something
+                    # different from the spec default, and the reader must be told which.
+                    entry["notDefault"][field] = written
+            entries.append(entry)
+
+    print(f"export_map: material defaults audit: {len(entries)} material(s), "
+          f"{sum(len(e['defaultsUsed']) for e in entries)} field(s) not written (glTF default used), "
+          f"{sum(len(e['notDefault']) for e in entries)} written value(s) flagged as not the default")
+    for mat, field, authored, default in lost:
+        print(f"export_map: EXPORT WARNING: material '{mat}' authored {field} = {authored} but the file "
+              f"writes nothing, so a reader takes the glTF default {default} — that value is lost")
+    return entries
 
 
 def audit_emissive(exported_by_file, out_dir):
@@ -431,7 +505,8 @@ def main():
     out_dir = args.get("out", os.path.join(os.getcwd(), "assets", "map"))
     os.makedirs(out_dir, exist_ok=True)
 
-    manifest = {"collections": {}, "checkpoints": [], "sound": [], "skipped": [], "emissive": {}, "skippedEmissive": []}
+    manifest = {"collections": {}, "checkpoints": [], "sound": [], "skipped": [],
+                "subCollections": {}, "emissive": {}, "skippedEmissive": [], "materialDefaults": []}
     exported_by_file = {fname: [] for _, fname, _ in MESH_EXPORTS}
     bpy.ops.object.select_all(action="DESELECT")
 
@@ -451,6 +526,22 @@ def main():
             "bounds": world_bounds(exported),
         }
 
+    # ---- every material field must be IN the file ------------------------------------
+    # Owner decision 2026-11-23: a field that is not in the file cannot be checked at tolerance 0,
+    # so the exporter writes all five for every material. The values are the authored ones, so the
+    # game renders exactly the same picture; only the record changes. bake_map.py re-exports
+    # objects.glb after the bake, which writes only the fields that differ from the default, so the
+    # same rule is applied there too — the audit below reads the file at this moment and can only be
+    # truthful if the last write of the file keeps the fields.
+    for fname in exported_by_file:
+        path = os.path.join(out_dir, fname)
+        if not os.path.exists(path):
+            continue
+        present, added = write_material_fields(path)
+        print(f"export_map: {fname}: {present} field(s) already written, {added} added "
+              f"({present + added} of {5 * len(glb_json(path).get('materials', []))} for "
+              f"{len(glb_json(path).get('materials', []))} material(s))")
+
     # ---- checkpoint + sound side channels ---------------------------------
     ck_coll = bpy.data.collections.get("checkpoints")
     if ck_coll is not None:
@@ -461,10 +552,29 @@ def main():
         manifest["sound"] = export_sound(snd_coll)
 
     # ---- anything else ------------------------------------------------------
+    # A sub-collection name cannot decide anything on its own: its objects are exported
+    # through its TOP-LEVEL ancestor (all_objects is recursive, so geometry inside a
+    # sub-collection of an exported collection does reach the .glb). So the warning is
+    # resolved to the ancestor before it fires, and the attribution itself is written into
+    # the manifest — a name that belongs to an exported ancestor is not a skipped collection.
+    tops = top_map()
+    subs = {}
+    warned = []
     for coll in bpy.data.collections:
-        if coll.name not in KNOWN:
-            manifest["skipped"].append(coll.name)
-            print(f"export_map: WARNING unknown top-level collection '{coll.name}' (not exported)")
+        top = tops.get(coll.name, coll.name)
+        if coll.name != top:
+            subs[coll.name] = top
+            if top in KNOWN:
+                print(f"export_map: collection '{coll.name}' is a sub-collection of '{top}' "
+                      f"(its objects export through that top-level collection)")
+                continue
+        elif top in KNOWN:
+            continue
+        if top not in warned:
+            warned.append(top)
+            manifest["skipped"].append(top)
+            print(f"export_map: WARNING unknown top-level collection '{top}' (not exported)")
+    manifest["subCollections"] = subs
 
     # ---- emissive audit (whole file — catches glows that reached no .glb) ---
     # Guarded: the glbs are already written by now, so an audit bug must not
@@ -476,6 +586,18 @@ def main():
 
         traceback.print_exc()
         print("export_map: EXPORT WARNING: emissive audit failed — manifest written without it")
+
+    # ---- what the file wrote per material value ------------------------------
+    # An absent field means "glTF default", not "lost value" — but only when the authored value
+    # is that default. The audit compares both sides and writes the result into the manifest, so
+    # the reader never has to assume anything about a field that is not in the file.
+    try:
+        manifest["materialDefaults"] = audit_material_defaults(exported_by_file, out_dir)
+    except Exception:
+        import traceback
+
+        traceback.print_exc()
+        print("export_map: material defaults audit failed — manifest written without it")
 
     manifest_path = os.path.join(out_dir, "manifest.json")
     with open(manifest_path, "w", encoding="utf-8") as fh:

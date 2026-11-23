@@ -781,22 +781,12 @@ def save_lightmap_bin(linear_rgb, resolution, path):
     return len(data), err
 
 
-def glb_json(path):
-    """Parse a .glb's JSON chunk — copy of export_map.glb_json (that module
-    runs its whole export at import time, so it can't be imported here)."""
-    import struct
-
-    try:
-        with open(path, "rb") as fh:
-            header = fh.read(12)
-            if len(header) != 12 or header[:4] != b"glTF":
-                return None
-            clen, ctype = struct.unpack("<II", fh.read(8))
-            if ctype != 0x4E4F534A:  # 'JSON' chunk type
-                return None
-            return json.loads(fh.read(clen).decode("utf-8"))
-    except (OSError, ValueError, struct.error):
-        return None
+# glb_json and write_material_fields come from tools/glb_fields.py. export_map.py cannot be
+# imported here (it runs its whole export at import time), but the shared module has no side
+# effects, so both scripts use the same code path — which is what keeps the material-field rule
+# applied to the file that actually ships.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from glb_fields import glb_json, write_material_fields
 
 
 def export_objects_glb(out_dir):
@@ -804,8 +794,10 @@ def export_objects_glb(out_dir):
 
     The glTF call is a copy of export_map.export_glb for the objects
     collection (animations off) — kept in sync by hand because export_map.py
-    can't be imported (see glb_json above). Only the selection differs from a
-    plain export: UV2 is already on the meshes at this point.
+    can't be imported (it runs its whole export at import time). Only the
+    selection differs from a plain export: UV2 is already on the meshes at
+    this point. The material fields come from tools/glb_fields.py, the same
+    code path export_map.py uses.
     """
     coll = bpy.data.collections.get(LIGHTMAP_COLLECTION)
     if coll is None:
@@ -831,6 +823,14 @@ def export_objects_glb(out_dir):
     )
     print(f"bake_map: re-exported objects.glb ({len(mesh_objects)} objects, "
           f"{os.path.getsize(path) // 1024} KB)")
+    # The plain re-export writes only the fields that differ from the glTF default, so it undoes
+    # what export_map.py wrote earlier in the same run. Applying the same rule here is what makes
+    # the manifest claim true for the file that ships: measured on the test map, the re-export
+    # dropped all 29 fields export_map had added, while materialDefaults still said every field
+    # was written. The audit and the check now read the same file.
+    present, added = write_material_fields(path)
+    print(f"bake_map: objects.glb has {present + added} of {5 * len((glb_json(path) or {}).get('materials', []))} "
+          f"material fields ({present} already written by the exporter, {added} added here)")
     return True
 
 
@@ -902,8 +902,21 @@ def write_grid_source(meshes, resolution, out_dir):
     (loops 0-1-2 and 0-2-3) — the same split the glTF export writes, so the grid describes
     the geometry the game actually sees. The air-side winding contract still applies to the
     model: a face turned into the wall makes its cells read the back of the surface.
+
+    Material slot and mesh: every triangle carries `materialIndex` = poly.material_index (the slot
+    the face uses in edit mode) and `mesh` = the object name. Self-lighting is per mesh AND slot, so
+    the grid needs both per triangle: two different objects that both use slot 0 are two surfaces and
+    can light each other, while two faces of the same mesh on the same slot are one surface. Both
+    fields are written for every triangle, including a mesh with exactly one slot where 0 would be the
+    glTF default — the reader must never fill a value in, and it stops the run when a field is missing,
+    because a file that depends on a guess is not reproducible.
+
+    `island` and `mesh` carry the same name today, because the packer keeps one object in one island,
+    but they are different concepts: one object can be packed as several islands, so the two fields
+    cannot be conflated and both stay in the file.
     """
     tris = []
+    obj_slots = {}
     for obj in meshes:
         layer = obj.data.uv_layers.get(LIGHTMAP_UV)
         if layer is None:
@@ -924,7 +937,9 @@ def write_grid_source(meshes, resolution, out_dir):
                     verts.extend([float(co.x), float(co.y), float(co.z)])
                     u, v = layer.data[li].uv
                     uvs.extend([float(u), 1.0 - float(v)])  # row 0 = top, see the docstring
-                tris.append({"verts": verts, "uv": uvs, "island": obj.name})
+                tris.append({"verts": verts, "uv": uvs, "island": obj.name, "mesh": obj.name,
+                             "materialIndex": int(poly.material_index)})
+                obj_slots.setdefault(obj.name, set()).add(int(poly.material_index))
     if not tris:
         raise SystemExit("bake_map: no triangles carry a lightmap UV — nothing to build a grid from")
 
@@ -933,7 +948,12 @@ def write_grid_source(meshes, resolution, out_dir):
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(scene, fh)
     print(f"bake_map: wrote {path} ({len(tris)} triangles, {resolution}px, "
-          f"uv = glTF convention (row 0 = top))")
+          f"uv = glTF convention (row 0 = top), materialIndex from poly.material_index, "
+          f"mesh = object name — every triangle carries both fields)")
+    multi = {n: sorted(s) for n, s in obj_slots.items() if len(s) > 1}
+    print(f"bake_map: material slots per mesh — {len(obj_slots)} object(s), "
+          f"{len(multi)} with more than one slot" +
+          (f": {', '.join(f'{n} {s}' for n, s in sorted(multi.items()))}" if multi else ''))
     return path
 
 

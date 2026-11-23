@@ -1,0 +1,2022 @@
+{
+  "collections": {
+    "objects": {
+      "file": "objects.glb",
+      "count": 56,
+      "bounds": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          39,
+          16,
+          3.5
+        ]
+      ]
+    },
+    "checkpoints": {
+      "file": null,
+      "count": 2,
+      "bounds": null
+    },
+    "animated": {
+      "file": "animated.glb",
+      "count": 1,
+      "bounds": [
+        [
+          8.800000190734863,
+          3.299999952316284,
+          0.20000000298023224
+        ],
+        [
+          9.199999809265137,
+          3.700000047683716,
+          0.6000000238418579
+        ]
+      ]
+    },
+    "playermodels": {
+      "missing": true
+    }
+  },
+  "checkpoints": [
+    {
+      "name": "CP_teleport_cell",
+      "position": [
+        4.5,
+        5.5,
+        0
+      ],
+      "label": "Teleport · own cell",
+      "kind": "respawn",
+      "radius": 1
+    },
+    {
+      "name": "CP_spawn",
+      "position": [
+        2,
+        4,
+        0
+      ],
+      "label": "Spawn · Room A",
+      "kind": "spawn",
+      "radius": 1
+    }
+  ],
+  "sound": [],
+  "skipped": [],
+  "subCollections": {
+    "props_nested": "objects"
+  },
+  "emissive": {
+    "exported": [
+      {
+        "name": "L_ladder_1",
+        "collection": "objects",
+        "file": "objects.glb",
+        "dimensions": [
+          0.3,
+          0,
+          0.3
+        ],
+        "strength": 1,
+        "color": [
+          1,
+          0.95,
+          0.85
+        ]
+      },
+      {
+        "name": "L_ladder_20",
+        "collection": "objects",
+        "file": "objects.glb",
+        "dimensions": [
+          0.3,
+          0,
+          0.3
+        ],
+        "strength": 20,
+        "color": [
+          1,
+          0.95,
+          0.85
+        ]
+      },
+      {
+        "name": "L_ladder_5",
+        "collection": "objects",
+        "file": "objects.glb",
+        "dimensions": [
+          0.3,
+          0,
+          0.3
+        ],
+        "strength": 5,
+        "color": [
+          1,
+          0.95,
+          0.85
+        ]
+      },
+      {
+        "name": "L_ladder_80",
+        "collection": "objects",
+        "file": "objects.glb",
+        "dimensions": [
+          0.3,
+          0,
+          0.3
+        ],
+        "strength": 80,
+        "color": [
+          1,
+          0.95,
+          0.85
+        ]
+      },
+      {
+        "name": "L_nested_fixture",
+        "collection": "objects",
+        "file": "objects.glb",
+        "dimensions": [
+          0.3,
+          0,
+          0.3
+        ],
+        "strength": 3,
+        "color": [
+          0.9,
+          0.9,
+          1
+        ]
+      },
+      {
+        "name": "L_roomB_lamp",
+        "collection": "objects",
+        "file": "objects.glb",
+        "dimensions": [
+          0.6,
+          0,
+          0.6
+        ],
+        "strength": 12,
+        "color": [
+          1,
+          0.93,
+          0.8
+        ]
+      },
+      {
+        "name": "L_strip_long",
+        "collection": "objects",
+        "file": "objects.glb",
+        "dimensions": [
+          4.8,
+          0,
+          0.3
+        ],
+        "strength": 8,
+        "color": [
+          1,
+          0.95,
+          0.85
+        ]
+      },
+      {
+        "name": "Split_emissive",
+        "collection": "objects",
+        "file": "objects.glb",
+        "dimensions": [
+          2,
+          0,
+          2
+        ],
+        "strength": 5,
+        "color": [
+          1,
+          0.9,
+          0.8
+        ]
+      },
+      {
+        "name": "TwoSlot_panel",
+        "collection": "objects",
+        "file": "objects.glb",
+        "dimensions": [
+          1,
+          0,
+          0.3
+        ],
+        "strength": 5,
+        "color": [
+          1,
+          0.9,
+          0.8
+        ]
+      }
+    ],
+    "objectsGlb": 9,
+    "objectsGlbVerified": 9
+  },
+  "skippedEmissive": [],
+  "materialDefaults": [
+    {
+      "material": "M_grey",
+      "file": "objects.glb",
+      "written": {
+        "baseColorFactor": true,
+        "metallicFactor": true,
+        "roughnessFactor": true,
+        "emissiveFactor": true,
+        "emissiveStrength": true
+      },
+      "defaultsUsed": {},
+      "notDefault": {
+        "baseColorFactor": [
+          0.6200000047683716,
+          0.6200000047683716,
+          0.6200000047683716,
+          1
+        ],
+        "metallicFactor": 0,
+        "roughnessFactor": 0.8999999761581421,
+        "emissiveFactor": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "emissiveStrength": 0
+      }
+    },
+    {
+      "material": "M_neutral_grey",
+      "file": "objects.glb",
+      "written": {
+        "baseColorFactor": true,
+        "metallicFactor": true,
+        "roughnessFactor": true,
+        "emissiveFactor": true,
+        "emissiveStrength": true
+      },
+      "defaultsUsed": {},
+      "notDefault": {
+        "baseColorFactor": [
+          0.5,
+          0.5,
+          0.5,
+          1
+        ],
+        "metallicFactor": 0,
+        "roughnessFactor": 0.8999999761581421,
+        "emissiveFactor": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "emissiveStrength": 0
+      }
+    },
+    {
+      "material": "M_red",
+      "file": "objects.glb",
+      "written": {
+        "baseColorFactor": true,
+        "metallicFactor": true,
+        "roughnessFactor": true,
+        "emissiveFactor": true,
+        "emissiveStrength": true
+      },
+      "defaultsUsed": {},
+      "notDefault": {
+        "baseColorFactor": [
+          0.8500000238418579,
+          0.14000000059604645,
+          0.10999999940395355,
+          1
+        ],
+        "metallicFactor": 0,
+        "roughnessFactor": 0.8999999761581421,
+        "emissiveFactor": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "emissiveStrength": 0
+      }
+    },
+    {
+      "material": "M_ladder_1",
+      "file": "objects.glb",
+      "written": {
+        "baseColorFactor": true,
+        "metallicFactor": true,
+        "roughnessFactor": true,
+        "emissiveFactor": true,
+        "emissiveStrength": true
+      },
+      "defaultsUsed": {},
+      "notDefault": {
+        "baseColorFactor": [
+          1,
+          0.949999988079071,
+          0.8500000238418579,
+          1
+        ],
+        "metallicFactor": 0,
+        "roughnessFactor": 0.8999999761581421,
+        "emissiveFactor": [
+          1,
+          0.949999988079071,
+          0.8500000238418579
+        ]
+      }
+    },
+    {
+      "material": "M_ladder_5",
+      "file": "objects.glb",
+      "written": {
+        "baseColorFactor": true,
+        "metallicFactor": true,
+        "roughnessFactor": true,
+        "emissiveFactor": true,
+        "emissiveStrength": true
+      },
+      "defaultsUsed": {},
+      "notDefault": {
+        "baseColorFactor": [
+          1,
+          0.949999988079071,
+          0.8500000238418579,
+          1
+        ],
+        "metallicFactor": 0,
+        "roughnessFactor": 0.8999999761581421,
+        "emissiveFactor": [
+          1,
+          0.949999988079071,
+          0.8500000238418579
+        ],
+        "emissiveStrength": 5
+      }
+    },
+    {
+      "material": "M_ladder_20",
+      "file": "objects.glb",
+      "written": {
+        "baseColorFactor": true,
+        "metallicFactor": true,
+        "roughnessFactor": true,
+        "emissiveFactor": true,
+        "emissiveStrength": true
+      },
+      "defaultsUsed": {},
+      "notDefault": {
+        "baseColorFactor": [
+          1,
+          0.949999988079071,
+          0.8500000238418579,
+          1
+        ],
+        "metallicFactor": 0,
+        "roughnessFactor": 0.8999999761581421,
+        "emissiveFactor": [
+          1,
+          0.949999988079071,
+          0.8500000238418579
+        ],
+        "emissiveStrength": 20
+      }
+    },
+    {
+      "material": "M_ladder_80",
+      "file": "objects.glb",
+      "written": {
+        "baseColorFactor": true,
+        "metallicFactor": true,
+        "roughnessFactor": true,
+        "emissiveFactor": true,
+        "emissiveStrength": true
+      },
+      "defaultsUsed": {},
+      "notDefault": {
+        "baseColorFactor": [
+          1,
+          0.949999988079071,
+          0.8500000238418579,
+          1
+        ],
+        "metallicFactor": 0,
+        "roughnessFactor": 0.8999999761581421,
+        "emissiveFactor": [
+          1,
+          0.949999988079071,
+          0.8500000238418579
+        ],
+        "emissiveStrength": 80
+      }
+    },
+    {
+      "material": "M_nested_light",
+      "file": "objects.glb",
+      "written": {
+        "baseColorFactor": true,
+        "metallicFactor": true,
+        "roughnessFactor": true,
+        "emissiveFactor": true,
+        "emissiveStrength": true
+      },
+      "defaultsUsed": {},
+      "notDefault": {
+        "baseColorFactor": [
+          0.8999999761581421,
+          0.8999999761581421,
+          1,
+          1
+        ],
+        "metallicFactor": 0,
+        "roughnessFactor": 0.8999999761581421,
+        "emissiveFactor": [
+          0.8999999761581421,
+          0.8999999761581421,
+          1
+        ],
+        "emissiveStrength": 3
+      }
+    },
+    {
+      "material": "M_lamp",
+      "file": "objects.glb",
+      "written": {
+        "baseColorFactor": true,
+        "metallicFactor": true,
+        "roughnessFactor": true,
+        "emissiveFactor": true,
+        "emissiveStrength": true
+      },
+      "defaultsUsed": {},
+      "notDefault": {
+        "baseColorFactor": [
+          1,
+          0.9300000071525574,
+          0.800000011920929,
+          1
+        ],
+        "metallicFactor": 0,
+        "roughnessFactor": 0.8999999761581421,
+        "emissiveFactor": [
+          1,
+          0.9300000071525574,
+          0.800000011920929
+        ],
+        "emissiveStrength": 12
+      }
+    },
+    {
+      "material": "M_strip",
+      "file": "objects.glb",
+      "written": {
+        "baseColorFactor": true,
+        "metallicFactor": true,
+        "roughnessFactor": true,
+        "emissiveFactor": true,
+        "emissiveStrength": true
+      },
+      "defaultsUsed": {},
+      "notDefault": {
+        "baseColorFactor": [
+          1,
+          0.949999988079071,
+          0.8500000238418579,
+          1
+        ],
+        "metallicFactor": 0,
+        "roughnessFactor": 0.8999999761581421,
+        "emissiveFactor": [
+          1,
+          0.949999988079071,
+          0.8500000238418579
+        ],
+        "emissiveStrength": 8
+      }
+    },
+    {
+      "material": "M_row_01",
+      "file": "objects.glb",
+      "written": {
+        "baseColorFactor": true,
+        "metallicFactor": true,
+        "roughnessFactor": true,
+        "emissiveFactor": true,
+        "emissiveStrength": true
+      },
+      "defaultsUsed": {},
+      "notDefault": {
+        "baseColorFactor": [
+          0.20000000298023224,
+          0.6000000238418579,
+          0.3499999940395355,
+          1
+        ],
+        "metallicFactor": 0,
+        "roughnessFactor": 0.10000000149011612,
+        "emissiveFactor": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "emissiveStrength": 0
+      }
+    },
+    {
+      "material": "M_row_02",
+      "file": "objects.glb",
+      "written": {
+        "baseColorFactor": true,
+        "metallicFactor": true,
+        "roughnessFactor": true,
+        "emissiveFactor": true,
+        "emissiveStrength": true
+      },
+      "defaultsUsed": {},
+      "notDefault": {
+        "baseColorFactor": [
+          0.20000000298023224,
+          0.6000000238418579,
+          0.3499999940395355,
+          1
+        ],
+        "metallicFactor": 0,
+        "roughnessFactor": 0.8999999761581421,
+        "emissiveFactor": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "emissiveStrength": 0
+      }
+    },
+    {
+      "material": "M_row_03",
+      "file": "objects.glb",
+      "written": {
+        "baseColorFactor": true,
+        "metallicFactor": true,
+        "roughnessFactor": true,
+        "emissiveFactor": true,
+        "emissiveStrength": true
+      },
+      "defaultsUsed": {},
+      "notDefault": {
+        "baseColorFactor": [
+          0.800000011920929,
+          0.25,
+          0.25,
+          1
+        ],
+        "metallicFactor": 0,
+        "roughnessFactor": 0.5,
+        "emissiveFactor": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "emissiveStrength": 0
+      }
+    },
+    {
+      "material": "M_row_04",
+      "file": "objects.glb",
+      "written": {
+        "baseColorFactor": true,
+        "metallicFactor": true,
+        "roughnessFactor": true,
+        "emissiveFactor": true,
+        "emissiveStrength": true
+      },
+      "defaultsUsed": {},
+      "notDefault": {
+        "baseColorFactor": [
+          0.10000000149011612,
+          0.10000000149011612,
+          0.10000000149011612,
+          1
+        ],
+        "metallicFactor": 0,
+        "roughnessFactor": 0.5,
+        "emissiveFactor": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "emissiveStrength": 0
+      }
+    },
+    {
+      "material": "M_row_05",
+      "file": "objects.glb",
+      "written": {
+        "baseColorFactor": true,
+        "metallicFactor": true,
+        "roughnessFactor": true,
+        "emissiveFactor": true,
+        "emissiveStrength": true
+      },
+      "defaultsUsed": {},
+      "notDefault": {
+        "baseColorFactor": [
+          0.800000011920929,
+          0.800000011920929,
+          0.800000011920929,
+          1
+        ],
+        "roughnessFactor": 0.5,
+        "emissiveFactor": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "emissiveStrength": 0
+      }
+    },
+    {
+      "material": "M_row_06",
+      "file": "objects.glb",
+      "written": {
+        "baseColorFactor": true,
+        "metallicFactor": true,
+        "roughnessFactor": true,
+        "emissiveFactor": true,
+        "emissiveStrength": true
+      },
+      "defaultsUsed": {},
+      "notDefault": {
+        "baseColorFactor": [
+          0.800000011920929,
+          0.800000011920929,
+          0.800000011920929,
+          1
+        ],
+        "roughnessFactor": 0.10000000149011612,
+        "emissiveFactor": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "emissiveStrength": 0
+      }
+    },
+    {
+      "material": "M_nested",
+      "file": "objects.glb",
+      "written": {
+        "baseColorFactor": true,
+        "metallicFactor": true,
+        "roughnessFactor": true,
+        "emissiveFactor": true,
+        "emissiveStrength": true
+      },
+      "defaultsUsed": {},
+      "notDefault": {
+        "baseColorFactor": [
+          0.44999998807907104,
+          0.44999998807907104,
+          0.550000011920929,
+          1
+        ],
+        "metallicFactor": 0,
+        "roughnessFactor": 0.8999999761581421,
+        "emissiveFactor": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "emissiveStrength": 0
+      }
+    },
+    {
+      "material": "M_twoslot_plain.001",
+      "file": "objects.glb",
+      "written": {
+        "baseColorFactor": true,
+        "metallicFactor": true,
+        "roughnessFactor": true,
+        "emissiveFactor": true,
+        "emissiveStrength": true
+      },
+      "defaultsUsed": {},
+      "notDefault": {
+        "baseColorFactor": [
+          0.5,
+          0.5,
+          0.5,
+          1
+        ],
+        "metallicFactor": 0,
+        "roughnessFactor": 0.8999999761581421,
+        "emissiveFactor": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "emissiveStrength": 0
+      }
+    },
+    {
+      "material": "M_split_emissive",
+      "file": "objects.glb",
+      "written": {
+        "baseColorFactor": true,
+        "metallicFactor": true,
+        "roughnessFactor": true,
+        "emissiveFactor": true,
+        "emissiveStrength": true
+      },
+      "defaultsUsed": {},
+      "notDefault": {
+        "baseColorFactor": [
+          1,
+          0.8999999761581421,
+          0.800000011920929,
+          1
+        ],
+        "metallicFactor": 0,
+        "roughnessFactor": 0.8999999761581421,
+        "emissiveFactor": [
+          1,
+          0.8999999761581421,
+          0.800000011920929
+        ],
+        "emissiveStrength": 5
+      }
+    },
+    {
+      "material": "M_twoslot_plain.002",
+      "file": "objects.glb",
+      "written": {
+        "baseColorFactor": true,
+        "metallicFactor": true,
+        "roughnessFactor": true,
+        "emissiveFactor": true,
+        "emissiveStrength": true
+      },
+      "defaultsUsed": {},
+      "notDefault": {
+        "baseColorFactor": [
+          0.5,
+          0.5,
+          0.5,
+          1
+        ],
+        "metallicFactor": 0,
+        "roughnessFactor": 0.8999999761581421,
+        "emissiveFactor": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "emissiveStrength": 0
+      }
+    },
+    {
+      "material": "M_twoslot_plain",
+      "file": "objects.glb",
+      "written": {
+        "baseColorFactor": true,
+        "metallicFactor": true,
+        "roughnessFactor": true,
+        "emissiveFactor": true,
+        "emissiveStrength": true
+      },
+      "defaultsUsed": {},
+      "notDefault": {
+        "baseColorFactor": [
+          0.5,
+          0.5,
+          0.5,
+          1
+        ],
+        "metallicFactor": 0,
+        "roughnessFactor": 0.8999999761581421,
+        "emissiveFactor": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "emissiveStrength": 0
+      }
+    },
+    {
+      "material": "M_twoslot_emissive",
+      "file": "objects.glb",
+      "written": {
+        "baseColorFactor": true,
+        "metallicFactor": true,
+        "roughnessFactor": true,
+        "emissiveFactor": true,
+        "emissiveStrength": true
+      },
+      "defaultsUsed": {},
+      "notDefault": {
+        "baseColorFactor": [
+          1,
+          0.8999999761581421,
+          0.800000011920929,
+          1
+        ],
+        "metallicFactor": 0,
+        "roughnessFactor": 0.8999999761581421,
+        "emissiveFactor": [
+          1,
+          0.8999999761581421,
+          0.800000011920929
+        ],
+        "emissiveStrength": 5
+      }
+    },
+    {
+      "material": "M_runner",
+      "file": "animated.glb",
+      "written": {
+        "baseColorFactor": true,
+        "metallicFactor": true,
+        "roughnessFactor": true,
+        "emissiveFactor": true,
+        "emissiveStrength": true
+      },
+      "defaultsUsed": {},
+      "notDefault": {
+        "baseColorFactor": [
+          0.6000000238418579,
+          0.30000001192092896,
+          0.30000001192092896,
+          1
+        ],
+        "metallicFactor": 0,
+        "roughnessFactor": 0.8999999761581421,
+        "emissiveFactor": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "emissiveStrength": 0
+      }
+    }
+  ],
+  "lightmap": {
+    "file": "lightmap.bin",
+    "resolution": 512,
+    "uv": "TEXCOORD_1",
+    "encoding": "half",
+    "bits": 16,
+    "preview": "lightmap.png",
+    "range": 134.874435
+  },
+  "lightgrid": {
+    "file": "lightgrid.bin",
+    "cells": 81,
+    "cellSize": 2.5625807486779846,
+    "resolution": 512,
+    "seed": 12345,
+    "raysPerCell": 512,
+    "blend": 0.25,
+    "reference": {
+      "cellSize": 2.5625807486779846,
+      "cellCount": 81,
+      "cells": [
+        {
+          "key": "3,1,0",
+          "kind": "surface",
+          "surface": {
+            "mesh": "RoomA_floor",
+            "slot": 0
+          },
+          "normal": [
+            0,
+            0,
+            1
+          ],
+          "value": [
+            0.07065434372011449,
+            0.066624595945449,
+            0.06032235550846161
+          ]
+        },
+        {
+          "key": "1,2,0",
+          "kind": "surface",
+          "surface": {
+            "mesh": "RoomA_floor",
+            "slot": 0
+          },
+          "normal": [
+            0,
+            0,
+            1
+          ],
+          "value": [
+            0.1890938077551561,
+            0.1592474974453136,
+            0.13490715198834344
+          ]
+        },
+        {
+          "key": "3,2,1",
+          "kind": "surface",
+          "surface": {
+            "mesh": "RoomA_ceiling",
+            "slot": 0
+          },
+          "normal": [
+            0,
+            0,
+            -1
+          ],
+          "value": [
+            0.09221942663462068,
+            0.08642873398177836,
+            0.07862216364821349
+          ]
+        },
+        {
+          "key": "1,1,1",
+          "kind": "surface",
+          "surface": {
+            "mesh": "RoomA_ceiling",
+            "slot": 0
+          },
+          "normal": [
+            0,
+            0,
+            -1
+          ],
+          "value": [
+            0.04720852481645228,
+            0.044401788671780365,
+            0.040286429855883384
+          ]
+        },
+        {
+          "key": "1,0,0",
+          "kind": "surface",
+          "surface": {
+            "mesh": "RoomA_wall_south",
+            "slot": 0
+          },
+          "normal": [
+            0,
+            1,
+            0
+          ],
+          "value": [
+            0.03722084415466095,
+            0.03488609649248146,
+            0.03162538719519632
+          ]
+        },
+        {
+          "key": "3,0,0",
+          "kind": "surface",
+          "surface": {
+            "mesh": "RoomA_wall_south",
+            "slot": 0
+          },
+          "normal": [
+            0,
+            1,
+            0
+          ],
+          "value": [
+            0.06654371654464308,
+            0.06240899085614769,
+            0.05644817843473522
+          ]
+        },
+        {
+          "key": "1,3,0",
+          "kind": "surface",
+          "surface": {
+            "mesh": "RoomA_wall_north_a",
+            "slot": 0
+          },
+          "normal": [
+            0,
+            -1,
+            0
+          ],
+          "value": [
+            0.03163659168388383,
+            0.02965533765898812,
+            0.026880458068424994
+          ]
+        },
+        {
+          "key": "0,3,0",
+          "kind": "surface",
+          "surface": {
+            "mesh": "RoomA_wall_north_a",
+            "slot": 0
+          },
+          "normal": [
+            0,
+            -1,
+            0
+          ],
+          "value": [
+            0.02579665363951593,
+            0.024169525117472924,
+            0.021928167211262208
+          ]
+        },
+        {
+          "key": "4,3,0",
+          "kind": "surface",
+          "surface": {
+            "mesh": "RoomA_wall_north_b",
+            "slot": 0
+          },
+          "normal": [
+            0,
+            -1,
+            0
+          ],
+          "value": [
+            0.10041187881547478,
+            0.09416713548013458,
+            0.08549188300126496
+          ]
+        },
+        {
+          "key": "3,3,0",
+          "kind": "surface",
+          "surface": {
+            "mesh": "RoomA_wall_north_b",
+            "slot": 0
+          },
+          "normal": [
+            0,
+            -1,
+            0
+          ],
+          "value": [
+            0.21847632342177292,
+            0.1999620219580347,
+            0.18779525619629567
+          ]
+        },
+        {
+          "key": "0,2,0",
+          "kind": "surface",
+          "surface": {
+            "mesh": "RoomA_wall_west",
+            "slot": 0
+          },
+          "normal": [
+            1,
+            0,
+            0
+          ],
+          "value": [
+            0.028408099841839573,
+            0.026733754749855378,
+            0.024208276966611268
+          ]
+        },
+        {
+          "key": "0,1,0",
+          "kind": "surface",
+          "surface": {
+            "mesh": "RoomA_wall_west",
+            "slot": 0
+          },
+          "normal": [
+            1,
+            0,
+            0
+          ],
+          "value": [
+            0.025679952949794534,
+            0.024160347120077027,
+            0.021907755337287324
+          ]
+        },
+        {
+          "key": "5,0,0",
+          "kind": "surface",
+          "surface": {
+            "mesh": "Wall_hole_left",
+            "slot": 0
+          },
+          "normal": [
+            -1,
+            0,
+            0
+          ],
+          "value": [
+            0.06767816955332896,
+            0.0634979043995028,
+            0.057411999630089916
+          ]
+        },
+        {
+          "key": "5,2,0",
+          "kind": "surface",
+          "surface": {
+            "mesh": "Wall_hole_right",
+            "slot": 0
+          },
+          "normal": [
+            -1,
+            0,
+            0
+          ],
+          "value": [
+            0.167577356505417,
+            0.15720678463921542,
+            0.14698804331707974
+          ]
+        },
+        {
+          "key": "5,1,0",
+          "kind": "surface",
+          "surface": {
+            "mesh": "Wall_hole_above",
+            "slot": 0
+          },
+          "normal": [
+            -1,
+            0,
+            0
+          ],
+          "value": [
+            0.19953797179486588,
+            0.18224383216535,
+            0.17105745748742818
+          ]
+        },
+        {
+          "key": "5,1,1",
+          "kind": "surface",
+          "surface": {
+            "mesh": "Wall_hole_above",
+            "slot": 0
+          },
+          "normal": [
+            -1,
+            0,
+            0
+          ],
+          "value": [
+            0.1359761627683531,
+            0.12649188323162072,
+            0.11690465879755885
+          ]
+        },
+        {
+          "key": "7,0,0",
+          "kind": "surface",
+          "surface": {
+            "mesh": "RoomB_floor",
+            "slot": 0
+          },
+          "normal": [
+            0,
+            0,
+            1
+          ],
+          "value": [
+            0.09008539189902288,
+            0.08508438056749619,
+            0.0725994713943008
+          ]
+        },
+        {
+          "key": "6,1,0",
+          "kind": "surface",
+          "surface": {
+            "mesh": "RoomB_floor",
+            "slot": 0
+          },
+          "normal": [
+            0,
+            0,
+            1
+          ],
+          "value": [
+            0.09992787203158054,
+            0.09454584243897841,
+            0.08290505687146546
+          ]
+        },
+        {
+          "key": "7,1,1",
+          "kind": "surface",
+          "surface": {
+            "mesh": "RoomB_ceiling",
+            "slot": 0
+          },
+          "normal": [
+            0,
+            0,
+            -1
+          ],
+          "value": [
+            0.09750738262958226,
+            0.09119363124799888,
+            0.07800168972078933
+          ]
+        },
+        {
+          "key": "6,0,1",
+          "kind": "surface",
+          "surface": {
+            "mesh": "RoomB_ceiling",
+            "slot": 0
+          },
+          "normal": [
+            0,
+            0,
+            -1
+          ],
+          "value": [
+            0.08829586400731967,
+            0.08243703102037134,
+            0.0709982396282581
+          ]
+        },
+        {
+          "key": "6,0,0",
+          "kind": "surface",
+          "surface": {
+            "mesh": "RoomB_wall_south",
+            "slot": 0
+          },
+          "normal": [
+            0,
+            1,
+            0
+          ],
+          "value": [
+            0.07864953215281423,
+            0.07281845943269612,
+            0.06270645155563442
+          ]
+        },
+        {
+          "key": "7,2,0",
+          "kind": "surface",
+          "surface": {
+            "mesh": "RoomB_wall_north",
+            "slot": 0
+          },
+          "normal": [
+            0,
+            -1,
+            0
+          ],
+          "value": [
+            0.12050111092181434,
+            0.11313923142421982,
+            0.09704823943074736
+          ]
+        },
+        {
+          "key": "6,2,0",
+          "kind": "surface",
+          "surface": {
+            "mesh": "RoomB_wall_north",
+            "slot": 0
+          },
+          "normal": [
+            0,
+            -1,
+            0
+          ],
+          "value": [
+            0.1202813867540425,
+            0.11190378174572206,
+            0.09787241755211261
+          ]
+        },
+        {
+          "key": "7,1,0",
+          "kind": "surface",
+          "surface": {
+            "mesh": "RoomB_wall_east",
+            "slot": 0
+          },
+          "normal": [
+            -1,
+            0,
+            0
+          ],
+          "value": [
+            0.09563810179690797,
+            0.08969483726944216,
+            0.07813334920475037
+          ]
+        },
+        {
+          "key": "6,1,1",
+          "kind": "surface",
+          "surface": {
+            "mesh": "L_roomB_lamp",
+            "slot": 0
+          },
+          "normal": [
+            0,
+            -1,
+            0
+          ],
+          "value": [
+            0.04476998829359814,
+            0.04143684005931444,
+            0.03576681448870734
+          ]
+        },
+        {
+          "key": "9,5,0",
+          "kind": "surface",
+          "surface": {
+            "mesh": "RoomC_floor",
+            "slot": 0
+          },
+          "normal": [
+            0,
+            0,
+            1
+          ],
+          "value": [
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "key": "9,5,1",
+          "kind": "surface",
+          "surface": {
+            "mesh": "RoomC_ceiling",
+            "slot": 0
+          },
+          "normal": [
+            0,
+            0,
+            -1
+          ],
+          "value": [
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "key": "9,4,0",
+          "kind": "surface",
+          "surface": {
+            "mesh": "RoomC_wall_south",
+            "slot": 0
+          },
+          "normal": [
+            0,
+            1,
+            0
+          ],
+          "value": [
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "key": "9,6,0",
+          "kind": "surface",
+          "surface": {
+            "mesh": "RoomC_wall_north",
+            "slot": 0
+          },
+          "normal": [
+            0,
+            -1,
+            0
+          ],
+          "value": [
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "key": "8,5,0",
+          "kind": "surface",
+          "surface": {
+            "mesh": "RoomC_wall_west",
+            "slot": 0
+          },
+          "normal": [
+            1,
+            0,
+            0
+          ],
+          "value": [
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "key": "10,5,0",
+          "kind": "surface",
+          "surface": {
+            "mesh": "Bay_wall_west",
+            "slot": 0
+          },
+          "normal": [
+            1,
+            0,
+            0
+          ],
+          "value": [
+            0.68098525225346,
+            0.6483273905063006,
+            0.5792752228470844
+          ]
+        },
+        {
+          "key": "11,5,0",
+          "kind": "surface",
+          "surface": {
+            "mesh": "Bay_floor",
+            "slot": 0
+          },
+          "normal": [
+            0,
+            0,
+            1
+          ],
+          "value": [
+            0.7299804284656394,
+            0.694589364692134,
+            0.6191493193345708
+          ]
+        },
+        {
+          "key": "11,5,1",
+          "kind": "surface",
+          "surface": {
+            "mesh": "Bay_ceiling",
+            "slot": 0
+          },
+          "normal": [
+            0,
+            0,
+            -1
+          ],
+          "value": [
+            0.8363860724049774,
+            0.7923245654344049,
+            0.7116787595651506
+          ]
+        },
+        {
+          "key": "11,4,0",
+          "kind": "surface",
+          "surface": {
+            "mesh": "Bay_wall_south",
+            "slot": 0
+          },
+          "normal": [
+            0,
+            1,
+            0
+          ],
+          "value": [
+            0.5845255175907448,
+            0.5574934127519318,
+            0.4971397170443835
+          ]
+        },
+        {
+          "key": "11,6,0",
+          "kind": "surface",
+          "surface": {
+            "mesh": "Bay_wall_north",
+            "slot": 0
+          },
+          "normal": [
+            0,
+            -1,
+            0
+          ],
+          "value": [
+            8.808623538004849,
+            7.105814588998869,
+            4.375210311519084
+          ]
+        },
+        {
+          "key": "12,5,0",
+          "kind": "surface",
+          "surface": {
+            "mesh": "Bay_wall_east",
+            "slot": 0
+          },
+          "normal": [
+            -1,
+            0,
+            0
+          ],
+          "value": [
+            0.6227857923792197,
+            0.593734335138435,
+            0.529403574472773
+          ]
+        },
+        {
+          "key": "12,5,1",
+          "kind": "surface",
+          "surface": {
+            "mesh": "L_ladder_80",
+            "slot": 0
+          },
+          "normal": [
+            0,
+            -1,
+            0
+          ],
+          "value": [
+            0.3489972559805113,
+            0.33591760344430527,
+            0.29855557622875106
+          ]
+        },
+        {
+          "key": "6,2,1",
+          "kind": "surface",
+          "surface": {
+            "mesh": "L_strip_long",
+            "slot": 0
+          },
+          "normal": [
+            0,
+            -1,
+            0
+          ],
+          "value": [
+            -0.38931744301504934,
+            -0.31266792607738425,
+            -0.278035757175871
+          ]
+        },
+        {
+          "key": "5,2,1",
+          "kind": "surface",
+          "surface": {
+            "mesh": "L_strip_long",
+            "slot": 0
+          },
+          "normal": [
+            0,
+            -1,
+            0
+          ],
+          "value": [
+            -0.04207661900341009,
+            -0.035991093451204714,
+            -0.037341154022769774
+          ]
+        },
+        {
+          "key": "0,0,0",
+          "kind": "surface",
+          "surface": {
+            "mesh": "Ramp_15",
+            "slot": 0
+          },
+          "normal": [
+            -0.2588190462605236,
+            0,
+            0.9659258259787824
+          ],
+          "value": [
+            0.01818400375457646,
+            0.01728612930508887,
+            0.01570303238012509
+          ]
+        },
+        {
+          "key": "2,0,0",
+          "kind": "surface",
+          "surface": {
+            "mesh": "Ramp_30",
+            "slot": 0
+          },
+          "normal": [
+            -0.49999999326941313,
+            0,
+            0.8660254076703447
+          ],
+          "value": [
+            0.024921945471688762,
+            0.02368316960375788,
+            0.02145275349100064
+          ]
+        },
+        {
+          "key": "4,0,0",
+          "kind": "surface",
+          "surface": {
+            "mesh": "Ramp_45",
+            "slot": 0
+          },
+          "normal": [
+            -0.7071067811865475,
+            0,
+            0.7071067811865475
+          ],
+          "value": [
+            0.10086406138717358,
+            0.08767713623370543,
+            0.07562352573908819
+          ]
+        },
+        {
+          "key": "1,1,0",
+          "kind": "surface",
+          "surface": {
+            "mesh": "Stairs_12",
+            "slot": 0
+          },
+          "normal": [
+            0,
+            1,
+            0
+          ],
+          "value": [
+            0.014766475343792187,
+            0.013801559396420467,
+            0.012441079394487757
+          ]
+        },
+        {
+          "key": "2,3,0",
+          "kind": "surface",
+          "surface": {
+            "mesh": "Narrow_wall_left",
+            "slot": 0
+          },
+          "normal": [
+            1,
+            0,
+            0
+          ],
+          "value": [
+            0.0022653175335816643,
+            0.002087051329132669,
+            0.0019131850647718756
+          ]
+        },
+        {
+          "key": "2,4,0",
+          "kind": "surface",
+          "surface": {
+            "mesh": "Narrow_wall_left",
+            "slot": 0
+          },
+          "normal": [
+            1,
+            0,
+            0
+          ],
+          "value": [
+            0.0005883387552358979,
+            0.0005567274085643494,
+            0.0005069257681878454
+          ]
+        },
+        {
+          "key": "2,2,0",
+          "kind": "surface",
+          "surface": {
+            "mesh": "Mat_row_04",
+            "slot": 0
+          },
+          "normal": [
+            0,
+            1,
+            0
+          ],
+          "value": [
+            0.035430495183673506,
+            0.03340449266293431,
+            0.030220784505676668
+          ]
+        },
+        {
+          "key": "4,2,1",
+          "kind": "surface",
+          "surface": {
+            "mesh": "Plain_wall_ref",
+            "slot": 0
+          },
+          "normal": [
+            0,
+            -1,
+            0
+          ],
+          "value": [
+            6.343081412096936,
+            5.1279707197272,
+            4.564359013116284
+          ]
+        },
+        {
+          "key": "13,5,0",
+          "kind": "surface",
+          "surface": {
+            "mesh": "Split_emissive",
+            "slot": 0
+          },
+          "normal": [
+            0,
+            -1,
+            0
+          ],
+          "value": [
+            0.020656235209290334,
+            0.019618143078260996,
+            0.017471584055443065
+          ]
+        },
+        {
+          "key": "14,5,0",
+          "kind": "surface",
+          "surface": {
+            "mesh": "Split_plain",
+            "slot": 0
+          },
+          "normal": [
+            0,
+            -1,
+            0
+          ],
+          "value": [
+            0.0009286539952321278,
+            0.0008819838081146839,
+            0.0007854798249465286
+          ]
+        },
+        {
+          "key": "4,2,0",
+          "kind": "surface",
+          "surface": {
+            "mesh": "Nested_cube",
+            "slot": 0
+          },
+          "normal": [
+            0,
+            0,
+            0
+          ],
+          "value": [
+            0.009387435970611136,
+            0.008715210135416216,
+            0.007908539021419723
+          ]
+        },
+        {
+          "key": "0,0,1",
+          "kind": "space",
+          "surface": null,
+          "normal": null,
+          "value": null
+        },
+        {
+          "key": "0,1,1",
+          "kind": "space",
+          "surface": null,
+          "normal": null,
+          "value": null
+        },
+        {
+          "key": "0,2,1",
+          "kind": "space",
+          "surface": null,
+          "normal": null,
+          "value": null
+        },
+        {
+          "key": "1,0,1",
+          "kind": "space",
+          "surface": null,
+          "normal": null,
+          "value": null
+        },
+        {
+          "key": "1,1,2",
+          "kind": "space",
+          "surface": null,
+          "normal": null,
+          "value": null
+        },
+        {
+          "key": "1,2,1",
+          "kind": "space",
+          "surface": null,
+          "normal": null,
+          "value": null
+        },
+        {
+          "key": "1,3,1",
+          "kind": "space",
+          "surface": null,
+          "normal": null,
+          "value": null
+        },
+        {
+          "key": "2,0,1",
+          "kind": "space",
+          "surface": null,
+          "normal": null,
+          "value": null
+        },
+        {
+          "key": "2,1,0",
+          "kind": "space",
+          "surface": null,
+          "normal": null,
+          "value": null
+        },
+        {
+          "key": "2,1,1",
+          "kind": "space",
+          "surface": null,
+          "normal": null,
+          "value": null
+        },
+        {
+          "key": "2,1,2",
+          "kind": "space",
+          "surface": null,
+          "normal": null,
+          "value": null
+        },
+        {
+          "key": "2,2,-1",
+          "kind": "space",
+          "surface": null,
+          "normal": null,
+          "value": null
+        },
+        {
+          "key": "2,2,1",
+          "kind": "space",
+          "surface": null,
+          "normal": null,
+          "value": null
+        },
+        {
+          "key": "3,0,1",
+          "kind": "space",
+          "surface": null,
+          "normal": null,
+          "value": null
+        },
+        {
+          "key": "3,1,1",
+          "kind": "space",
+          "surface": null,
+          "normal": null,
+          "value": null
+        },
+        {
+          "key": "3,1,2",
+          "kind": "space",
+          "surface": null,
+          "normal": null,
+          "value": null
+        },
+        {
+          "key": "3,2,-1",
+          "kind": "space",
+          "surface": null,
+          "normal": null,
+          "value": null
+        },
+        {
+          "key": "3,2,0",
+          "kind": "space",
+          "surface": null,
+          "normal": null,
+          "value": null
+        },
+        {
+          "key": "3,3,1",
+          "kind": "space",
+          "surface": null,
+          "normal": null,
+          "value": null
+        },
+        {
+          "key": "4,0,1",
+          "kind": "space",
+          "surface": null,
+          "normal": null,
+          "value": null
+        },
+        {
+          "key": "4,1,0",
+          "kind": "space",
+          "surface": null,
+          "normal": null,
+          "value": null
+        },
+        {
+          "key": "4,1,1",
+          "kind": "space",
+          "surface": null,
+          "normal": null,
+          "value": null
+        },
+        {
+          "key": "4,1,2",
+          "kind": "space",
+          "surface": null,
+          "normal": null,
+          "value": null
+        },
+        {
+          "key": "4,2,-1",
+          "kind": "space",
+          "surface": null,
+          "normal": null,
+          "value": null
+        },
+        {
+          "key": "4,2,2",
+          "kind": "space",
+          "surface": null,
+          "normal": null,
+          "value": null
+        },
+        {
+          "key": "5,0,1",
+          "kind": "space",
+          "surface": null,
+          "normal": null,
+          "value": null
+        },
+        {
+          "key": "5,1,2",
+          "kind": "space",
+          "surface": null,
+          "normal": null,
+          "value": null
+        },
+        {
+          "key": "5,2,-1",
+          "kind": "space",
+          "surface": null,
+          "normal": null,
+          "value": null
+        },
+        {
+          "key": "10,4,0",
+          "kind": "space",
+          "surface": null,
+          "normal": null,
+          "value": null
+        },
+        {
+          "key": "10,5,1",
+          "kind": "space",
+          "surface": null,
+          "normal": null,
+          "value": null
+        },
+        {
+          "key": "10,6,0",
+          "kind": "space",
+          "surface": null,
+          "normal": null,
+          "value": null
+        }
+      ]
+    }
+  }
+}
