@@ -105,6 +105,9 @@ export interface GridTriangle {
    * one material and the glowing part is skipped as "itself", so it lights nothing.
    */
   materialIndex?: number;
+  /** Which object (mesh node) the face belongs to. Self-lighting is per mesh AND slot: two
+   *  different meshes that both use slot 0 are two surfaces, so they can light each other. */
+  mesh?: string;
 }
 
 interface Metric {
@@ -171,6 +174,8 @@ export interface LightGrid {
   /** triangle index -> material slot, in the order the triangles were given. Filled from
    *  GridTriangle.materialIndex (glTF poly.material_index), 0 when the source has no slot. */
   triangleMaterial: number[];
+  /** triangle index -> object name, same order. Self-lighting is per mesh AND slot. */
+  triangleMesh: string[];
   /** what buildLightGrid was actually called with, kept on the grid so the packer and the
    *  file can write it down — a file without the seed and ray count is not reproducible */
   seed: number;
@@ -549,7 +554,7 @@ export function sampleSphere(rand: () => number, out: Float64Array, index?: numb
 }
 
 /** Prefix-stable low-discrepancy sphere sample: N rays are the first N of any larger run. */
-function sampleSphereIndexed(seed: number, index: number, out: Float64Array): void {
+export function sampleSphereIndexed(seed: number, index: number, out: Float64Array): void {
   let n = index + 1;
   let vdc = 0, denom = 1;
   while (n > 0) { denom *= 2; vdc += (n % 2) / denom; n = Math.floor(n / 2); }
@@ -676,7 +681,7 @@ export function buildLightGrid(tris: GridTriangle[], values: Float64Array, resol
   const grid: LightGrid = {
     cellSize: 0, resolution, cells: [], sh: new Float64Array(0),
     buckets: new Map(), cellOfKey: new Map(), visible: [], metrics: [], triangleVertices: [],
-    triangleMaterial: [],
+    triangleMaterial: [], triangleMesh: [],
     neighbourMask: new Uint32Array(0), seed: o.seed, raysPerCell: o.raysPerCell,
   };
 
@@ -688,6 +693,7 @@ export function buildLightGrid(tris: GridTriangle[], values: Float64Array, resol
     grid.triangleVertices.push(tri.verts);
     // pushed in the same order as metrics, so a triangle index means the same entry in both
     grid.triangleMaterial.push(tri.materialIndex ?? 0);
+    grid.triangleMesh.push(tri.mesh ?? '');
     texelArea += m.areaTexel;
     metreArea += m.areaM2;
   }
@@ -773,35 +779,44 @@ export function buildLightGrid(tris: GridTriangle[], values: Float64Array, resol
 }
 
 /**
- * Which material the sample point of a cell stands on. One mesh can carry several material slots,
- * so a single cell can hold faces of two materials (a plain wall plus a glowing patch on the same
- * node). The point has one material: the slot with the largest area inside the cell; on a tie the
- * smaller slot index wins, so the answer is deterministic. When the source recorded no slot at all,
- * the old strict rule stays and this returns -1, which means "skip everything of this cell".
+ * The surface the sample point stands on: the (mesh, slot) pair with the largest area inside the
+ * cell. On an area tie the smaller slot index wins, so the answer is deterministic. When the source
+ * recorded no mesh at all, the mesh part is empty and the rule falls back to the slot alone.
  */
-export function ownMaterial(grid: LightGrid, cellIndex: number): number {
+export function ownSurface(grid: LightGrid, cellIndex: number): { mesh: string, slot: number } {
   const c = grid.cells[cellIndex];
-  let best = -1, bestArea = -1;
+  let best = -1, bestMesh = '', bestArea = -1;
   for (const ti of c.own) {
-    const m = grid.triangleMaterial[ti] ?? 0;
+    const slot = grid.triangleMaterial[ti] ?? 0;
+    const mesh = grid.triangleMesh[ti] ?? '';
     const a = grid.metrics[ti].areaM2;
-    if (a > bestArea || (a === bestArea && m < best)) { bestArea = a; best = m; }
+    if (a > bestArea || (a === bestArea && slot < best)) { bestArea = a; best = slot; bestMesh = mesh; }
   }
-  return best;
+  return { mesh: bestMesh, slot: best };
+}
+
+/** The slot of the surface the point stands on (the mesh part lives in ownSurface). */
+export function ownMaterial(grid: LightGrid, cellIndex: number): number {
+  return ownSurface(grid, cellIndex).slot;
 }
 
 /**
- * The self-light rule, written out so the check can assert it: exclude the faces of the material the
- * point is standing on. Faces of a DIFFERENT material inside the same cell are not excluded, because
- * a glowing patch and the plain wall next to it are two different surfaces - light from one to the
- * other is real bounce, not self-lighting. A point can still never light itself, so the rule is
- * "same material", not "same mesh".
+ * The self-light rule, written out so the check can assert it: exclude the faces of the surface the
+ * point stands on, which is a mesh AND a slot, not a slot alone. Two different meshes that both use
+ * slot 0 are two surfaces, so they can light each other; two faces of the same mesh and the same slot
+ * are the same surface, so a point can never light itself. A glowing patch and a plain face of the
+ * same mesh are different slots, so light between them is real bounce.
  */
 export function skipSetFor(grid: LightGrid, cellIndex: number): Set<number> {
   const c = grid.cells[cellIndex];
-  const own = ownMaterial(grid, cellIndex);
-  if (own < 0) return new Set(c.own);
-  return new Set(c.own.filter((ti) => (grid.triangleMaterial[ti] ?? 0) === own));
+  const own = ownSurface(grid, cellIndex);
+  if (own.slot < 0) return new Set(c.own);
+  return new Set(c.own.filter((ti) => {
+    const slot = grid.triangleMaterial[ti] ?? 0;
+    if (slot !== own.slot) return false;
+    // without a recorded mesh the pair cannot be named, so the slot alone decides
+    return own.mesh === '' || (grid.triangleMesh[ti] ?? '') === own.mesh;
+  }));
 }
 
 /** One cell: a sphere (air) or hemisphere (surface) of rays projected onto SH. */
@@ -811,15 +826,28 @@ export function fillCell(grid: LightGrid, cellIndex: number, values: Float64Arra
   if (c.own.length === 0 && c.kind === 'surface') return 0;
 
   if (c.own.length > 0) {
-    let cx = 0, cy = 0, cz = 0, ax = 0, ay = 0, az = 0, area = 0, texels = 0;
+    // The point stands ON a surface, so its position and its direction come from THAT surface
+    // (the (mesh, slot) pair ownSurface names), not from an average over all faces in the cell.
+    // This was found by scripts/light-grid-check.mjs section 6c on 2026-11-23: averaging the
+    // normals of faces that point opposite ways cancels to (0,0,0), and a cell with no direction
+    // reads nothing because every cosine is 0 - a physically wrong result, and a real risk in a
+    // map where one cell holds a floor facing up and a glowing patch facing down.
+    let area = 0, texels = 0;
+    for (const ti of c.own) { area += grid.metrics[ti].areaM2; texels += grid.metrics[ti].areaTexel; }
+    if (area <= 0) return 0;
+    const own = ownSurface(grid, cellIndex);
+    let cx = 0, cy = 0, cz = 0, ax = 0, ay = 0, az = 0, ownArea = 0;
     for (const ti of c.own) {
       const m = grid.metrics[ti];
+      const slot = grid.triangleMaterial[ti] ?? 0;
+      const mesh = grid.triangleMesh[ti] ?? '';
+      if (slot !== own.slot || (own.mesh !== '' && mesh !== own.mesh)) continue;
       cx += m.cx * m.areaM2; cy += m.cy * m.areaM2; cz += m.cz * m.areaM2;
       ax += m.nx * m.areaM2; ay += m.ny * m.areaM2; az += m.nz * m.areaM2;
-      area += m.areaM2; texels += m.areaTexel;
+      ownArea += m.areaM2;
     }
-    if (area <= 0) return 0;
-    c.px = cx / area; c.py = cy / area; c.pz = cz / area;
+    if (ownArea <= 0) return 0;
+    c.px = cx / ownArea; c.py = cy / ownArea; c.pz = cz / ownArea;
     const nl = Math.hypot(ax, ay, az) || 1;
     // push the probe out of the wall it sits in, otherwise every ray hits itself
     const push = Math.min(0.2, grid.cellSize / 4);

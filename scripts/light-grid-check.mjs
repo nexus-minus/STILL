@@ -115,7 +115,7 @@ import {
   buildLightGrid, buildNeighbourVisibility, dirtyCellsFor, fillCell, hashCellKey, lastSampleDistance, lastSampleOwn, packLightGrid, projectCoefficients,
   referenceIrradiance, sampleIrradiance, sampleBlendIrradiance, shIrradiance, packedSlot, packedIrradiance, packedBlend, packedBlendIrradiance,
   DEFAULT_BLEND, SH_GRID_STRIDE_VEC4, SH_TERMS, LOBE, BAND, neighbourBit, shBasis, lightmapAt, trace, toHalfBits, fromHalfBits, decodeHalfTexels, encodeLightGrid, decodeLightGrid, GRID_SCALE,
-  ownMaterial, skipSetFor, shBasisAtDirection,
+  ownMaterial, ownSurface, skipSetFor, shBasisAtDirection, sampleSphereIndexed, DEFAULTS,
 } from '../src/world/light-grid.ts';
 import { buildGridFile, lightgridManifest } from '../tools/write_lightgrid.mjs';
 import fs from 'node:fs';
@@ -139,10 +139,14 @@ const ISLANDS = [
   { name: 'ceilB', value: 0.20, area: 36 },
   { name: 'wallB', value: 0.12, area: 18 },
   { name: 'doorwallB', value: 0.10, area: 10 },
-  // 6c) needs two islands for ONE mesh with two material slots. Appended at the end, so the
-  // layout of every island above stays where it was and the numbers before 6c do not move.
-  { name: 'slotPlain', value: 0.06, area: 0.02 },
-  { name: 'slotGlow', value: 1.00, area: 0.01 },
+  // 6c) needs two islands for ONE mesh with two material slots, plus a third for a second mesh that
+  // shares slot 0. Appended at the end, so the layout of every island above stays where it was and the
+  // numbers before 6c do not move. Areas are chosen so each patch subtends about 10 % of the hemisphere
+  // from the point (enough of the fixed 512 directions reach it) while all three stay in one cell, and
+  // so the plain half is still the largest surface — the point must stand on it.
+  { name: 'slotPlain', value: 0.06, area: 0.06 },
+  { name: 'slotGlow', value: 1.00, area: 0.04 },
+  { name: 'pairB', value: 0.30, area: 0.04 },
 ];
 // the reference measure is a percentage, so the scale cancels out — as long as the
 // denominator is the brightest value ON THE SAME SCALE as the values being compared.
@@ -200,6 +204,11 @@ const uvRect = (name) => {
   return [[u0 / RES, v0 / RES], [u1 / RES, v0 / RES], [u1 / RES, v1 / RES], [u0 / RES, v1 / RES]];
 };
 
+/** Which material slot an island carries. Every island in the scene has one material (slot 0);
+ *  only the two-slot test has a second one. Declared here so 6c can name it. */
+const SLOT = { slotGlow: 1 };
+const slotOf = (island) => SLOT[island] ?? 0;
+
 /**
  * One quad per island, as two triangles. The corner order decides the winding:
  * it must face the air side, otherwise the probe is pushed inside the wall and
@@ -219,6 +228,11 @@ function quad(name, p0, p1, p2, p3, expectedNormal, islandName) {
     verts: [...pts[a], ...pts[b], ...pts[c]],
     uv: [...uv[a], ...uv[b], ...uv[c]],
     island: islandName,
+    // in the real pipeline an island IS an object, so the mesh name and the island name are the
+    // same thing here. The self-light rule needs it: two different meshes with the same slot are
+    // two surfaces, so they can light each other.
+    mesh: name,
+    materialIndex: slotOf(islandName),
   });
   return [tri(0, 1, 2), tri(0, 2, 3)];
 }
@@ -1202,76 +1216,146 @@ struct MaskTable { value: array<u32> }
 console.log(execLine);
 
 // 6c) One mesh with TWO material slots — how the owner authors in Blender (one node, faces split in
-//    edit mode, normal + glow). Tolerances, declared before the numbers: the rule itself is a set
-//    rule, so tolerance 0 for which slot the point stands on, which triangles are skipped, which
-//    cell holds them, and for a value that must be exactly zero. Only the consequence is a float,
-//    and it is asserted as "the glowing slot contributes at all" with the floor 1e-9 declared in
-//    section 6b; the size of that contribution is reported, not asserted.
-//    The rule, written down before measuring: skip = the material the point stands on, NOT the whole
-//    mesh. A point can never light itself, but a glowing patch and a plain surface inside the same
-//    cell are two different surfaces, so light from one to the other is real bounce. Without a slot
-//    field the whole mesh is one material, the glow is skipped as "itself", and it lights nothing.
-//    Geometry note, learned by the first run of this section: two COPULAR patches in the same cell
-//    contribute almost nothing, because the cosine factor between a ray and the surface it grazes is
-//    about zero — that is physically right, not a bug. So the glowing patch is placed where it can
-//    actually see the point: above it, facing down. Cell size is pinned to the clamp (tolerance 0)
-//    so "the same cell" is a fact and not an accident of the density.
-const slotOpts = { seed: 777, raysPerCell: 512, minCellSize: 1.0 };
-const slotTri = (verts, uv, island, materialIndex) => ({ verts, uv, island, materialIndex });
-const rectUV = (name) => rects[name].map((v) => v / RES);
-const pRect = rectUV('slotPlain'), gRect = rectUV('slotGlow');
+//    edit mode, normal + glow) — plus a second mesh that happens to use the SAME slot index.
+//    Tolerances, declared before the numbers: the rule is a set rule, so tolerance 0 for which
+//    surface the point stands on, which triangles are skipped, which cell holds them, and for a value
+//    that must be exactly zero. Only the consequence is a float, and it is asserted as "contributes
+//    at all" with the floor 1e-9 declared in section 6b; the size is reported, not asserted.
+//    The rule, written down before measuring: skip = the surface the point stands on, which is a mesh
+//    AND a slot, not a slot alone. A point can never light itself; two different meshes that both use
+//    slot 0 are two surfaces, so they can light each other; two slots of one mesh are two surfaces
+//    too. Without a slot field the whole mesh is one material, the glow is skipped as "itself", and
+//    it lights nothing.
+//    Two things this section had to learn by running it, and both are physical, not bugs:
+//    (a) two coplanar patches in the same cell barely light each other, because the cosine between a
+//        ray and a surface it grazes is about zero — so every patch here faces the point;
+//    (b) a fixed pattern of 512 directions can miss a patch that subtends only a fraction of a
+//        percent of the hemisphere, so a measured 0 would be sampling luck rather than the rule. The
+//        hit count is printed and asserted to be at least one, which makes "contributes" measurable.
+//    UV corners are taken from the island rectangle in the SAME order as the geometry corners (a right
+//    triangle maps to a right triangle); a wrong order makes a degenerate UV triangle, which is what
+//    made the first run measure a density of 0 and a cell size of NaN. And a single triangle is half
+//    of the quad its island is drawn as, so it covers half its rectangle: the areas here are the
+//    triangle areas 0.06 / 0.04 / 0.04 m2 with rectangles 16x16 / 13x13 / 13x13 texels, measured density
+//    about 2121 texels/m2 and cell size 0.491 m — reported, while the cell membership is asserted. The
+//    sizes are chosen so both facts hold at once: each patch subtends about 4 to 12 % of the hemisphere
+//    from the point (enough of the fixed 512 directions reach it), and every triangle stays inside the
+//    cell box 0 to 0.49 m, otherwise it belongs to a neighbouring cell and the test would measure a
+//    different cell than the one the point stands in.
+const slotOpts = { seed: 777, raysPerCell: 512 };
+// UV corners are taken from the island rectangle in the SAME order as the geometry corners, so the
+// triangle in UV space matches the triangle in world space (a right triangle maps to a right
+// triangle). A wrong corner order makes a degenerate UV triangle, and a degenerate UV measures a
+// density of 0 — which is what made the first run of this section produce a cell size of NaN.
+// The island rectangle as four (u, v) corners, in the same order the quad builder uses: 0 = lower left,
+// 1 = lower right, 2 = upper right, 3 = upper left. uvOf below picks three of them, so this must return
+// CORNERS (pairs), not four loose numbers — a flat list here gives a three-number uv and the metric
+// reads uv[4]/uv[5] as undefined, which is how the density became NaN.
+const rectUV = (name) => {
+  const [u0, v0, u1, v1] = rects[name];
+  return [[u0 / RES, v0 / RES], [u1 / RES, v0 / RES], [u1 / RES, v1 / RES], [u0 / RES, v1 / RES]];
+};
+const uvOf = (name, order) => order.flatMap((i) => rectUV(name)[i]);
+const slotTri = (verts, cornerOrder, island, materialIndex, mesh) => ({
+  verts, uv: uvOf(island, cornerOrder), island, materialIndex, mesh,
+});
 // normal of a triangle from its winding, so the winding is checked before anything is measured
 const faceNormal = (v) => {
   const e1 = [v[3] - v[0], v[4] - v[1], v[5] - v[2]], e2 = [v[6] - v[0], v[7] - v[1], v[8] - v[2]];
   return [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
 };
-const plainTri = slotTri([0.05, 0, 0.05, 0.05, 0, 0.25, 0.25, 0, 0.05],   // legs 0.20 x 0.20 = 0.02 m2
-  [pRect[0], pRect[1], pRect[0], pRect[3], pRect[2], pRect[1]], 'slotPlain', 0);
-const glowTri = slotTri([0.10, 0.6, 0.10, 0.20, 0.6, 0.10, 0.10, 0.6, 0.30], // legs 0.10 x 0.20 = 0.01 m2
-  [gRect[0], gRect[1], gRect[2], gRect[1], gRect[0], gRect[3]], 'slotGlow', 1);
-const slotTris = [plainTri, glowTri];
-const pn = faceNormal(plainTri.verts), gn = faceNormal(glowTri.verts);
+/** how many of the fixed 512 directions land on each triangle, from the cell's probe point */
+function hitsFor(grid, cellIndex) {
+  const c = grid.cells[cellIndex];
+  const hits = new Array(grid.metrics.length).fill(0);
+  const dir = new Float64Array(3);
+  for (let s = 0; s < slotOpts.raysPerCell; s++) {
+    sampleSphereIndexed(777, s, dir);
+    const ti = trace(grid, c.px, c.py, c.pz, dir[0], dir[1], dir[2], DEFAULTS.maxRayDistance);
+    if (ti >= 0) hits[ti]++;
+  }
+  return hits;
+}
+// Three surfaces in ONE cell (cell size about 0.49 m), all facing the point (the cosine lesson). The
+// point stands on the plain half of the two-slot mesh; the glow half is its second slot; pairB is a
+// DIFFERENT mesh that happens to use the same slot index — the case the testmap actually produced
+// (Plain_wall_ref and the plain half of TwoSlot_panel both sit on slot 0). Rule, declared before the
+// numbers: two meshes are two surfaces, so pairB is not skipped and light between them is real bounce.
+// Position and direction of the point come from the surface it stands on (fillCell), so the plain face
+// alone decides them; the two patches sit 0.35 m above, inside the same cell, facing the point.
+// The winding comes from the corner order, so the uv order must match the vertex order. For the plain
+// face the order is (start, z-leg, x-leg) because that gives +Y; the two patches use (start, x-leg,
+// z-leg), which gives -Y and therefore faces the point.
+const plainTri = slotTri([0.05, 0, 0.05, 0.05, 0, 0.396, 0.396, 0, 0.05],  // 0.06 m2, faces +Y
+  [0, 3, 1], 'slotPlain', 0, 'TwoSlot_panel');
+const glowTri = slotTri([0.10, 0.35, 0.10, 0.38, 0.35, 0.10, 0.10, 0.35, 0.38], // 0.04 m2, faces -Y
+  [0, 1, 3], 'slotGlow', 1, 'TwoSlot_panel');
+const pairBTri = slotTri([0.20, 0.35, 0.20, 0.483, 0.35, 0.20, 0.20, 0.35, 0.483], // 0.04 m2, faces -Y
+  [0, 1, 3], 'pairB', 0, 'Wall_B');
+const slotTris = [plainTri, glowTri, pairBTri];
+const pn = faceNormal(plainTri.verts), gn = faceNormal(glowTri.verts), bn = faceNormal(pairBTri.verts);
 const slotGrid = buildLightGrid(slotTris, values, RES, slotOpts);
 const slotCell = slotGrid.cells.findIndex((c) => c.own.includes(0));
 if (slotCell < 0) throw new Error('6c: no cell holds the plain slot of the two-slot mesh');
 const sc = slotGrid.cells[slotCell];
-const slotOk = sc.own.length === 2 && sc.own.includes(1);
-const slotOwnM = ownMaterial(slotGrid, slotCell);
+const own = ownSurface(slotGrid, slotCell);
 const slotSkip = skipSetFor(slotGrid, slotCell);
+const slotHits = hitsFor(slotGrid, slotCell);
 const outNew = new Float64Array(3), outOld = new Float64Array(3);
 referenceIrradiance(slotGrid, values, sc.px, sc.py, sc.pz, sc.nx, sc.ny, sc.nz, outNew, slotOpts, 777, slotSkip);
 referenceIrradiance(slotGrid, values, sc.px, sc.py, sc.pz, sc.nx, sc.ny, sc.nz, outOld, slotOpts, 777, new Set(sc.own));
-const glowShare = outNew.map((v, i) => v - outOld[i]);
-console.log(`two material slots on one mesh, cell ${sc.key} at cell size ${slotGrid.cellSize.toFixed(3)} m ` +
-  `(pinned to the clamp, tolerance 0): winding — plain faces +Y ${pn[1] > 0}, glow faces -Y ${gn[1] < 0} ` +
-  `(tolerance 0); both slots in the same cell ${slotOk}; the point stands on slot ${slotOwnM} ` +
-  `(the plain one, 0.02 m2 against 0.01 m2); skipped ${[...slotSkip].sort((a, b) => a - b).join(',')}, ` +
-  `must be exactly the plain face (tolerance 0); glow face skipped: ${slotSkip.has(1)} (must be false)`);
-console.log(`  consequence (float, only "contributes at all" is asserted, floor ${EXEC_FLOOR}): ` +
-  `with the rule ${outNew.map((v) => v.toFixed(6)).join(', ')} against ${outOld.map((v) => v.toFixed(6)).join(', ')} ` +
-  `with the old whole-mesh rule, which reads exactly 0 for its own surface (tolerance 0); ` +
-  `the glow contributes ${glowShare.map((v) => v.toFixed(6)).join(', ')} per channel`);
-if (Math.abs(slotGrid.cellSize - 1.0) > 1e-12) throw new Error(`6c: cell size must be the pinned clamp, got ${slotGrid.cellSize}`);
-if (pn[1] <= 0 || gn[1] >= 0) throw new Error(`6c: winding wrong — plain ${pn.join(',')}, glow ${gn.join(',')}`);
-if (!slotOk) throw new Error('6c: the two slots of one mesh are not in the same cell');
-if (slotOwnM !== 0) throw new Error(`6c: the point must stand on the larger slot (0), got ${slotOwnM}`);
+// Each surface measured on its own: the point skips everything except that one surface, so the
+// number is that surface's contribution, not a mix. The old rule (skip the whole mesh) reads exactly
+// 0 for its own surface, so the difference between the rules is exactly these contributions.
+const glowOnly = new Float64Array(3), pairOnly = new Float64Array(3);
+referenceIrradiance(slotGrid, values, sc.px, sc.py, sc.pz, sc.nx, sc.ny, sc.nz, glowOnly, slotOpts, 777,
+  new Set(sc.own.filter((ti) => ti !== 1)));
+referenceIrradiance(slotGrid, values, sc.px, sc.py, sc.pz, sc.nx, sc.ny, sc.nz, pairOnly, slotOpts, 777,
+  new Set(sc.own.filter((ti) => ti !== 2)));
+console.log(`three surfaces in one cell, cell ${sc.key} at cell size ${slotGrid.cellSize.toFixed(3)} m ` +
+  `(density ${sc.density.toFixed(1)} texels/m2, reported; cell membership tolerance 0): ${sc.own.length} ` +
+  `triangles = one mesh with two slots (0 plain, 1 glow) plus a different mesh on slot 0; winding — ` +
+  `plain +Y ${pn[1] > 0}, glow -Y ${gn[1] < 0}, pairB -Y ${bn[1] < 0} (tolerance 0); the point stands on ` +
+  `mesh ${own.mesh} slot ${own.slot} (largest area 0.06 m2, tolerance 0); skipped ` +
+  `${[...slotSkip].sort((a, b) => a - b).join(',')} must be exactly 0 (tolerance 0); glow skipped: ` +
+  `${slotSkip.has(1)} (must be false), pairB skipped: ${slotSkip.has(2)} (must be false)`);
+console.log(`  fixed ray pattern, ${slotOpts.raysPerCell} directions (reported): plain ${slotHits[0]}, ` +
+  `glow ${slotHits[1]}, pairB ${slotHits[2]} hits — each lit patch must be hit at least once, otherwise ` +
+  `a measured 0 would be luck and not the rule (tolerance 0, minimum 1)`);
+console.log(`  consequence (float, only "contributes at all" is asserted, floor ${EXEC_FLOOR}): the point ` +
+  `reads ${outNew.map((v) => v.toFixed(6)).join(', ')} with the rule, and exactly 0, 0, 0 with the old ` +
+  `whole-mesh rule; measured alone, the glow contributes ${glowOnly.map((v) => v.toFixed(6)).join(', ')} ` +
+  `and the different-mesh same-slot surface ${pairOnly.map((v) => v.toFixed(6)).join(', ')} per channel`);
+if (sc.own.length !== 3) throw new Error(`6c: the three surfaces are not in the same cell (cell ${sc.key}, ${sc.own.length})`);
+if (pn[1] <= 0 || gn[1] >= 0 || bn[1] >= 0) throw new Error(`6c: winding wrong — plain ${pn.join(',')}, glow ${gn.join(',')}, pairB ${bn.join(',')}`);
+if (own.mesh !== 'TwoSlot_panel' || own.slot !== 0) throw new Error(`6c: the point must stand on TwoSlot_panel slot 0, got ${own.mesh} ${own.slot}`);
 if ([...slotSkip].length !== 1 || !slotSkip.has(0)) throw new Error(`6c: skip set must be exactly the plain face, got ${[...slotSkip].join(',')}`);
-if (slotSkip.has(1)) throw new Error('6c: a different material in the same cell must not be skipped');
+if (slotSkip.has(1)) throw new Error('6c: a different slot of the same mesh must not be skipped');
+if (slotSkip.has(2)) throw new Error('6c: a different mesh with the same slot must not be skipped');
 if (outOld.some((v) => v !== 0)) throw new Error(`6c: the old rule must read exactly 0 for its own surface, got ${outOld.join(', ')}`);
-if (glowShare.some((v) => v <= EXEC_FLOOR)) throw new Error(`6c: the glowing slot contributes nothing (${glowShare.join(', ')})`);
+if (slotHits[1] < 1 || slotHits[2] < 1) throw new Error(`6c: the fixed pattern never reaches a lit patch (glow ${slotHits[1]}, pairB ${slotHits[2]})`);
+if (glowOnly.some((v) => v <= EXEC_FLOOR)) throw new Error(`6c: the glowing slot contributes nothing (${glowOnly.join(', ')})`);
+if (pairOnly.some((v) => v <= EXEC_FLOOR)) throw new Error(`6c: the same-slot face of another mesh contributes nothing (${pairOnly.join(', ')})`);
 
-// tie on area: the smaller slot index wins, so the answer is deterministic (tolerance 0)
+// tie on area: the smaller slot index wins, so the answer is deterministic (tolerance 0). The areas
+// must be EXACTLY equal for the tie to be a tie, so the coordinates use binary-exact values (0, 0.125,
+// 0.25): a tie written as 0.05 / 0.15 / 0.24 gives 0.005 on one side and 0.004999999999999999 on the
+// other, and then the tie is decided by a rounding error rather than by the rule. Both triangles are
+// 0.0078125 m2, both inside the cell (cell size lands on the clamp floor 0.25 m here).
 const tieTris = [
-  slotTri([0.05, 0, 0.05, 0.15, 0, 0.05, 0.05, 0, 0.10],
-    [gRect[0], gRect[1], gRect[2], gRect[1], gRect[0], gRect[3]], 'slotGlow', 1),
-  slotTri([0.15, 0, 0.05, 0.25, 0, 0.05, 0.15, 0, 0.10],
-    [pRect[0], pRect[1], pRect[2], pRect[1], pRect[0], pRect[3]], 'slotPlain', 0),
+  slotTri([0, 0, 0, 0.125, 0, 0, 0, 0, 0.125], [0, 1, 3], 'slotGlow', 1, 'Tie_mesh_A'),
+  slotTri([0.125, 0, 0, 0.25, 0, 0, 0.125, 0, 0.125], [0, 1, 3], 'slotPlain', 0, 'Tie_mesh_B'),
 ];
 const tieGrid = buildLightGrid(tieTris, values, RES, slotOpts);
 const tieCell = tieGrid.cells.findIndex((c) => c.own.length === 2);
-const tieM = tieCell >= 0 ? ownMaterial(tieGrid, tieCell) : -1;
-console.log(`equal areas with slots 1 and 0 in one cell (tolerance 0): slot ${tieM}, must be 0`);
-if (tieM !== 0) throw new Error(`6c: on an area tie the smaller slot index must win, got ${tieM}`);
+const tieOwn = tieCell >= 0 ? ownSurface(tieGrid, tieCell) : { mesh: '', slot: -1 };
+console.log(`equal areas (${tieGrid.metrics[0].areaM2} m2 each, exactly equal in binary arithmetic, so the ` +
+  `tie is real) with slots 1 and 0 in one cell ${tieGrid.cells[tieCell]?.key} (cell size ` +
+  `${tieGrid.cellSize.toFixed(3)} m, at the clamp floor, tolerance 0): slot ${tieOwn.slot}, ` +
+  `mesh ${tieOwn.mesh}, must be slot 0`);
+if (tieCell < 0) throw new Error('6c: the two equal-area faces are not in the same cell');
+if (tieGrid.metrics[0].areaM2 !== tieGrid.metrics[1].areaM2) throw new Error('6c: the two areas are not exactly equal, so this is not a tie test');
+if (tieOwn.slot !== 0) throw new Error(`6c: on an area tie the smaller slot index must win, got ${tieOwn.slot}`);
 
 // a mesh with only one slot keeps the strict rule (tolerance 0): it reads nothing for itself
 const soloGrid = buildLightGrid([slotTris[1]], values, RES, slotOpts);
