@@ -98,6 +98,13 @@ export function shIrradiance(coefs: Float64Array, nx: number, ny: number, nz: nu
 export interface GridTriangle {
   verts: number[];
   uv: number[];
+  /**
+   * Which material slot this face uses (glTF writes poly.material_index per face). One mesh can
+   * carry several slots, so a plain wall and a glowing patch on the same mesh are two materials
+   * on one node - which is how the owner authors in Blender. Without this field the whole mesh is
+   * one material and the glowing part is skipped as "itself", so it lights nothing.
+   */
+  materialIndex?: number;
 }
 
 interface Metric {
@@ -161,6 +168,9 @@ export interface LightGrid {
   visible: number[][];
   metrics: Metric[];
   triangleVertices: number[][];
+  /** triangle index -> material slot, in the order the triangles were given. Filled from
+   *  GridTriangle.materialIndex (glTF poly.material_index), 0 when the source has no slot. */
+  triangleMaterial: number[];
   /** what buildLightGrid was actually called with, kept on the grid so the packer and the
    *  file can write it down — a file without the seed and ray count is not reproducible */
   seed: number;
@@ -666,6 +676,7 @@ export function buildLightGrid(tris: GridTriangle[], values: Float64Array, resol
   const grid: LightGrid = {
     cellSize: 0, resolution, cells: [], sh: new Float64Array(0),
     buckets: new Map(), cellOfKey: new Map(), visible: [], metrics: [], triangleVertices: [],
+    triangleMaterial: [],
     neighbourMask: new Uint32Array(0), seed: o.seed, raysPerCell: o.raysPerCell,
   };
 
@@ -675,6 +686,8 @@ export function buildLightGrid(tris: GridTriangle[], values: Float64Array, resol
     if (!m) continue;
     grid.metrics.push(m);
     grid.triangleVertices.push(tri.verts);
+    // pushed in the same order as metrics, so a triangle index means the same entry in both
+    grid.triangleMaterial.push(tri.materialIndex ?? 0);
     texelArea += m.areaTexel;
     metreArea += m.areaM2;
   }
@@ -759,6 +772,38 @@ export function buildLightGrid(tris: GridTriangle[], values: Float64Array, resol
   return grid;
 }
 
+/**
+ * Which material the sample point of a cell stands on. One mesh can carry several material slots,
+ * so a single cell can hold faces of two materials (a plain wall plus a glowing patch on the same
+ * node). The point has one material: the slot with the largest area inside the cell; on a tie the
+ * smaller slot index wins, so the answer is deterministic. When the source recorded no slot at all,
+ * the old strict rule stays and this returns -1, which means "skip everything of this cell".
+ */
+export function ownMaterial(grid: LightGrid, cellIndex: number): number {
+  const c = grid.cells[cellIndex];
+  let best = -1, bestArea = -1;
+  for (const ti of c.own) {
+    const m = grid.triangleMaterial[ti] ?? 0;
+    const a = grid.metrics[ti].areaM2;
+    if (a > bestArea || (a === bestArea && m < best)) { bestArea = a; best = m; }
+  }
+  return best;
+}
+
+/**
+ * The self-light rule, written out so the check can assert it: exclude the faces of the material the
+ * point is standing on. Faces of a DIFFERENT material inside the same cell are not excluded, because
+ * a glowing patch and the plain wall next to it are two different surfaces - light from one to the
+ * other is real bounce, not self-lighting. A point can still never light itself, so the rule is
+ * "same material", not "same mesh".
+ */
+export function skipSetFor(grid: LightGrid, cellIndex: number): Set<number> {
+  const c = grid.cells[cellIndex];
+  const own = ownMaterial(grid, cellIndex);
+  if (own < 0) return new Set(c.own);
+  return new Set(c.own.filter((ti) => (grid.triangleMaterial[ti] ?? 0) === own));
+}
+
 /** One cell: a sphere (air) or hemisphere (surface) of rays projected onto SH. */
 export function fillCell(grid: LightGrid, cellIndex: number, values: Float64Array, opts: LightGridOptions, seed: number): number {
   const o = { ...DEFAULTS, ...opts };
@@ -785,10 +830,11 @@ export function fillCell(grid: LightGrid, cellIndex: number, values: Float64Arra
 
   const samples = Math.max(1, o.raysPerCell);
   // a surface must not count its own bake value as incoming light, so the triangles
-  // this cell holds are skipped. The reference uses the same rule, which is why the
-  // comparison measures pure SH representation error.
+  // this cell holds are skipped - but only the ones of the material the point stands on
+  // (skipSetFor), so a second material in the same cell can still light it. The reference
+  // uses the same rule, which is why the comparison measures pure SH representation error.
   const base = cellIndex * 27;
-  const seen = projectCoefficients(grid, values, c.px, c.py, c.pz, samples, seed + cellIndex, new Set(c.own), grid.sh.subarray(base, base + 27), o.maxRayDistance);
+  const seen = projectCoefficients(grid, values, c.px, c.py, c.pz, samples, seed + cellIndex, skipSetFor(grid, cellIndex), grid.sh.subarray(base, base + 27), o.maxRayDistance);
   grid.visible[cellIndex] = [...seen];
   return 1;
 }

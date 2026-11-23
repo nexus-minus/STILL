@@ -115,6 +115,7 @@ import {
   buildLightGrid, buildNeighbourVisibility, dirtyCellsFor, fillCell, hashCellKey, lastSampleDistance, lastSampleOwn, packLightGrid, projectCoefficients,
   referenceIrradiance, sampleIrradiance, sampleBlendIrradiance, shIrradiance, packedSlot, packedIrradiance, packedBlend, packedBlendIrradiance,
   DEFAULT_BLEND, SH_GRID_STRIDE_VEC4, SH_TERMS, LOBE, BAND, neighbourBit, shBasis, lightmapAt, trace, toHalfBits, fromHalfBits, decodeHalfTexels, encodeLightGrid, decodeLightGrid, GRID_SCALE,
+  ownMaterial, skipSetFor, shBasisAtDirection,
 } from '../src/world/light-grid.ts';
 import { buildGridFile, lightgridManifest } from '../tools/write_lightgrid.mjs';
 import fs from 'node:fs';
@@ -138,6 +139,10 @@ const ISLANDS = [
   { name: 'ceilB', value: 0.20, area: 36 },
   { name: 'wallB', value: 0.12, area: 18 },
   { name: 'doorwallB', value: 0.10, area: 10 },
+  // 6c) needs two islands for ONE mesh with two material slots. Appended at the end, so the
+  // layout of every island above stays where it was and the numbers before 6c do not move.
+  { name: 'slotPlain', value: 0.06, area: 0.02 },
+  { name: 'slotGlow', value: 1.00, area: 0.01 },
 ];
 // the reference measure is a percentage, so the scale cancels out — as long as the
 // denominator is the brightest value ON THE SAME SCALE as the values being compared.
@@ -1196,6 +1201,89 @@ struct MaskTable { value: array<u32> }
 }
 console.log(execLine);
 
+// 6c) One mesh with TWO material slots — how the owner authors in Blender (one node, faces split in
+//    edit mode, normal + glow). Tolerances, declared before the numbers: the rule itself is a set
+//    rule, so tolerance 0 for which slot the point stands on, which triangles are skipped, which
+//    cell holds them, and for a value that must be exactly zero. Only the consequence is a float,
+//    and it is asserted as "the glowing slot contributes at all" with the floor 1e-9 declared in
+//    section 6b; the size of that contribution is reported, not asserted.
+//    The rule, written down before measuring: skip = the material the point stands on, NOT the whole
+//    mesh. A point can never light itself, but a glowing patch and a plain surface inside the same
+//    cell are two different surfaces, so light from one to the other is real bounce. Without a slot
+//    field the whole mesh is one material, the glow is skipped as "itself", and it lights nothing.
+//    Geometry note, learned by the first run of this section: two COPULAR patches in the same cell
+//    contribute almost nothing, because the cosine factor between a ray and the surface it grazes is
+//    about zero — that is physically right, not a bug. So the glowing patch is placed where it can
+//    actually see the point: above it, facing down. Cell size is pinned to the clamp (tolerance 0)
+//    so "the same cell" is a fact and not an accident of the density.
+const slotOpts = { seed: 777, raysPerCell: 512, minCellSize: 1.0 };
+const slotTri = (verts, uv, island, materialIndex) => ({ verts, uv, island, materialIndex });
+const rectUV = (name) => rects[name].map((v) => v / RES);
+const pRect = rectUV('slotPlain'), gRect = rectUV('slotGlow');
+// normal of a triangle from its winding, so the winding is checked before anything is measured
+const faceNormal = (v) => {
+  const e1 = [v[3] - v[0], v[4] - v[1], v[5] - v[2]], e2 = [v[6] - v[0], v[7] - v[1], v[8] - v[2]];
+  return [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+};
+const plainTri = slotTri([0.05, 0, 0.05, 0.05, 0, 0.25, 0.25, 0, 0.05],   // legs 0.20 x 0.20 = 0.02 m2
+  [pRect[0], pRect[1], pRect[0], pRect[3], pRect[2], pRect[1]], 'slotPlain', 0);
+const glowTri = slotTri([0.10, 0.6, 0.10, 0.20, 0.6, 0.10, 0.10, 0.6, 0.30], // legs 0.10 x 0.20 = 0.01 m2
+  [gRect[0], gRect[1], gRect[2], gRect[1], gRect[0], gRect[3]], 'slotGlow', 1);
+const slotTris = [plainTri, glowTri];
+const pn = faceNormal(plainTri.verts), gn = faceNormal(glowTri.verts);
+const slotGrid = buildLightGrid(slotTris, values, RES, slotOpts);
+const slotCell = slotGrid.cells.findIndex((c) => c.own.includes(0));
+if (slotCell < 0) throw new Error('6c: no cell holds the plain slot of the two-slot mesh');
+const sc = slotGrid.cells[slotCell];
+const slotOk = sc.own.length === 2 && sc.own.includes(1);
+const slotOwnM = ownMaterial(slotGrid, slotCell);
+const slotSkip = skipSetFor(slotGrid, slotCell);
+const outNew = new Float64Array(3), outOld = new Float64Array(3);
+referenceIrradiance(slotGrid, values, sc.px, sc.py, sc.pz, sc.nx, sc.ny, sc.nz, outNew, slotOpts, 777, slotSkip);
+referenceIrradiance(slotGrid, values, sc.px, sc.py, sc.pz, sc.nx, sc.ny, sc.nz, outOld, slotOpts, 777, new Set(sc.own));
+const glowShare = outNew.map((v, i) => v - outOld[i]);
+console.log(`two material slots on one mesh, cell ${sc.key} at cell size ${slotGrid.cellSize.toFixed(3)} m ` +
+  `(pinned to the clamp, tolerance 0): winding — plain faces +Y ${pn[1] > 0}, glow faces -Y ${gn[1] < 0} ` +
+  `(tolerance 0); both slots in the same cell ${slotOk}; the point stands on slot ${slotOwnM} ` +
+  `(the plain one, 0.02 m2 against 0.01 m2); skipped ${[...slotSkip].sort((a, b) => a - b).join(',')}, ` +
+  `must be exactly the plain face (tolerance 0); glow face skipped: ${slotSkip.has(1)} (must be false)`);
+console.log(`  consequence (float, only "contributes at all" is asserted, floor ${EXEC_FLOOR}): ` +
+  `with the rule ${outNew.map((v) => v.toFixed(6)).join(', ')} against ${outOld.map((v) => v.toFixed(6)).join(', ')} ` +
+  `with the old whole-mesh rule, which reads exactly 0 for its own surface (tolerance 0); ` +
+  `the glow contributes ${glowShare.map((v) => v.toFixed(6)).join(', ')} per channel`);
+if (Math.abs(slotGrid.cellSize - 1.0) > 1e-12) throw new Error(`6c: cell size must be the pinned clamp, got ${slotGrid.cellSize}`);
+if (pn[1] <= 0 || gn[1] >= 0) throw new Error(`6c: winding wrong — plain ${pn.join(',')}, glow ${gn.join(',')}`);
+if (!slotOk) throw new Error('6c: the two slots of one mesh are not in the same cell');
+if (slotOwnM !== 0) throw new Error(`6c: the point must stand on the larger slot (0), got ${slotOwnM}`);
+if ([...slotSkip].length !== 1 || !slotSkip.has(0)) throw new Error(`6c: skip set must be exactly the plain face, got ${[...slotSkip].join(',')}`);
+if (slotSkip.has(1)) throw new Error('6c: a different material in the same cell must not be skipped');
+if (outOld.some((v) => v !== 0)) throw new Error(`6c: the old rule must read exactly 0 for its own surface, got ${outOld.join(', ')}`);
+if (glowShare.some((v) => v <= EXEC_FLOOR)) throw new Error(`6c: the glowing slot contributes nothing (${glowShare.join(', ')})`);
+
+// tie on area: the smaller slot index wins, so the answer is deterministic (tolerance 0)
+const tieTris = [
+  slotTri([0.05, 0, 0.05, 0.15, 0, 0.05, 0.05, 0, 0.10],
+    [gRect[0], gRect[1], gRect[2], gRect[1], gRect[0], gRect[3]], 'slotGlow', 1),
+  slotTri([0.15, 0, 0.05, 0.25, 0, 0.05, 0.15, 0, 0.10],
+    [pRect[0], pRect[1], pRect[2], pRect[1], pRect[0], pRect[3]], 'slotPlain', 0),
+];
+const tieGrid = buildLightGrid(tieTris, values, RES, slotOpts);
+const tieCell = tieGrid.cells.findIndex((c) => c.own.length === 2);
+const tieM = tieCell >= 0 ? ownMaterial(tieGrid, tieCell) : -1;
+console.log(`equal areas with slots 1 and 0 in one cell (tolerance 0): slot ${tieM}, must be 0`);
+if (tieM !== 0) throw new Error(`6c: on an area tie the smaller slot index must win, got ${tieM}`);
+
+// a mesh with only one slot keeps the strict rule (tolerance 0): it reads nothing for itself
+const soloGrid = buildLightGrid([slotTris[1]], values, RES, slotOpts);
+const soloCell = soloGrid.cells.findIndex((c) => c.own.length === 1);
+const soloSkip = soloCell >= 0 ? skipSetFor(soloGrid, soloCell) : new Set();
+const soloOut = new Float64Array(3);
+if (soloCell >= 0) referenceIrradiance(soloGrid, values, soloGrid.cells[soloCell].px, soloGrid.cells[soloCell].py, soloGrid.cells[soloCell].pz, soloGrid.cells[soloCell].nx, soloGrid.cells[soloCell].ny, soloGrid.cells[soloCell].nz, soloOut, slotOpts, 777, soloSkip);
+console.log(`one-slot mesh alone, cell ${soloGrid.cells[soloCell]?.key} (tolerance 0): slot ` +
+  `${soloCell >= 0 ? ownMaterial(soloGrid, soloCell) : -1}, skipped ${[...soloSkip].join(',')}, ` +
+  `reads ${Array.from(soloOut).join(', ')}`);
+if (soloCell < 0 || soloSkip.size !== 1) throw new Error('6c: a single-slot mesh must still skip itself');
+
 // 7) UV row convention + manifest block. tools/bake_map.py is the only side that knows Blender's
 //    island layout, so it writes the inputs and the tool does the maths. The flip is the part
 //    that is easy to get backwards, so the rule is mirrored here and declared before the numbers:
@@ -1308,4 +1396,4 @@ if (!/range\(1, len\(loops\) - 1\)/.test(pySrc)) throw new Error('the writer mus
 if (manifestDiff.length) throw new Error(`the manifest block does not equal the header the game reads back: ${manifestDiff.join(', ')}`);
 if (!callsTool) throw new Error('tools/bake_map.sh does not call tools/write_lightgrid.mjs after the bake — the grid file would never be written');
 
-console.log('PASS light-grid CPU reference (cell size from geometry, density warning, SH truncation, air cells, dirty flag, GPU mirror, file path, WGSL mirror, UV convention)');
+console.log('PASS light-grid CPU reference (cell size from geometry, density warning, SH truncation, air cells, dirty flag, GPU mirror, file path, WGSL mirror, material slot rule, UV convention)');
