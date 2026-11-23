@@ -2,7 +2,7 @@
 /** CPU reference: two open areas joined by a corridor, one changing lamp, one moving actor. */
 import {
   buildSparseSHGrid, chooseCellSize, evaluateSHOrder2, projectSHOrder2,
-  sampleSparseSHGrid, updateSHGridRegion,
+  isotropicSH, packSparseSHGrid, sampleSparseSHGrid, updateSHGridRegion,
 } from '../src/world/sh-grid.mjs';
 
 const dirs = [];
@@ -49,4 +49,14 @@ if (changed.affectedCells !== 1 || Math.abs(eastAfter[0] - sphere[0]) > 1e-5) {
   throw new Error('marked state updated cells outside its affected spatial region');
 }
 if (grid.cells.get(eastKey) !== eastCell) throw new Error('unaffected cell was rebuilt');
+const packed = packSparseSHGrid(grid, [-4, 0, -2], [4, 3, 2]);
+const iso = isotropicSH([0.25, 0.5, 0.75]);
+const isoValue = evaluateSHOrder2(iso, [0, 1, 0]);
+if (Math.max(...isoValue.map((v, i) => Math.abs(v - [0.25, 0.5, 0.75][i]))) > 1e-5) {
+  throw new Error('isotropic SH L0 did not reproduce its RGB value');
+}
+if (packed.occupiedCells !== 3 || packed.data.length !== packed.dimensions[0] * packed.dimensions[1] * packed.dimensions[2] * 32) {
+  throw new Error('GPU SH buffer packing size or occupied cell count is wrong');
+}
+console.log(`GPU storage packing: ${packed.dimensions.join('×')} dense slots, ${packed.occupiedCells} occupied, ${packed.data.byteLength} bytes`);
 console.log('PASS SH grid CPU reference');
