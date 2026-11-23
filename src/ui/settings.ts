@@ -1,4 +1,11 @@
-import { TIER_ORDER, TIER_PRESETS, type OverrideKey, type QualityManager, type Tier } from '../render/quality.js';
+import {
+  TIER_ORDER,
+  TIER_PRESETS,
+  type AAMode,
+  type OverrideKey,
+  type QualityManager,
+  type Tier,
+} from '../render/quality.js';
 import { ACTION_LABELS, keyLabel, PLAYER_ACTIONS, ALL_ACTIONS, type Action, type Bindings } from '../gameplay/bindings.js';
 import type { PlayerController } from '../gameplay/controller.js';
 import type { OverlayPrefs } from './hud.js';
@@ -9,7 +16,13 @@ const STORAGE_KEY = 'liminal.settings.v1';
  *  restores with, so picking a preset returns the image to that known state. */
 const EXPOSURE_DEFAULT = 1;
 /** every fine-tuning key a tier defines — all cleared on "reset to preset" */
-const OVERRIDE_KEYS: OverrideKey[] = ['renderScale', 'raytracedLighting', 'volumetrics', 'lightGain'];
+const OVERRIDE_KEYS: OverrideKey[] = [
+  'renderScale',
+  'raytracedLighting',
+  'volumetrics',
+  'lightGain',
+  'antialiasing',
+];
 
 export interface PersistedSettings {
   tier?: Tier;
@@ -22,10 +35,13 @@ export interface PersistedSettings {
   lightGain?: number;
   glow?: boolean;
   exposure?: number;
-  /** Settings → Overlays — default screen is crosshair-only (crosshair ?? true) */
+  /** Settings → Graphics AA choice (the tier preset only supplies the default) */
+  aa?: AAMode;
+  /** Settings → Overlays — crosshair and the performance line default on */
   crosshair?: boolean;
   keyHints?: boolean;
   toasts?: boolean;
+  perf?: boolean;
 }
 
 export function loadSettings(): PersistedSettings {
@@ -94,6 +110,14 @@ export function initSettings(opts: {
               <input type="range" id="set-scale" min="0.5" max="1" step="0.05" />
             </label>
             <label class="row">
+              <span>Antialiasing <em id="set-aa-val"></em></span>
+              <select id="set-aa">
+                <option value="off">off</option>
+                <option value="msaa">msaa</option>
+                <option value="smaa">smaa</option>
+              </select>
+            </label>
+            <label class="row">
               <span>Exposure <em id="set-exp-val"></em></span>
               <input type="range" id="set-exp" min="0.5" max="4" step="0.1" />
             </label>
@@ -127,6 +151,10 @@ export function initSettings(opts: {
             <label class="row check">
               <input type="checkbox" id="set-ov-toasts" />
               <span>Toasts</span>
+            </label>
+            <label class="row check">
+              <input type="checkbox" id="set-ov-perf" />
+              <span>Performance line (fps + frozen)</span>
             </label>
           </section>
         </div>
@@ -183,10 +211,12 @@ export function initSettings(opts: {
     raytracedLighting: quality.override('raytracedLighting'),
     volumetrics: quality.override('volumetrics'),
     lightGain: quality.override('lightGain'),
+    aa: quality.settings.antialiasing,
     exposure: opts.getExposure(),
     crosshair: opts.getOverlays().crosshair,
     keyHints: opts.getOverlays().keyHints,
     toasts: opts.getOverlays().toasts,
+    perf: opts.getOverlays().perf,
   };
   const persist = (): void => {
     persisted.tier = quality.tier;
@@ -198,9 +228,11 @@ export function initSettings(opts: {
     persisted.exposure = opts.getExposure();
     persisted.lightGain = quality.override('lightGain');
     persisted.glow = opts.getGlow();
+    persisted.aa = quality.settings.antialiasing;
     persisted.crosshair = opts.getOverlays().crosshair;
     persisted.keyHints = opts.getOverlays().keyHints;
     persisted.toasts = opts.getOverlays().toasts;
+    persisted.perf = opts.getOverlays().perf;
     saveSettings(persisted);
   };
 
@@ -327,12 +359,15 @@ export function initSettings(opts: {
   const glow = $<HTMLInputElement>('set-glow');
   const rt = $<HTMLInputElement>('set-rt');
   const vol = $<HTMLInputElement>('set-vol');
+  const aaSelect = $<HTMLSelectElement>('set-aa');
+  const aaVal = $<HTMLElement>('set-aa-val');
   const sens = $<HTMLInputElement>('set-sens');
   const sensVal = $<HTMLElement>('set-sens-val');
   const invert = $<HTMLInputElement>('set-invert');
   const ovCrosshair = $<HTMLInputElement>('set-ov-crosshair');
   const ovHints = $<HTMLInputElement>('set-ov-hints');
   const ovToasts = $<HTMLInputElement>('set-ov-toasts');
+  const ovPerf = $<HTMLInputElement>('set-ov-perf');
 
   /** badge = "this row no longer shows the selected preset's value" — a small
    *  marker parked at the end of the row label, shown/hidden on every sync. */
@@ -351,11 +386,21 @@ export function initSettings(opts: {
     badge.hidden = !modified;
   };
 
+  /** the AA row's value text: MSAA names the sample count it asks for, SMAA names
+   *  the post pass (no sample work), 'off' names nothing */
+  const aaNote = (mode: AAMode, samples: number): string => {
+    if (mode === 'msaa') return `${samples} samples`;
+    if (mode === 'smaa') return 'post pass';
+    return 'none';
+  };
+
   const syncUI = (): void => {
     const s = quality.settings;
     preset.value = quality.hasOverrides ? '__custom' : quality.tier;
     scale.value = String(s.renderScale);
     scaleVal.textContent = `${Math.round(s.renderScale * 100)}%`;
+    aaSelect.value = s.antialiasing;
+    aaVal.textContent = aaNote(s.antialiasing, s.msaaSamples);
     exposure.value = String(opts.getExposure());
     exposureVal.textContent = `${opts.getExposure().toFixed(1)}×`;
     gain.value = String(s.lightGain);
@@ -370,6 +415,7 @@ export function initSettings(opts: {
     ovCrosshair.checked = ov.crosshair;
     ovHints.checked = ov.keyHints;
     ovToasts.checked = ov.toasts;
+    ovPerf.checked = ov.perf;
     // per-row deviation markers against the selected tier's preset values.
     // glow stays unmarked: it's a runtime preference (B key, auto-disabled on
     // broken drivers) gated by a preset field (bloom) that is constantly true —
@@ -381,6 +427,9 @@ export function initSettings(opts: {
     markRow(exposure, opts.getExposure() !== EXPOSURE_DEFAULT);
     markRow(gain, s.lightGain !== tierPreset.lightGain);
     markRow(rt, s.raytracedLighting !== tierPreset.raytracedLighting);
+    // AA is a preset field too, so a manual pick gets the same "custom" badge —
+    // and picking a preset hands the default back (SMAA on the weak tiers).
+    markRow(aaSelect, s.antialiasing !== tierPreset.antialiasing);
     // volumetrics is a TIER preset field (potato off, medium+ on), so it gets
     // the deviation badge exactly like the RT row — unlike glow, which is a
     // runtime preference on top of a constantly-true preset field
@@ -433,6 +482,14 @@ export function initSettings(opts: {
     syncUI();
     persist();
   });
+  // AA: the player's decision, the tier preset only supplied the default. The
+  // menu writes the override; main.ts (quality.onChange) hands it to the
+  // pipeline, which is where the sample count actually lands.
+  aaSelect.addEventListener('change', () => {
+    quality.setOverride('antialiasing', aaSelect.value as AAMode);
+    syncUI();
+    persist();
+  });
   sens.addEventListener('input', () => {
     controller.sensitivityMultiplier = Number(sens.value);
     syncUI();
@@ -451,6 +508,7 @@ export function initSettings(opts: {
   ovCrosshair.addEventListener('change', () => setOverlay('crosshair', ovCrosshair.checked));
   ovHints.addEventListener('change', () => setOverlay('keyHints', ovHints.checked));
   ovToasts.addEventListener('change', () => setOverlay('toasts', ovToasts.checked));
+  ovPerf.addEventListener('change', () => setOverlay('perf', ovPerf.checked));
   $('#set-reset').addEventListener('click', () => {
     bindings.reset();
     for (const [a, btn] of bindButtons) btn.textContent = keyLabel(bindings.get(a));

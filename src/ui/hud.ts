@@ -9,11 +9,14 @@ let messageTimer: number | undefined;
  *  player overlay is opt-in via Settings → Overlays (persisted in main.ts). */
 let toastsOn = false;
 
-/** Settings → Overlays. crosshair is the one default-on overlay. */
+/** Settings → Overlays. crosshair and the performance line are the default-on
+ *  overlays; everything else is opt-in. */
 export interface OverlayPrefs {
   crosshair: boolean;
   keyHints: boolean;
   toasts: boolean;
+  /** the fps + frozen line (bottom-left) — the HUD readout the player asked for */
+  perf: boolean;
 }
 
 function showMessage(text: string, ms: number): void {
@@ -48,6 +51,7 @@ export const hud = {
     toastsOn = prefs.toasts;
     $('crosshair').classList.toggle('hidden', !prefs.crosshair);
     $('hint').classList.toggle('hidden', !prefs.keyHints);
+    $('perf').classList.toggle('hidden', !prefs.perf);
     if (!toastsOn) {
       // an active toast must not linger after the toggle turns toasts off
       window.clearTimeout(messageTimer);
@@ -65,6 +69,13 @@ export const hud = {
   /** persistent top-left line: backend / tier / fps */
   stats(text: string): void {
     $('stats').textContent = text;
+  },
+
+  /** the player-facing performance line (bottom-left): fps + the idle freeze.
+   *  A frozen frame and a slow frame look identical on screen, so the line has
+   *  to say which one it is — that is what the settings-hud check asserts. */
+  perf(text: string): void {
+    $('perf').textContent = text;
   },
 
   mapCanvas(): HTMLCanvasElement {

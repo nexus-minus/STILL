@@ -210,6 +210,11 @@ async function main(): Promise<void> {
   if (persisted.volumetrics !== undefined) {
     quality.setOverride('volumetrics', persisted.volumetrics);
   }
+  // AA: the persisted pick wins; with nothing stored the DETECTED tier decides,
+  // which is the "SMAA on weak GPUs" rule (potato/medium presets name SMAA).
+  if (persisted.aa !== undefined) {
+    quality.setOverride('antialiasing', persisted.aa);
+  }
   // ?vol=0|off|1|on — URL override for the volumetrics toggle (test/tuning
   // hook: scripts/rt-vol-smoke.mjs boots ?vol=off to prove the off path
   // dispatches nothing; overrides win over the persisted setting, exactly
@@ -223,6 +228,9 @@ async function main(): Promise<void> {
 
   const applyQuality = (): void => {
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2) * quality.settings.renderScale);
+    // AA is applied through the pipeline (the menu never touches the renderer
+    // directly), so the check can read exactly what a pick changed
+    pipeline.setAA(quality.settings.antialiasing, quality.settings.msaaSamples);
   };
   quality.onChange = () => {
     applyQuality();
@@ -358,6 +366,12 @@ async function main(): Promise<void> {
   };
 
   // ---- HUD / hotkeys --------------------------------------------------------
+  const perfLine = (fps: number): string => {
+    // The player-facing line: fps + what the AA choice is, plus "frozen" when the
+    // last frame ran no ray work. Same freeze source as the dev readout.
+    return `${fps} fps · ${quality.settings.antialiasing}${advanced?.idle ? ' · frozen' : ''}`;
+  };
+
   const statsLine = (fps: number): string => {
     const f = controller.feet;
     // The idle freeze is invisible unless the HUD says so: "frozen" means no
@@ -385,12 +399,13 @@ async function main(): Promise<void> {
   if (persisted.glow !== undefined) pipeline.setGlowEnabled(persisted.glow);
 
   // ---- HUD overlays (Settings → Overlays) ---------------------------------
-  // Default screen = game + crosshair dot only; every other player overlay is
-  // opt-in and persisted. Dev readouts stay behind ?dev=1 alone.
+  // Default screen = game + crosshair dot + the performance line; every other
+  // player overlay is opt-in and persisted. Dev readouts stay behind ?dev=1 alone.
   const overlayPrefs: OverlayPrefs = {
     crosshair: persisted.crosshair ?? true,
     keyHints: persisted.keyHints ?? false,
     toasts: persisted.toasts ?? false,
+    perf: persisted.perf ?? true,
   };
   hud.setOverlays(overlayPrefs);
   hud.setDevVisible(devMode);
@@ -775,7 +790,9 @@ async function main(): Promise<void> {
     fpsFrames++;
     fpsTimer += dt;
     if (fpsTimer >= 0.5) {
-      hud.stats(statsLine(Math.round(fpsFrames / fpsTimer)));
+      const fps = Math.round(fpsFrames / fpsTimer);
+      hud.stats(statsLine(fps));
+      hud.perf(perfLine(fps));
       fpsFrames = 0;
       fpsTimer = 0;
     }

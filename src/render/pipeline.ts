@@ -1,5 +1,5 @@
 import type { WebGPURenderer, Scene, PerspectiveCamera } from 'three/webgpu';
-import type { QualitySettings } from './quality.js';
+import type { AAMode, QualitySettings } from './quality.js';
 import type { FrameContext, RenderPass } from './passes/types.js';
 import type { PostChain } from './passes/post.js';
 import type { AdvancedRenderer } from './rt.js';
@@ -21,6 +21,11 @@ export class FramePipeline {
   private advanced?: AdvancedRenderer;
   /** manual (B key) + automatic (black-frame detector) glow gate */
   private glowEnabled = true;
+
+  /** the player's AA choice (Settings → Graphics). The pipeline is its source of
+   *  truth, so a menu pick can be read back exactly by the check. */
+  private aaMode: AAMode = 'smaa';
+  private aaRequestedSamples = 0;
 
   constructor(renderer: WebGPURenderer) {
     this.renderer = renderer;
@@ -63,6 +68,57 @@ export class FramePipeline {
     return this.glowEnabled;
   }
 
+  // ---- antialiasing (the player's choice, Settings → Graphics) --------------
+
+  /**
+   * Apply the AA choice.
+   *
+   *   'off'  — no AA work at all: the canvas target runs single-sample.
+   *   'smaa' — no MSAA target either; SMAA is a post pass, so the sample count
+   *            must be 0 here. The SMAA pass itself is still open
+   *            (docs/realtime-rt-techniques.md) — the mode is recorded now so the
+   *            pass can read it when it lands.
+   *   'msaa' — geometry MSAA at the tier's sample count. The post chain inherits it:
+   *            its scene pass takes the renderer's sample count, so the picture the
+   *            graph samples is the resolved one (measured in scripts/smaa-edge-check.mjs).
+   *            The fullscreen pass itself still runs single-sample, and WebGPU clamps
+   *            the count to 1 or 4, so ultra's 8 lands as 4.
+   *
+   * three takes the sample count from the renderer CONSTRUCTOR and exposes
+   * `samples` as a read-only getter, so a live switch has to write the field
+   * three itself writes (`WebGPUBackend` sets `renderer._samples = 0` for the GL
+   * fallback). The WebGPU backend rebuilds the canvas target when the count
+   * changes, so a switch lands on the next frame; on the GL backend the flag is
+   * fixed for the lifetime of the context — there the recorded mode is all there
+   * is, and `effectiveSamples()` says so.
+   */
+  setAA(mode: AAMode, samples: number): void {
+    this.aaMode = mode;
+    // only a 'msaa' pick can ask for sample work; the tier decides how much
+    this.aaRequestedSamples = mode === 'msaa' ? Math.max(1, Math.min(8, Math.round(samples))) : 0;
+    const target = this.renderer as unknown as { _samples?: number };
+    if (typeof target._samples === 'number') target._samples = this.aaRequestedSamples;
+    // the pick has to reach the chain that draws the frame, otherwise the menu only
+    // records a mode and the post chain keeps whatever it was built with
+    this.post?.setAA(mode);
+  }
+
+  /** current AA mode */
+  get aa(): AAMode {
+    return this.aaMode;
+  }
+
+  /** sample count the settings menu asked for (0 for 'off' and 'smaa') */
+  get aaSamples(): number {
+    return this.aaRequestedSamples;
+  }
+
+  /** what the renderer actually runs with. 0 while a fullscreen post pass draws
+   *  the frame — three zeroes the sample count for those passes */
+  get effectiveSamples(): number {
+    return this.renderer.samples;
+  }
+
   /** phase 1: addPass(new GBufferPass(...)) etc. */
   addPass(pass: RenderPass): void {
     this.passes.push(pass);
@@ -71,6 +127,8 @@ export class FramePipeline {
   setPost(post: PostChain): void {
     this.post?.dispose();
     this.post = post;
+    // a chain built after the pick must run it, not its own default
+    post.setAA(this.aaMode);
   }
 
   render(args: {

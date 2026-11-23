@@ -2,6 +2,14 @@ import type { Backend } from './renderer.js';
 
 export type Tier = 'potato' | 'medium' | 'high' | 'ultra';
 
+/**
+ * Antialiasing is the player's decision (Settings → Graphics). The tier presets
+ * only provide the DEFAULT: SMAA on the weak tiers (a post pass, kinder to a
+ * laptop GPU), MSAA where the tier can afford geometry MSAA, and 'off' always
+ * stays selectable.
+ */
+export type AAMode = 'off' | 'msaa' | 'smaa';
+
 export interface QualitySettings {
   /** drawing-buffer scale, 1 = native resolution */
   renderScale: number;
@@ -18,12 +26,18 @@ export interface QualitySettings {
 
   bloom: boolean;
 
+  /** player's AA choice; the tier preset is only the starting point */
+  antialiasing: AAMode;
+  /** what a 'msaa' pick asks for on this tier (0 = no MSAA target: SMAA is a post pass) */
+  msaaSamples: number;
+
   /** runtime multiplier on all traced light powers (match to Blender taste) */
   lightGain: number;
 }
 
 export const TIER_PRESETS: Record<Tier, QualitySettings> = {
   // No good GPU: plain raster + bloom, no traced passes, reduced resolution.
+  // SMAA here because a CPU/CPU-raster machine cannot afford MSAA targets.
   potato: {
     renderScale: 0.75,
     raytracedLighting: false,
@@ -32,9 +46,15 @@ export const TIER_PRESETS: Record<Tier, QualitySettings> = {
     volumetrics: false,
     volumetricScale: 0.25,
     bloom: true,
+    antialiasing: 'smaa',
+    // what a manual MSAA pick would use on this tier — 2, the cheapest MSAA the
+    // target can ask for
+    msaaSamples: 2,
     lightGain: 1,
   },
   // The default target: quarter-res traced lighting + quarter-res volumetrics.
+  // SMAA stays the default — the long soft-lit corridors are exactly the case
+  // where a post pass beats an MSAA target on a laptop.
   medium: {
     renderScale: 1,
     raytracedLighting: true,
@@ -43,6 +63,9 @@ export const TIER_PRESETS: Record<Tier, QualitySettings> = {
     volumetrics: true,
     volumetricScale: 0.25,
     bloom: true,
+    antialiasing: 'smaa',
+    // a manual MSAA pick on this tier runs 4x
+    msaaSamples: 4,
     lightGain: 1,
   },
   high: {
@@ -53,6 +76,8 @@ export const TIER_PRESETS: Record<Tier, QualitySettings> = {
     volumetrics: true,
     volumetricScale: 0.5,
     bloom: true,
+    antialiasing: 'msaa',
+    msaaSamples: 4,
     lightGain: 1,
   },
   // Full-res traced lighting.
@@ -64,13 +89,29 @@ export const TIER_PRESETS: Record<Tier, QualitySettings> = {
     volumetrics: true,
     volumetricScale: 1,
     bloom: true,
+    antialiasing: 'msaa',
+    msaaSamples: 8,
     lightGain: 1,
   },
 };
 
 export const TIER_ORDER: Tier[] = ['potato', 'medium', 'high', 'ultra'];
 
-export type OverrideKey = 'renderScale' | 'raytracedLighting' | 'volumetrics' | 'lightGain';
+/**
+ * Where "SMAA on weak GPUs" lives in code: detectTier() picks the tier, the tier
+ * preset names the AA default. Settings use this when nothing is persisted, so
+ * a weak machine boots with SMAA and a tier that affords it boots with MSAA.
+ */
+export function defaultAA(tier: Tier): AAMode {
+  return TIER_PRESETS[tier].antialiasing;
+}
+
+export type OverrideKey =
+  | 'renderScale'
+  | 'raytracedLighting'
+  | 'volumetrics'
+  | 'lightGain'
+  | 'antialiasing';
 
 export class QualityManager {
   tier: Tier;
