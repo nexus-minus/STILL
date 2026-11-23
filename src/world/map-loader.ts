@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 import { buildTestRoom, type TestRoom } from './test-room.js';
+import { decodeLightGrid, type PackedLightGrid } from './light-grid.js';
 import type { RtLight } from '../render/rt.js';
 
 export interface WorldCheckpoint {
@@ -49,6 +50,13 @@ export interface WorldDef {
   /** present when manifest.lightmap loaded — the static bake for this map */
   lightmap?: WorldLightmap;
   /**
+   * The world light-cell grid (assets/map/lightgrid.bin), built ONCE at bake time by
+   * tools/write_lightgrid.mjs. Reading it costs about a millisecond (measured: 5.37 MB in
+   * 0.6 ms), while building the same grid is 19 s — that is why the game never builds it.
+   * Absent on a map with no grid file: the render path then keeps its one-bounce ray.
+   */
+  lightgrid?: PackedLightGrid;
+  /**
    * Forward-path baked layer toggle (potato/WebGL2, RT-off, pre-BVH frames).
    * Cycles' Combined bake stores OUTGOING radiance — albedo already inside —
    * so it must be ADDED un-multiplied: `material.lightMap` would apply albedo
@@ -95,6 +103,18 @@ interface Manifest {
     preview?: string;
     /** measured maximum radiance of the bake (informational; not needed to decode 'half') */
     range?: number;
+  };
+  /**
+   * additive block written by tools/write_lightgrid.mjs (the light-cell grid). Unknown to
+   * plain exports, so a map without the grid file simply has no entry here — and the render
+   * path keeps its one-bounce ray for dynamic pixels.
+   */
+  lightgrid?: {
+    file?: string;
+    cells?: number;
+    cellSize?: number;
+    seed?: number;
+    raysPerCell?: number;
   };
 }
 
@@ -398,6 +418,26 @@ async function loadHalfLightmap(
   return { texture, range: info.range ?? 0, resolution: size };
 }
 
+/**
+ * The light-cell grid file (40-byte header + f32 slots + u32 masks), decoded by
+ * src/world/light-grid.ts — the same module scripts/light-grid-check.mjs measures, so the
+ * game reads exactly the numbers that were proven. What the game pays is the read:
+ * measured 0.6 ms for 5.37 MB, versus 19 s to build the same grid (6 M rays), which is why
+ * the file is written at bake time and never rebuilt here.
+ */
+async function loadLightGrid(file: string): Promise<PackedLightGrid> {
+  const res = await fetch(`map/${file}`);
+  if (!res.ok) throw new Error(`HTTP ${res.status} for map/${file}`);
+  const bytes = new Uint8Array(await res.arrayBuffer());
+  const packed = decodeLightGrid(bytes);
+  console.info(
+    `[world] lightgrid ${file} — ${packed.cellCount} cells, cell ${packed.cellSize.toFixed(3)} m, ` +
+      `${packed.slotCount} slots, seed ${packed.seed}, ${packed.raysPerCell} rays per cell, ` +
+      `blend ${packed.blend}`,
+  );
+  return packed;
+}
+
 async function loadLightmap(info: NonNullable<Manifest['lightmap']>): Promise<WorldLightmap> {
   const res = await fetch(`map/${info.file}`);
   if (!res.ok) throw new Error(`HTTP ${res.status} for map/${info.file}`);
@@ -524,9 +564,17 @@ export async function loadWorld(opts: { forceTest?: boolean } = {}): Promise<Wor
       })
     : Promise.resolve(undefined);
 
+  const gridPromise: Promise<PackedLightGrid | undefined> = manifest.lightgrid?.file
+    ? loadLightGrid(manifest.lightgrid.file).catch((err) => {
+        console.warn('[world] lightgrid load failed — dynamic pixels keep the one-bounce ray', err);
+        return undefined;
+      })
+    : Promise.resolve(undefined);
+
   const gltf = await loader.loadAsync(`map/${objectsFile}`);
   draco.dispose();
   const lightmap = await lightmapPromise;
+  const lightgrid = await gridPromise;
 
   const group = gltf.scene;
   group.updateMatrixWorld(true);
@@ -818,6 +866,7 @@ export async function loadWorld(opts: { forceTest?: boolean } = {}): Promise<Wor
     bounds,
     source: 'map',
     lightmap,
+    lightgrid,
     setForwardBaked,
   };
 }

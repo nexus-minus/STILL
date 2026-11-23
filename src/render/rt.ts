@@ -27,6 +27,7 @@ import { bloom } from 'three/addons/tsl/display/BloomNode.js';
 import { BVHComputeData, ndcToCameraRay } from 'three-mesh-bvh/webgpu';
 import { createBlueNoiseTexture, ditherOffset } from './bluenoise.js';
 import { VolumetricPass, type VolStats } from './passes/volumetrics.js';
+import { DEFAULT_BLEND, type PackedLightGrid } from '../world/light-grid.js';
 import type { QualitySettings } from './quality.js';
 
 // vec4 slots per light in the storage buffer:
@@ -120,7 +121,11 @@ export interface AdvancedRenderer {
  *                                because the composite multiplies the lighting
  *                                buffer by diffuse albedo)
  *        one bounce           -> cosine-hemisphere ray, shaded at the hit
- *                                point (diffuse only — specScale 0)
+ *                                point (diffuse only — specScale 0). For a DYNAMIC pixel
+ *                                (no TEXCOORD_1) the world light-cell grid replaces this
+ *                                ray when the map shipped a grid file: 8 gated corner
+ *                                cells, no ray and no jitter to accumulate. No grid file
+ *                                = the ray stays.
  *        + hemisphere ambient                               -> storage texture
  *   1b. volumetrics (phase 1b): while settings.volumetrics && !?rtdebug && !?rtmat,
  *        a fog march at settings.volumetricScale over geomTex + the light list
@@ -155,6 +160,10 @@ export function createAdvancedRenderer(
   /** decoded static bake — when present, static pixels get it from here and
    *  the NEE loop skips `baked` lights on them (backlog #9 rule 1) */
   lightmap?: { texture: THREE.Texture },
+  /** decoded light-cell grid file (assets/map/lightgrid.bin) — when present, a
+   *  dynamic surface reads its light from the cell it stands in instead of casting a
+   *  bounce ray. Absent = the world has no grid file and keeps the old one-bounce path. */
+  lightgrid?: PackedLightGrid,
   /** playable-floor anchor (world Y) for the fog height falloff — the
    *  spawn probe's ground; see VolDeps.floorY */
   fogFloorY?: number,
@@ -481,6 +490,29 @@ export function createAdvancedRenderer(
   };
   let lightsNode = makeLightsNode(lights);
 
+  // ---- LIGHT CELLS (lighting-plan step 6) ------------------------------------
+  // The decoded grid file, as two storage buffers referenced BY NAME from the raw WGSL —
+  // the same mechanism as rt_lights (verified by scripts/rt-storage-probe.mjs):
+  //   rt_grid     = the f32 slot table (SH_GRID_STRIDE_VEC4 vec4s per slot: key header +
+  //                 nine SH vec4s, channel-major inside each term)
+  //   rt_gridmask = the 27 neighbour-visibility bits per slot, so a pixel reads ONE bit
+  //                 instead of casting a ray per corner
+  // A world without the file keeps the old one-bounce ray: hasGrid gates every read, and
+  // the placeholder keeps the binding valid (same rule as the lightmap placeholder).
+  const gridAttr = new THREE.StorageBufferAttribute(lightgrid ? lightgrid.data : new Float32Array(1), 1);
+  const gridMaskAttr = new THREE.StorageBufferAttribute(
+    lightgrid ? lightgrid.neighbourMask : new Uint32Array(1), 1,
+  );
+  const gridNode = storage(gridAttr, 'float', 0).toReadOnly().setName('rt_grid');
+  const gridMaskNode = storage(gridMaskAttr, 'uint', 0).toReadOnly().setName('rt_gridmask');
+  const hasGrid = uniform(lightgrid ? 1 : 0);
+  const gridCellSize = uniform(lightgrid?.cellSize ?? 0);
+  // the shipped blend strength comes from the module the check measured, not a literal
+  // copied into the shader — so a change there changes the picture
+  const gridBlend = uniform(lightgrid?.blend ?? DEFAULT_BLEND);
+  /** hash mask (slotCount - 1) as f32: u32() inside the kernel, no new node type */
+  const gridSlotMask = uniform(lightgrid ? lightgrid.slotCount - 1 : 0);
+
   // ---- VOLUMETRICS (phase 1b) ------------------------------------------------
   // Owned and dispatched from HERE, not from pipeline.ts's passes[] graph:
   // the fog march needs geomTex (this file's G-buffer), the BVH and the light
@@ -538,6 +570,10 @@ export function createAdvancedRenderer(
       hasLightmap: f32,
       lightmapTex: texture_2d<f32>,
       dynLightCount: f32,
+      hasGrid: f32,
+      gridCellSize: f32,
+      gridBlend: f32,
+      gridSlotMask: f32,
       workgroupSize: vec3u,
       workgroupId: vec3u,
       localId: vec3u,
@@ -643,6 +679,24 @@ export function createAdvancedRenderer(
         baked = sampleLightmap(lightmapTex, spt.uv1.xy);
         skipBaked = 1.0;
       }
+      // A dynamic surface (uv1 = -1 sentinel) has nothing baked AT this pixel, so its static
+      // light used to come from one bounce ray. With the world grid it reads the cell it
+      // stands in instead: the same light as the wall next to it, from one hash plus 8
+      // corner evaluations — no ray, and nothing to accumulate (the value is stable frame to
+      // frame, so this path is the noise win the check measured). The cell content IS baked
+      // static light, so rule #9-1 applies to this pixel too: the direct loop must skip
+      // baked lights, and only DYNAMIC lights still add directly. The cell value is
+      // irradiance with the SOURCE surface's albedo already inside, so the composite's
+      // albedo multiply is what makes the moving object as bright as the wall beside it.
+      // A world with no lightgrid.bin keeps the one-bounce ray.
+      var cellStatic = 0.0;
+      if (hasGrid > 0.5 && spt.uv1.x < 0.0) {
+        skipBaked = 1.0;
+        // ?rtdebug=3 promises "realtime-dynamic-only", and a cell is STATIC light read from
+        // a file — so it is not added in that view, which falls back to the bounce ray
+        // exactly as before. select(), not ?: (Tint rejects the ternary).
+        cellStatic = select(1.0, 0.0, debugMode > 2.5 && debugMode < 3.5);
+      }
       textureStore(bakedTex, indexUV, vec4f(baked, 1.0));
 
       if (debugMode > 1.5 && debugMode < 2.5) {
@@ -698,7 +752,12 @@ export function createAdvancedRenderer(
         // select(), not ?: — this Tint build rejects the ternary operator
         // ("invalid character found" at the '?', probe-verified).
         let bounceLights = select(nLights > 0u, dynLightCount > 0.5, skipBaked > 0.5);
-        if (bounceCount > 0.5 && bounceLights) {
+        if (cellStatic > 0.5) {
+          // the cell reading replaces this ray for dynamic pixels: no ray, no jitter, so
+          // temporal accumulation has nothing to converge. Gate + weights exactly as the
+          // CPU reference (scripts/light-grid-check.mjs) — see gridBlendIrradiance below.
+          acc += gridBlendIrradiance(P, N, gridCellSize, gridBlend, u32(gridSlotMask));
+        } else if (bounceCount > 0.5 && bounceLights) {
           let seed = uv * vec2f(311.7, 271.9) + vec2f(frameIndex * 0.618, frameIndex * 0.271);
           let r1 = hash12(seed);
           let r2 = hash12(seed + vec2f(17.13, 3.71));
@@ -1037,6 +1096,122 @@ export function createAdvancedRenderer(
       return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
     }
 
+    // ---- LIGHT CELLS: the read path (mirrors src/world/light-grid.ts exactly) -----
+    // Every number here is the same number the CPU reference was measured against, and
+    // scripts/light-grid-check.mjs parses THIS block and asserts the mirror, because WebGPU
+    // cannot run on the machine that wrote it — the picture side is checked on the owner's
+    // hardware (docs/test-checklist-de.md, test 7). Tint rejects the ternary operator, so
+    // every choice uses select(). Constants are written as plain decimal literals so the
+    // check can read them out of the source.
+    // Slot layout (packLightGrid): SH_GRID_STRIDE_VEC4 = 10 vec4 per slot = 40 floats —
+    // key + occupied flag, then nine term vec4s (rgb + pad), CHANNEL-major inside a term.
+    // Probe limit 64 and blend strength 0.25 are the declared rules; strength comes from
+    // the uniform, so a change in the module changes the picture.
+
+    // hash the same way the packer does. u32() is the wrapping two's-complement conversion
+    // that matches "ix | 0" + ">>> 0" in JS, and u32 multiplication wraps at 32 bits like
+    // Math.imul, so the CPU packer and this lookup cannot land on different slots.
+    fn gridHash(ix: i32, iy: i32, iz: i32, hmask: u32) -> u32 {
+      var h = bitcast<u32>(ix) * 73856093u ^ bitcast<u32>(iy) * 19349663u ^ bitcast<u32>(iz) * 83492791u;
+      h = h ^ (h >> 16u);
+      h = h * 2146121005u;   // 0x7feb352d
+      h = h ^ (h >> 15u);
+      h = h * 2221713035u;   // 0x846ca68b
+      h = h ^ (h >> 16u);
+      return h & hmask;
+    }
+
+    // slot of one voxel key. -1 = empty slot (the chain ends there: a missing voxel is NOT
+    // a wrong cell), -2 = probe limit reached, the declared stop condition instead of an
+    // endless loop.
+    fn gridSlotAt(ix: i32, iy: i32, iz: i32, hmask: u32) -> i32 {
+      var slot = gridHash(ix, iy, iz, hmask);
+      for (var step: u32 = 0u; step < 64u; step = step + 1u) {
+        let base = slot * 40u;
+        if (rt_grid.value[base + 3u] == 0.0) { return -1; }
+        if (rt_grid.value[base] == f32(ix) && rt_grid.value[base + 1u] == f32(iy) &&
+            rt_grid.value[base + 2u] == f32(iz)) { return i32(slot); }
+        slot = (slot + 1u) & hmask;
+      }
+      return -2;
+    }
+
+    // cosine-lobe factor per band (Ramamoorthi): band 0 = pi, band 1 = 2pi/3, band 2 = pi/4.
+    // Without the band factor this would evaluate RADIANCE, not irradiance — the factor is
+    // what makes a cell comparable with the measured reference.
+    fn gridLobe(k: u32) -> f32 {
+      if (k == 0u) { return 3.141592653589793; }
+      if (k < 4u) { return 2.0943951023931953; }
+      return 0.7853981633974483;
+    }
+
+    // one orthonormal SH basis term at the surface normal, as an if-chain so each number
+    // is literally the same literal as shBasis() in the module.
+    fn gridBasis(k: u32, n: vec3f) -> f32 {
+      let c1 = 0.4886029218335914;
+      let c2 = 1.0925484305920792;
+      if (k == 0u) { return 0.28209479177387814; }
+      if (k == 1u) { return c1 * n.y; }
+      if (k == 2u) { return c1 * n.z; }
+      if (k == 3u) { return c1 * n.x; }
+      if (k == 4u) { return c2 * n.x * n.y; }
+      if (k == 5u) { return c2 * n.y * n.z; }
+      if (k == 6u) { return 0.31539156525252005 * (3.0 * n.z * n.z - 1.0); }
+      if (k == 7u) { return c2 * n.x * n.z; }
+      return 0.5462742152960396 * (n.x * n.x - n.y * n.y);
+    }
+
+    // irradiance for a normal out of ONE slot, channel-major (base + k*4 + channel).
+    fn gridSlotIrradiance(slot: i32, n: vec3f) -> vec3f {
+      var e = vec3f(0.0);
+      if (slot < 0) { return e; }
+      let base = bitcast<u32>(slot) * 40u + 4u;
+      for (var k = 0u; k < 9u; k = k + 1u) {
+        let w = gridLobe(k) * gridBasis(k, n);
+        e += vec3f(rt_grid.value[base + k * 4u], rt_grid.value[base + k * 4u + 1u],
+                   rt_grid.value[base + k * 4u + 2u]) * w;
+      }
+      return e;
+    }
+
+    // irradiance from the 8 corner voxels around the point, gated by the load-time mask:
+    // a corner this point cannot see never contributes — that is the rule that light cannot
+    // come through a wall. Weights are renormalised over the corners that count, so a corner
+    // inside a wall does not pull the value towards zero. Same order of operations as
+    // packedBlend() + packedBlendIrradiance(): normalise, then mix with the own cell.
+    fn gridBlendIrradiance(P: vec3f, n: vec3f, cs: f32, strength: f32, hmask: u32) -> vec3f {
+      let gx = floor(P.x / cs), gy = floor(P.y / cs), gz = floor(P.z / cs);
+      let ix = i32(gx), iy = i32(gy), iz = i32(gz);
+      let fx = gx - f32(ix), fy = gy - f32(iy), fz = gz - f32(iz);
+      let own = gridSlotAt(ix, iy, iz, hmask);
+      // no own cell → nothing gates, the CPU path uses an all-ones mask there
+      var mask = 4294967295u;
+      if (own >= 0) { mask = rt_gridmask.value[bitcast<u32>(own)]; }
+      var acc = vec3f(0.0);
+      var wsum = 0.0;
+      for (var a: u32 = 0u; a < 2u; a = a + 1u) {
+        for (var b: u32 = 0u; b < 2u; b = b + 1u) {
+          for (var c: u32 = 0u; c < 2u; c = c + 1u) {
+            let slot = gridSlotAt(ix + i32(a), iy + i32(b), iz + i32(c), hmask);
+            if (slot < 0) { continue; }   // corner not in the table (solid or unlit air)
+            // neighbourBit(a,b,c) — a bit read, not a ray cast
+            if ((mask & (1u << ((a + 1u) * 9u + (b + 1u) * 3u + (c + 1u)))) == 0u) { continue; }
+            let wx = select(fx, 1.0 - fx, a == 0u);
+            let wy = select(fy, 1.0 - fy, b == 0u);
+            let wz = select(fz, 1.0 - fz, c == 0u);
+            let w = wx * wy * wz;
+            acc += gridSlotIrradiance(slot, n) * w;
+            wsum += w;
+          }
+        }
+      }
+      var blended = vec3f(0.0);
+      if (wsum > 0.0) { blended = acc / wsum; }
+      if (strength >= 1.0 || own < 0) { return blended; }
+      let ownE = gridSlotIrradiance(own, n);
+      return ownE * (1.0 - strength) + blended * strength;
+    }
+
     // pure visibility term for debug mode: 1 = lit by this light, 0 = shadowed
     // (a face turned away from the receiver counts as shadowed — it emits
     // nothing toward it; temporal accumulation smooths the per-frame jitter)
@@ -1086,6 +1261,10 @@ export function createAdvancedRenderer(
     hasLightmap,
     lightmapTex: texture(lmTexture),
     dynLightCount,
+    hasGrid,
+    gridCellSize,
+    gridBlend,
+    gridSlotMask,
     workgroupSize,
     workgroupId,
     localId,
@@ -1107,6 +1286,9 @@ export function createAdvancedRenderer(
       // storage node: building its include emits the module-scope
       // `var<storage, read> rt_lights : rt_lightsStruct` the raw WGSL names
       lightsNode!,
+      // the two grid storage buffers, same mechanism (rt_grid / rt_gridmask)
+      gridNode,
+      gridMaskNode,
     ] as never);
     return computeFn(params).computeKernel([WORKGROUP, WORKGROUP, 1]) as KernelNode;
   };

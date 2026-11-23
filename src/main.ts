@@ -244,6 +244,7 @@ async function main(): Promise<void> {
       camera.updateMatrixWorld(true);
       advanced = createAdvancedRenderer(
         renderer, scene, camera, world.shadowMeshes, world.rtLights, world.lightmap,
+        world.lightgrid,
         spawnFeet.y,
       );
       advanced.setLogicalSize(window.innerWidth, window.innerHeight);

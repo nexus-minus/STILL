@@ -61,6 +61,23 @@
  *       difference is reported.
  *     - the CPU reading path and the GPU mirror must give the same number within f32
  *       rounding (1e-6), because the shader follows the mirror.
+ *   WGSL read path (src/render/rt.ts) — WebGPU cannot run on the machine that wrote it, so
+ *     the check compares the SHADER TEXT with the functions it claims to mirror. Tolerances,
+ *     declared before the numbers:
+ *     - every number the grid block uses must be a value the reference module has as a
+ *       literal or computes (tolerance 0 differ) — compared as VALUES, not text, because WGSL
+ *       cannot call Math.PI and must write the number that expression produces; the blend
+ *       strength must come from DEFAULT_BLEND rather than a number copied into the shader, so
+ *       changing the module changes the picture;
+ *     - the hash re-derived from the numbers in the shader source must land on the same slot
+ *       as hashCellKey for 500 random keys (tolerance 0);
+ *     - the neighbour-bit expression must equal neighbourBit() for all 27 offsets
+ *       (tolerance 0), and the slot layout the shader reads must be the layout packLightGrid
+ *       writes (tolerance 1e-6, f32 rounding);
+ *     - the probe limit and the stride in the shader must be the declared 64 and 10 vec4;
+ *     - no ternary operator in the grid block (this Tint build rejects '?').
+ *     The picture itself cannot be verified here; it is checked on the owner's hardware
+ *     (docs/test-checklist-de.md, test 7).
  *   file path (owner decision 2026-11-23: the grid is written ONCE at bake time by
  *     tools/write_lightgrid.mjs, the game only reads it — measured build cost is 18.9 s
  *     for this scene, which is a load screen, not a frame):
@@ -76,9 +93,10 @@
 import {
   buildLightGrid, buildNeighbourVisibility, dirtyCellsFor, fillCell, hashCellKey, lastSampleDistance, lastSampleOwn, packLightGrid, projectCoefficients,
   referenceIrradiance, sampleIrradiance, sampleBlendIrradiance, shIrradiance, packedSlot, packedIrradiance, packedBlend, packedBlendIrradiance,
-  DEFAULT_BLEND, SH_GRID_STRIDE_VEC4, neighbourBit, trace, toHalfBits, fromHalfBits, decodeHalfTexels, encodeLightGrid, decodeLightGrid, GRID_SCALE,
+  DEFAULT_BLEND, SH_GRID_STRIDE_VEC4, SH_TERMS, LOBE, neighbourBit, shBasis, trace, toHalfBits, fromHalfBits, decodeHalfTexels, encodeLightGrid, decodeLightGrid, GRID_SCALE,
 } from '../src/world/light-grid.ts';
 import { buildGridFile } from '../tools/write_lightgrid.mjs';
+import fs from 'node:fs';
 
 const RES = 1024;
 const TARGET = 4096; // texels per square metre = 64 texels per metre
@@ -626,6 +644,97 @@ console.log(`file path (tolerance 0 differences, base state): bytes ${byteLenOk 
 console.log(`  what the game pays at load: reading ${tool.bytes.length} bytes ${decodeMs.toFixed(1)} ms, ` +
   `versus building the same grid ${buildMs.toFixed(0)} ms — the cost moved to the bake run (${toolMs.toFixed(0)} ms there)`);
 
+// 6) WGSL mirror — the shader cannot be RUN here (no WebGPU on this machine), so the check
+//    compares the shader TEXT against the functions it claims to mirror. The picture itself
+//    is verified on the owner's hardware (docs/test-checklist-de.md, test 7).
+const rtSrc = fs.readFileSync(new URL('../src/render/rt.ts', import.meta.url), 'utf8');
+const lgSrc = fs.readFileSync(new URL('../src/world/light-grid.ts', import.meta.url), 'utf8');
+const blockStart = rtSrc.indexOf('fn gridHash');
+const block = rtSrc.slice(blockStart, rtSrc.indexOf('fn shadowFactor'));
+// Values the reference module uses, compared as VALUES (not text): every number it writes
+// (decimal or hex) plus the ones it computes. WGSL cannot call Math.PI, so the shader must
+// write the number the module's expression produces — that is exactly what this compares.
+// The declared rule numbers (probe limit, term count, slot layout, blend strength) are
+// asserted on their own lines below, so they count as allowed here too.
+const numeric = (text) => [...new Set([...text.matchAll(/(0x[0-9a-f]+|\d+(?:\.\d+)?)/g)].map((m) => Number(m[1])))];
+const moduleValues = new Set(numeric(lgSrc));
+for (const v of LOBE) moduleValues.add(v);
+for (const v of [PROBE_LIMIT, SH_TERMS, SH_GRID_STRIDE_VEC4, SH_GRID_STRIDE_VEC4 * 4, DEFAULT_BLEND]) moduleValues.add(v);
+const shaderValues = numeric(block);
+const foreign = shaderValues.filter((v) => !moduleValues.has(v));
+const ternary = (block.match(/\?/g) ?? []).length;
+// the hash re-derived from the shader's own numbers must land on the same slot as hashCellKey
+const hashBody = block.slice(block.indexOf('fn gridHash'), block.indexOf('return h & hmask'));
+const hmul = [...hashBody.matchAll(/\* (\d+)u/g)].map((m) => Number(m[1]));
+const hshift = [...hashBody.matchAll(/>> (\d+)u/g)].map((m) => Number(m[1]));
+const u32mul = (a, b) => Math.imul(a, b) >>> 0;
+const wgslHash = (ix, iy, iz, mask) => {
+  let h = (u32mul(ix, hmul[0]) ^ u32mul(iy, hmul[1]) ^ u32mul(iz, hmul[2])) >>> 0;
+  h = (h ^ (h >>> hshift[0])) >>> 0; h = u32mul(h, hmul[3]);
+  h = (h ^ (h >>> hshift[1])) >>> 0; h = u32mul(h, hmul[4]);
+  h = (h ^ (h >>> hshift[2])) >>> 0;
+  return h & mask;
+};
+let hashDiff = 0;
+for (let n = 0; n < 500; n++) {
+  const ix = ((u32mul(n + 1, 2654435761) % 400) | 0) - 200;
+  const iy = ((u32mul(n + 7, 1582357219) % 400) | 0) - 200;
+  const iz = ((u32mul(n + 13, 919353277) % 400) | 0) - 200;
+  if (wgslHash(ix, iy, iz, packed.slotCount - 1) !== hashCellKey(ix, iy, iz, packed.slotCount - 1)) hashDiff++;
+}
+// neighbour bit: the shader's expression must equal neighbourBit() for all 27 offsets
+const bitExpr = block.match(/\(\(a \+ (\d+)u\) \* (\d+)u \+ \(b \+ (\d+)u\) \* (\d+)u \+ \(c \+ (\d+)u\)\)/);
+let bitDiff = 0;
+if (bitExpr) {
+  for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) for (let c = -1; c <= 1; c++) {
+    const bit = (a + Number(bitExpr[1])) * Number(bitExpr[2]) +
+      (b + Number(bitExpr[3])) * Number(bitExpr[4]) + (c + Number(bitExpr[5]));
+    if (bit !== neighbourBit(a, b, c)) bitDiff++;
+  }
+}
+// slot layout the shader reads, read out of the source
+const stride = Number(block.match(/bitcast<u32>\(slot\) \* (\d+)u/)[1]);
+const header = Number(block.match(/slot\) \* \d+u \+ (\d+)u/)[1]);
+const termStride = Number(block.match(/k \* (\d+)u/)[1]);
+const channels = [...new Set([...block.matchAll(/base \+ k \* \d+u(?: \+ (\d+)u)?/g)].map((m) => (m[1] === undefined ? 0 : Number(m[1]))))].sort((x, y) => x - y);
+const probeLimit = Number(block.match(/step < (\d+)u/)[1]);
+const lobes = [...block.slice(block.indexOf('fn gridLobe'), block.indexOf('fn gridBasis')).matchAll(/\d+\.\d+/g)].map((m) => Number(m[0]));
+const bandEnd = Number(block.match(/k < (\d+)u/)[1]);
+// evaluate a slot through the numbers PARSED from the shader and compare with the reference
+let mirrorMax = 0;
+const mirrorBasis = new Float64Array(SH_TERMS);
+const wgslOut = new Float64Array(3);
+for (const c of checkCells) {
+  const [cx, cy, cz] = c.key.split(',').map(Number);
+  const slot = packedSlot(packed, cx, cy, cz, PROBE_LIMIT);
+  if (slot < 0) continue;
+  const n = c.kind === 'surface' ? [c.nx, c.ny, c.nz] : UP;
+  if (Math.max(...n) === 0) continue;
+  shBasis(n[0], n[1], n[2], mirrorBasis);
+  packedIrradiance(packed, slot, n, refOut);
+  const base = slot * stride + header;
+  for (let ch = 0; ch < 3; ch++) {
+    let e = 0;
+    for (let k = 0; k < SH_TERMS; k++) {
+      const lobe = k === 0 ? lobes[0] : k < bandEnd ? lobes[1] : lobes[2];
+      e += lobe * packed.data[base + k * termStride + ch] * mirrorBasis[k];
+    }
+    wgslOut[ch] = e;
+  }
+  for (let ch = 0; ch < 3; ch++) mirrorMax = Math.max(mirrorMax, Math.abs(wgslOut[ch] - refOut[ch]));
+}
+const usesModuleBlend = rtSrc.includes('DEFAULT_BLEND') && !block.includes('0.25');
+const gatesFromMask = block.includes('rt_gridmask.value[') && block.includes('select(');
+const cellBranch = rtSrc.slice(rtSrc.indexOf('var cellStatic'), rtSrc.indexOf('fn gridHash'));
+const readsGate = cellBranch.includes('gridBlendIrradiance(') && cellBranch.includes('skipBaked = 1.0');
+console.log(`WGSL mirror (shader TEXT, WebGPU cannot run on this machine): ${shaderValues.length} numbers, ` +
+  `${foreign.length} not a value the module has (tolerance 0)` +
+  (foreign.length ? ` [${foreign.join(', ')}]` : '') + `, hash ${hashDiff} of 500 keys differ, ` +
+  `bit formula ${bitDiff} of 27 offsets differ, layout ${stride} floats / header ${header} / term ${termStride} ` +
+  `+ channels ${channels.join('')}, probe limit ${probeLimit}, ternary ${ternary}, ` +
+  `blend from DEFAULT_BLEND ${usesModuleBlend}, gate reads the mask ${gatesFromMask}, ` +
+  `dynamic branch uses it + sets skipBaked ${readsGate}, slot values ${mirrorMax.toExponential(1)} (tolerance 1e-6)`);
+
 // asserts, in the order the tolerances were declared
 if (grid.cellSize < 0.25 || grid.cellSize > 4) throw new Error('cell size left its clamp');
 if (warned.length === 0) throw new Error('density warning never fired — the sparse island was not measured');
@@ -662,5 +771,17 @@ if (tool.grid.raysPerCell !== opts.raysPerCell || tool.grid.seed !== opts.seed) 
 if (slotDiff > 0) throw new Error(`reading the file back lost ${slotDiff} of the checked cells`);
 if (slotValueDiff > 0) throw new Error(`reading the file back changed ${slotValueDiff} slot values — a byte-identical file cannot do that`);
 if (viewDiff > 0) throw new Error(`decoding through a buffer view differs on ${viewDiff} entries — the decode must copy, not point at the caller's buffer`);
+if (blockStart < 0 || !bitExpr) throw new Error('no light-cell read path in src/render/rt.ts for the check to mirror');
+if (foreign.length) throw new Error(`the shader uses ${foreign.length} numbers the reference module does not have: ${foreign.join(', ')}`);
+if (hashDiff) throw new Error(`the shader's hash lands on a different slot than the packer on ${hashDiff} of 500 keys — the picture would read the wrong cell`);
+if (bitDiff) throw new Error(`the shader's neighbour bit differs from neighbourBit() on ${bitDiff} of 27 offsets`);
+if (stride !== SH_GRID_STRIDE_VEC4 * 4 || header !== 4 || termStride !== 4) throw new Error(`the shader's slot layout (${stride} floats, header ${header}, term ${termStride}) is not the packer's (${SH_GRID_STRIDE_VEC4 * 4}, 4, 4)`);
+if (channels.join(',') !== '0,1,2') throw new Error(`the shader reads channels ${channels.join(', ')} — the packer writes coefficients channel-major`);
+if (probeLimit !== PROBE_LIMIT) throw new Error(`the shader's probe limit ${probeLimit} is not the declared ${PROBE_LIMIT}`);
+if (ternary) throw new Error(`the grid block contains ${ternary} ternary operator(s) — this Tint build rejects '?'`);
+if (!usesModuleBlend) throw new Error('the shader hardcodes a blend strength instead of taking DEFAULT_BLEND from the module, so a change there would not change the picture');
+if (!gatesFromMask) throw new Error('the shader does not read the neighbour mask — a pixel would cast a ray per corner or ignore visibility');
+if (!readsGate) throw new Error('the dynamic-pixel branch does not use the cell reading, or does not apply the no-double-lighting rule there');
+if (mirrorMax > 1e-6) throw new Error(`the shader's evaluation path differs from the reference by ${mirrorMax.toExponential(1)}, above the f32 rounding tolerance 1e-6`);
 
-console.log('PASS light-grid CPU reference (cell size from geometry, density warning, SH truncation, air cells, dirty flag, GPU mirror, file path)');
+console.log('PASS light-grid CPU reference (cell size from geometry, density warning, SH truncation, air cells, dirty flag, GPU mirror, file path, WGSL mirror)');
