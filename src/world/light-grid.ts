@@ -783,6 +783,11 @@ export function buildLightGrid(tris: GridTriangle[], values: Float64Array, resol
  * cell. On an area tie the smaller slot index wins, so the answer is deterministic. When the source
  * recorded no mesh at all, the mesh part is empty and the rule falls back to the slot alone.
  */
+// Which surface the point stands on: the largest area in the cell (tolerance 0). Two ties are decided
+// by rules, not by the order Blender happened to deliver the objects in: equal area -> smaller slot
+// index, equal area AND equal slot -> alphabetically smaller mesh name (owner, 2026-11-23). Without the
+// third rule the answer depends on the import order, which is not reproducible - the testmap cell 4,2,1
+// has three surfaces of exactly 0.1500 m2, so this is not a theoretical case.
 export function ownSurface(grid: LightGrid, cellIndex: number): { mesh: string, slot: number } {
   const c = grid.cells[cellIndex];
   let best = -1, bestMesh = '', bestArea = -1;
@@ -790,7 +795,9 @@ export function ownSurface(grid: LightGrid, cellIndex: number): { mesh: string, 
     const slot = grid.triangleMaterial[ti] ?? 0;
     const mesh = grid.triangleMesh[ti] ?? '';
     const a = grid.metrics[ti].areaM2;
-    if (a > bestArea || (a === bestArea && slot < best)) { bestArea = a; best = slot; bestMesh = mesh; }
+    if (a > bestArea || (a === bestArea && (slot < best || (slot === best && mesh < bestMesh)))) {
+      bestArea = a; best = slot; bestMesh = mesh;
+    }
   }
   return { mesh: bestMesh, slot: best };
 }

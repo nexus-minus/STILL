@@ -1357,6 +1357,26 @@ if (tieCell < 0) throw new Error('6c: the two equal-area faces are not in the sa
 if (tieGrid.metrics[0].areaM2 !== tieGrid.metrics[1].areaM2) throw new Error('6c: the two areas are not exactly equal, so this is not a tie test');
 if (tieOwn.slot !== 0) throw new Error(`6c: on an area tie the smaller slot index must win, got ${tieOwn.slot}`);
 
+// Same area AND the same slot, but two different meshes — the case the testmap produced in cell 4,2,1
+// (three surfaces of exactly 0.1500 m2). Rule, declared before the numbers: the alphabetically smaller
+// mesh name wins, so the answer does not depend on the order Blender delivered the objects.
+const nameTris = [
+  slotTri([0.125, 0.3, 0, 0.25, 0.3, 0, 0.125, 0.3, 0.125], [0, 1, 3], 'slotPlain', 0, 'Tie_mesh_B'),
+  slotTri([0, 0.3, 0, 0.125, 0.3, 0, 0, 0.3, 0.125], [0, 1, 3], 'slotPlain', 0, 'Tie_mesh_A'),
+];
+const nameGrid = buildLightGrid(nameTris, values, RES, slotOpts);
+const nameCell = nameGrid.cells.findIndex((c) => c.own.length === 2);
+const nameOwn = nameCell >= 0 ? ownSurface(nameGrid, nameCell) : { mesh: '', slot: -1 };
+// the two areas must be equal for the name rule to be the one that decides, and both triangles must be
+// in the same cell, otherwise the rule is never exercised
+console.log(`equal area and equal slot, two different meshes, cell ${nameGrid.cells[nameCell]?.key} ` +
+  `(tolerance 0): mesh ${nameOwn.mesh}, must be Tie_mesh_A (smaller name); areas ` +
+  `${nameGrid.metrics[0].areaM2} and ${nameGrid.metrics[1].areaM2}`);
+if (nameCell < 0) throw new Error('6c: the two same-slot meshes are not in the same cell');
+if (nameGrid.metrics[0].areaM2 !== nameGrid.metrics[1].areaM2) throw new Error('6c: areas are not equal, so the name rule was not tested');
+if (nameOwn.slot !== 0) throw new Error(`6c: both faces are on slot 0, got ${nameOwn.slot}`);
+if (nameOwn.mesh !== 'Tie_mesh_A') throw new Error(`6c: on an area-and-slot tie the smaller mesh name must win, got ${nameOwn.mesh}`);
+
 // a mesh with only one slot keeps the strict rule (tolerance 0): it reads nothing for itself
 const soloGrid = buildLightGrid([slotTris[1]], values, RES, slotOpts);
 const soloCell = soloGrid.cells.findIndex((c) => c.own.length === 1);
