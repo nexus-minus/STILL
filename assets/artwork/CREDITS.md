@@ -6,4 +6,4 @@ game assets — nothing in the engine loads them.
 
 | artist | works |
 | ------ | ----- |
-| **Eldar** | `Entitys/Walking Baxar/`, `Entitys/MR Gumbling/`, `Entitys/The Liminal Siphonophore/` |
+| **Eldar** | `Entitys/Walking Baxar/`, `Entitys/MR Gumbling/`, `Entitys/The Liminal Siphonophore/`, `Entitys/Chlorine stalker/`, `Entitys/still life/` |

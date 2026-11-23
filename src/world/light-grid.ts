@@ -28,7 +28,7 @@ export const SH_GRID_STRIDE_VEC4 = 10;
 /** Cosine-lobe factor per band. Exported so the check can compare the shader's literals as
  *  VALUES: WGSL cannot call Math.PI, so it must write the number these expressions produce. */
 export const LOBE = [Math.PI, (2 * Math.PI) / 3, Math.PI / 4];
-const BAND = [0, 1, 1, 1, 2, 2, 2, 2, 2];
+export const BAND = [0, 1, 1, 1, 2, 2, 2, 2, 2];
 
 /** Real orthonormal SH basis at a unit direction. */
 export function shBasis(x: number, y: number, z: number, out: Float64Array): void {

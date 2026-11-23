@@ -114,7 +114,7 @@
 import {
   buildLightGrid, buildNeighbourVisibility, dirtyCellsFor, fillCell, hashCellKey, lastSampleDistance, lastSampleOwn, packLightGrid, projectCoefficients,
   referenceIrradiance, sampleIrradiance, sampleBlendIrradiance, shIrradiance, packedSlot, packedIrradiance, packedBlend, packedBlendIrradiance,
-  DEFAULT_BLEND, SH_GRID_STRIDE_VEC4, SH_TERMS, LOBE, neighbourBit, shBasis, lightmapAt, trace, toHalfBits, fromHalfBits, decodeHalfTexels, encodeLightGrid, decodeLightGrid, GRID_SCALE,
+  DEFAULT_BLEND, SH_GRID_STRIDE_VEC4, SH_TERMS, LOBE, BAND, neighbourBit, shBasis, lightmapAt, trace, toHalfBits, fromHalfBits, decodeHalfTexels, encodeLightGrid, decodeLightGrid, GRID_SCALE,
 } from '../src/world/light-grid.ts';
 import { buildGridFile, lightgridManifest } from '../tools/write_lightgrid.mjs';
 import fs from 'node:fs';
@@ -797,11 +797,32 @@ console.log(`WGSL mirror (shader TEXT, compared with the module; execution is th
 //    asserts nothing, so the pass line cannot silently claim execution.
 //    What runs is the text from src/render/rt.ts, not a reimplementation. Only the storage access
 //    is written the way a standalone module needs it; which form the parser accepts is reported.
-const EXEC_TOL = 1e-6;
+//
+// Float tolerance for this section, declared before the numbers (owner decision 2026-11-23, option 1:
+// a bound derived from the number of roundings, not a chosen magnitude). Rounding happens per term,
+// so the fair size of the error is the ulp of the LARGEST TERM in the sum, not of the result — a value
+// that cancels (terms around 0.5, result 0.07) cannot be judged by the ulp of the result, so the result
+// is reported but never asserted. Bounds, from the operations the shader actually performs:
+//   - single slot: 9 products each rounded once + 9 rounded additions   -> at most 9 ulp of the term
+//   - blend: each corner value is itself a 9-term sum, then 8 weighted products are summed
+//     -> at most 40 ulp of the term
+//   - weight sum: 8 products of 3 factors where a factor can carry one rounding -> at most 18 ulp
+// Floor for values near zero: 1e-9. The reference mirrors the f32 division and floor, so the rounding of
+// the cell and of the fractions is not counted as a difference.
+const EXEC_FLOOR = 1e-9;
+const ULP_SINGLE = 9, ULP_BLEND = 40, ULP_WSUM = 18;
+const SMALLEST_F32 = 1.4e-45;                     // smallest positive f32 subnormal
+const f32Ulp = (v) => {
+  const a = Math.abs(v);
+  if (a < SMALLEST_F32) return SMALLEST_F32;
+  return Math.pow(2, Math.floor(Math.log2(a)) - 23);
+};
+const execTol = (term, bound) => Math.max(bound * f32Ulp(term), EXEC_FLOOR);
 const EXEC_TESTS = 64;
 const chromePath = process.env.CHROME ??
   (fs.globSync?.(`${process.env.HOME}/Library/Caches/ms-playwright/chromium-*/chrome-mac-*/**/MacOS/Google Chrome for Testing`).at(-1) ?? '/usr/bin/chromium');
 let execLine = `WGSL executed (device): NOT VERIFIED HERE — no browser found (${chromePath})`;
+let execNumbers = '';   // so a failing assertion still prints the numbers it was measured against
 if (fs.existsSync(chromePath)) {
   let browser = null, server = null;
   try {
@@ -1026,8 +1047,11 @@ struct MaskTable { value: array<u32> }
       if (exec.deviceErrors?.length) {
         throw new Error(`executed WGSL: the device refused something, so these numbers are not a shader result | ${exec.deviceErrors[0].slice(0, 240)}`);
       }
-      let intDiff = 0, floatMax = 0, singleMax = 0, blendMax = 0, gatedTests = 0, emptySlots = 0, maskDiff = 0,
-        countedDiff = 0, wsumMax = 0, slotDiff = 0, firstIntDiff = null, firstFloatDiff = null, firstMaskDiff = null,
+      let intDiff = 0, floatOver = 0, gatedTests = 0, emptySlots = 0, maskDiff = 0,
+        countedDiff = 0, slotDiff = 0, singleMaxUlp = 0, blendMaxUlp = 0, wsumMaxUlp = 0,
+        singleTermUlpMax = 0, blendTermUlpMax = 0, wsumTermUlpMax = 0,
+        singleAbsMax = 0, blendAbsMax = 0, wsumAbsMax = 0,
+        firstIntDiff = null, firstFloatDiff = null, firstMaskDiff = null,
         firstCountedDiff = null, firstWsumDiff = null, firstSlotDiff = null;
       const sample = { ownSlot: -1, slots: [], weights: [], missing: 0, gated: 0 };
       for (let i = 0; i < rows.length; i++) {
@@ -1035,6 +1059,24 @@ struct MaskTable { value: array<u32> }
         const got = exec.out.slice(i * 27, i * 27 + 27);
         const asF32 = (w) => new Float32Array(new Uint32Array([w]).buffer)[0];
         const asI32 = (w) => new Int32Array(new Uint32Array([w]).buffer)[0];
+        // Reported only, not asserted: rounding happens per term, so the natural size of a
+        // rounding error is the ulp of the LARGEST term in the sum, not the ulp of the result.
+        // Where terms cancel (a result of 0.07 from terms around 0.5), measuring at the result
+        // magnifies the same absolute error. Both numbers are printed so the difference shows.
+        const basisBuf = new Float64Array(SH_TERMS);
+        const largestTerm = (slot, n) => {
+          if (slot < 0) return 0;
+          shBasis(n[0], n[1], n[2], basisBuf);
+          const base = slot * SH_GRID_STRIDE_VEC4 * 4 + 4;
+          let m = 0;
+          for (let k = 0; k < SH_TERMS; k++) {
+            for (let c = 0; c < 3; c++) {
+              const t = Math.abs(LOBE[BAND[k]] * table.data[base + k * 4 + c] * basisBuf[k]);
+              if (t > m) m = t;
+            }
+          }
+          return m;
+        };
         const hRef = hashCellKey(r.key[0], r.key[1], r.key[2], table.slotCount - 1) >>> 0;
         const sRef = packedSlot(table, r.key[0], r.key[1], r.key[2], PROBE_LIMIT);
         if (got[0] !== hRef) { intDiff++; if (!firstIntDiff) firstIntDiff = `row ${i} key ${r.key.join(',')} gpu ${got[0]} ref ${hRef}`; }
@@ -1055,16 +1097,32 @@ struct MaskTable { value: array<u32> }
         if (sRef >= 0) packedIrradiance(table, sRef, r.n, ref);
         for (let ch = 0; ch < 3; ch++) {
           const d = Math.abs(asF32(got[2 + ch]) - ref[ch]);
-          if (d > singleMax) singleMax = d;
-          floatMax = Math.max(floatMax, d);
+          const ulp = d / f32Ulp(ref[ch]);
+          if (ulp > singleMaxUlp) singleMaxUlp = ulp;
+          if (d > singleAbsMax) singleAbsMax = d;
+          const st = largestTerm(sRef, r.n);
+          if (st > 0 && d / f32Ulp(st) > singleTermUlpMax) singleTermUlpMax = d / f32Ulp(st);
+          if (d > execTol(st, ULP_SINGLE)) {
+            floatOver++;
+            if (!firstFloatDiff) firstFloatDiff = `row ${i} key ${r.key.join(',')} single channel ${ch}: gpu ${asF32(got[2 + ch])} ref ${ref[ch]}, error ${d.toExponential(3)} = ${ulp.toFixed(1)} ulp`;
+          }
         }
         packedBlend(table, r.p[0], r.p[1], r.p[2], execCellSize, sample, PROBE_LIMIT);
         packedBlendIrradiance(table, sample, r.n, ref, DEFAULT_BLEND);
+        let blendTerm = 0;
+        for (let j = 0; j < sample.slots.length; j++) {
+          const t = largestTerm(sample.slots[j], r.n) * sample.weights[j];
+          if (t > blendTerm) blendTerm = t;
+        }
         for (let ch = 0; ch < 3; ch++) {
           const d = Math.abs(asF32(got[5 + ch]) - ref[ch]);
-          if (d > blendMax) {
-            blendMax = d;
-            firstFloatDiff = `row ${i} key ${r.key.join(',')} p [${r.p.join(',')}] channel ${ch}: gpu ${asF32(got[5 + ch])} ref ${ref[ch]} | ` +
+          const ulp = d / f32Ulp(ref[ch]);
+          if (ulp > blendMaxUlp) blendMaxUlp = ulp;
+          if (d > blendAbsMax) blendAbsMax = d;
+          if (blendTerm > 0 && d / f32Ulp(blendTerm) > blendTermUlpMax) blendTermUlpMax = d / f32Ulp(blendTerm);
+          if (d > execTol(blendTerm, ULP_BLEND)) {
+            floatOver++;
+            if (!firstFloatDiff) firstFloatDiff = `row ${i} key ${r.key.join(',')} p [${r.p.join(',')}] blend channel ${ch}: gpu ${asF32(got[5 + ch])} ref ${ref[ch]}, error ${d.toExponential(3)} = ${ulp.toFixed(1)} ulp | ` +
               `own ${sample.ownSlot} counted corners ${sample.slots.length} gated ${sample.gated} missing ${sample.missing} ` +
               `weights [${sample.weights.map((w) => w.toFixed(4)).join(',')}]`;
           }
@@ -1072,7 +1130,7 @@ struct MaskTable { value: array<u32> }
         // Which corners the shader counted, compared with the reference's count and raw weight
         // sum (the reference's own functions, not a copy of the shader). This is what tells a
         // gate difference apart from a rounding difference.
-        let cRef = 0, rawRef = 0;
+        let cRef = 0, rawRef = 0, maxW = 0;
         const cornerDetail = [];
         const refSlots = [];
         for (let a = 0; a < 2; a++) for (let b = 0; b < 2; b++) for (let c = 0; c < 2; c++) {
@@ -1084,43 +1142,53 @@ struct MaskTable { value: array<u32> }
           const w = (a === 0 ? 1 - fx : fx) * (b === 0 ? 1 - fy : fy) * (c === 0 ? 1 - fz : fz);
           if ((mRef & (1 << neighbourBit(a, b, c))) === 0) { cornerDetail.push(`${a}${b}${c}:slot ${s} gated`); continue; }
           cornerDetail.push(`${a}${b}${c}:slot ${s} w ${w.toFixed(4)}`);
+          if (w > maxW) maxW = w;
           rawRef += w;
           cRef++;
         }
         if (got[9] !== cRef) { countedDiff++; if (!firstCountedDiff) firstCountedDiff = `row ${i} key ${r.key.join(',')}: gpu counts ${got[9]}, reference ${cRef}`; }
-        if (Math.abs(asF32(got[10]) - rawRef) > wsumMax) {
-          wsumMax = Math.abs(asF32(got[10]) - rawRef);
-          firstWsumDiff = `row ${i} key ${r.key.join(',')} p [${r.p.join(',')}] cell [${gx},${gy},${gz}] fractions [${fx.toFixed(4)},${fy.toFixed(4)},${fz.toFixed(4)}]: ` +
+        const wsumDiff = Math.abs(asF32(got[10]) - rawRef);
+        const wsumUlp = wsumDiff / f32Ulp(rawRef);
+        if (wsumUlp > wsumMaxUlp) wsumMaxUlp = wsumUlp;
+        if (wsumDiff > wsumAbsMax) wsumAbsMax = wsumDiff;
+        if (maxW > 0 && wsumDiff / f32Ulp(maxW) > wsumTermUlpMax) wsumTermUlpMax = wsumDiff / f32Ulp(maxW);
+        if (wsumDiff > execTol(maxW, ULP_WSUM)) {
+          floatOver++;
+          if (!firstWsumDiff) firstWsumDiff = `row ${i} key ${r.key.join(',')} p [${r.p.join(',')}] cell [${gx},${gy},${gz}] fractions [${fx.toFixed(4)},${fy.toFixed(4)},${fz.toFixed(4)}]: ` +
+            `error ${wsumDiff.toExponential(3)} = ${wsumUlp.toFixed(1)} ulp | ` +
             `gpu counts ${got[9]} weight sum ${asF32(got[10]).toFixed(6)}, reference counts ${cRef} sum ${rawRef.toFixed(6)} | ` +
             `reference: ${cornerDetail.join(' | ')} | gpu: ${[...Array(8)].map((_, j) => `${(j >> 2) & 1}${(j >> 1) & 1}${j & 1}:slot ${asI32(got[11 + j])} weight ${asF32(got[19 + j]).toFixed(6)}`).join(' | ')}`;
         }
         if (sample.gated > 0) gatedTests++;
         if (sRef < 0) emptySlots++;
       }
-      // the declared tolerances, asserted here so the numbers cannot soften them
+      // the numbers, then the declared tolerances asserted against them (the order cannot be
+      // reversed: the tolerance was written before the run)
+      execNumbers = `integer ${intDiff} differ (tolerance 0), mask ${maskDiff} differ (tolerance 0), ` +
+        `corner slots ${slotDiff} differ (tolerance 0), counted corners ${countedDiff} differ (tolerance 0), ` +
+        `float values exceeding the declared tolerance (ulp at the largest term: single ${ULP_SINGLE}, ` +
+        `blend ${ULP_BLEND}, weight sum ${ULP_WSUM}, floor ${EXEC_FLOOR}): ${floatOver} | ` +
+        `worst ulp at the reference value: single ${singleMaxUlp.toFixed(1)} blend ${blendMaxUlp.toFixed(1)} weight sum ${wsumMaxUlp.toFixed(1)} ` +
+        `(reported only, never asserted — a cancelling sum has a meaningless ulp at the result); ` +
+        `same errors measured at the largest term, where the rounding happens: single ${singleTermUlpMax.toFixed(1)} blend ${blendTermUlpMax.toFixed(1)} weight sum ${wsumTermUlpMax.toFixed(1)}, ` +
+        `absolute error: single ${singleAbsMax.toExponential(2)} blend ${blendAbsMax.toExponential(2)} weight sum ${wsumAbsMax.toExponential(2)}, ` +
+        `${emptySlots} lookups land on an empty slot (the negative-key path), ` +
+        `${gatedTests} tests exercise the neighbour gate`;
       if (intDiff > 0) throw new Error(`executed WGSL differs from the reference on integers: ${intDiff} | first: ${firstIntDiff}`);
       if (maskDiff > 0) throw new Error(`executed WGSL reads a different neighbour mask than the reference: ${maskDiff} | first: ${firstMaskDiff}`);
       if (countedDiff > 0) throw new Error(`executed WGSL counts a different number of corners than the reference: ${countedDiff} | first: ${firstCountedDiff}`);
       if (slotDiff > 0) throw new Error(`executed WGSL finds a different corner slot than the reference: ${slotDiff} | first: ${firstSlotDiff}`);
-      if (wsumMax > EXEC_TOL) throw new Error(`executed WGSL weight sum differs from the reference by ${wsumMax.toExponential(3)}, above ${EXEC_TOL} | ${firstWsumDiff}`);
-      if (floatMax > EXEC_TOL) {
-        throw new Error(`executed WGSL exceeds the f32 tolerance: ${floatMax.toExponential(3)} > ${EXEC_TOL} ` +
-          `(single slot ${singleMax.toExponential(3)}, blend ${blendMax.toExponential(3)}) | first: ${firstFloatDiff}`);
+      if (floatOver > 0) {
+        throw new Error(`executed WGSL exceeds the declared f32 tolerance (ulp at the largest term: single ${ULP_SINGLE}, blend ${ULP_BLEND}, weight sum ${ULP_WSUM}, floor ${EXEC_FLOOR}): ${floatOver} values | first: ${firstFloatDiff || firstWsumDiff}`);
       }
-      execLine = `WGSL executed on a real device (${exec.usedForm}): ` +
-        `${rows.length} tests, integer ${intDiff} differ (tolerance 0), mask ${maskDiff} differ (tolerance 0), ` +
-        `corner slots ${slotDiff} differ (tolerance 0), counted corners ${countedDiff} differ (tolerance 0), ` +
-        `weight sum ${wsumMax.toExponential(1)}, ` +
-        `float single ${singleMax.toExponential(1)} blend ${blendMax.toExponential(1)} (tolerance ${EXEC_TOL}), ` +
-        `${emptySlots} lookups land on an empty slot (the negative-key path), ` +
-        `${gatedTests} tests exercise the neighbour gate`;
+      execLine = `WGSL executed on a real device (${exec.usedForm}): ${rows.length} tests, ${execNumbers}`;
     }
     await browser.close();
     server.close();
   } catch (e) {
     // an assertion failure must not be turned into a soft "not verified" line
     const assertion = String(e).startsWith('executed WGSL');
-    if (!assertion) execLine = `WGSL executed (device): NOT VERIFIED HERE — ${String(e)}`;
+    if (!assertion) execLine = `WGSL executed (device): NOT VERIFIED HERE — ${String(e)}${execNumbers ? ` | ${execNumbers}` : ''}`;
     if (browser) await browser.close();
     if (server) server.close();
     if (assertion) throw e;
