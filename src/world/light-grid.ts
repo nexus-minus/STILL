@@ -32,7 +32,13 @@ export const BAND = [0, 1, 1, 1, 2, 2, 2, 2, 2];
 
 /** Real orthonormal SH basis at a unit direction. */
 export function shBasis(x: number, y: number, z: number, out: Float64Array): void {
-  const c1 = 0.4886029218335914;
+  // c1 is sqrt(3/(4pi)) = 0.4886025119029199. The literal used to be 0.4886029218335914, which is
+  // 1.7 ppm too large, so the basis was not exactly orthonormal (norm^2 of terms 1-3 was
+  // 1.0000016780). Nothing visible on screen, but the check asserts the closed form, so the
+  // literal is now the closed form. src/render/rt.ts carries the same number, and the executed
+  // check compares shader literals against this module with tolerance 0 - both sides must move
+  // together. c2 is sqrt(15/(4pi)) and was already exact.
+  const c1 = 0.4886025119029199;
   const c2 = 1.0925484305920792;
   out[0] = 0.28209479177387814;
   out[1] = c1 * y;
@@ -43,6 +49,36 @@ export function shBasis(x: number, y: number, z: number, out: Float64Array): voi
   out[6] = 0.31539156525252005 * (3 * z * z - 1);
   out[7] = c2 * x * z;
   out[8] = 0.5462742152960396 * (x * x - y * y);
+}
+
+/** The same basis at an ARBITRARY direction, normalised first. A zero vector is not a
+ *  direction, so it throws instead of quietly producing a zero basis. This is the direction
+ *  form of shBasis: it takes a ray direction, not three components, so a caller that has a
+ *  sampled direction does not have to unpack it. */
+export function shBasisAtDirection(direction: number[], out: Float64Array): void {
+  const length = Math.hypot(direction[0], direction[1], direction[2]);
+  if (!(length > 0)) throw new RangeError('SH direction must be non-zero');
+  shBasis(direction[0] / length, direction[1] / length, direction[2] / length, out);
+}
+
+/**
+ * Value of the SH series in one direction, WITHOUT the cosine lobe: this is the directional
+ *  field the coefficients describe (the light arriving FROM that direction), not the
+ *  irradiance a surface receives. shIrradiance is the same sum with the LOBE factors.
+ *  Kept as its own function on purpose, so the two quantities cannot be confused:
+ *  a constant field comes out of here as itself, and through shIrradiance as pi times itself.
+ *  No clamping — a truncated series can go slightly negative, and clamping would hide that.
+ *  Coefficients are read in the layout projectCoefficients writes (channel-major).
+ */
+export function shValueAtDirection(coefs: Float64Array, direction: number[], out: Float64Array): void {
+  if (coefs.length !== SH_TERMS * 3) throw new Error(`SH coefficient buffer must contain ${SH_TERMS * 3} values`);
+  const basis = new Float64Array(SH_TERMS);
+  shBasisAtDirection(direction, basis);
+  for (let c = 0; c < 3; c++) {
+    let e = 0;
+    for (let i = 0; i < SH_TERMS; i++) e += coefs[c * SH_TERMS + i] * basis[i];
+    out[c] = e;
+  }
 }
 
 /** Irradiance for a surface normal from stored coefficients. */

@@ -1151,7 +1151,7 @@ export function createAdvancedRenderer(
     // one orthonormal SH basis term at the surface normal, as an if-chain so each number
     // is literally the same literal as shBasis() in the module.
     fn gridBasis(k: u32, n: vec3f) -> f32 {
-      let c1 = 0.4886029218335914;
+      let c1 = 0.4886025119029199;
       let c2 = 1.0925484305920792;
       if (k == 0u) { return 0.28209479177387814; }
       if (k == 1u) { return c1 * n.y; }
@@ -1214,8 +1214,8 @@ export function createAdvancedRenderer(
             // neighbourBit(a,b,c) — a bit read, not a ray cast
             if ((mask & (1u << ((a + 1u) * 9u + (b + 1u) * 3u + (c + 1u)))) == 0u) { continue; }
             // Corner 0 is the lower corner, so its weight is 1 - fraction (the fraction is the
-            // distance from corner 0). This is written as an if-chain on purpose: `select(e, f,
-            // cond)` is specified to return e when cond is true, but this Dawn build returns f
+            // distance from corner 0). This is written as an if-chain on purpose: 'select(e, f,
+            // cond)' is specified to return e when cond is true, but this Dawn build returns f
             // (measured by the executed check), which would mirror the weights inside every
             // cell. An if-chain is unambiguous on both builds.
             var wx = fx;
